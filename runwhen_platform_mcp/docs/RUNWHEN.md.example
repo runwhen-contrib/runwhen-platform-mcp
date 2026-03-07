@@ -1,0 +1,108 @@
+# RUNWHEN.md — Online Store Platform Workspace Context
+
+## Infrastructure Overview
+
+- **Cluster**: GKE cluster running the Online Store platform
+- **Cloud Provider**: GCP
+- **Key Namespaces**:
+  - `store-backend` — API server, order service, payment service
+  - `store-frontend` — Web UI, CDN origin
+  - `data` — PostgreSQL, Redis, Elasticsearch
+
+## Architecture & Components
+
+### Backend Services
+
+| Component | Type | Namespace | Notes |
+|-----------|------|-----------|-------|
+| `api-server` | Deployment | `store-backend` | Main REST API, 3 replicas |
+| `order-service` | Deployment | `store-backend` | Processes orders, talks to payment |
+| `payment-service` | Deployment | `store-backend` | Stripe integration, PCI-scoped |
+| `worker` | Deployment | `store-backend` | Celery workers for async tasks |
+| `beat` | Deployment | `store-backend` | Celery Beat scheduler |
+
+### Data Layer
+
+| Component | Type | Namespace | Notes |
+|-----------|------|-----------|-------|
+| PostgreSQL | StatefulSet | `data` | Managed by CrunchyData PGO, stores all app data |
+| Redis Sentinel | StatefulSet | `data` | Session cache + Celery broker |
+| Elasticsearch | StatefulSet | `data` | Product search index |
+
+## Database Access Rules
+
+- **Read queries MUST target replica pods** — use label selector
+  `postgres-operator.crunchydata.com/role=replica` to find replicas
+- **Connection method**: `kubectl exec` into the replica pod's `database` container,
+  then `psql -U postgres -d <dbname>`
+- **Never run write queries** from monitoring or health-check tasks
+- **Available databases**:
+  - `storedb` — orders, products, users, payments
+  - `analytics` — event tracking, metrics aggregation
+
+### Example: Querying the store database via replica
+
+```bash
+REPLICA_POD=$(kubectl get pods -n "$NAMESPACE" \
+  -l postgres-operator.crunchydata.com/role=replica \
+  -o jsonpath='{.items[0].metadata.name}' \
+  --context="$CONTEXT")
+
+kubectl exec -n "$NAMESPACE" "$REPLICA_POD" -c database \
+  --context="$CONTEXT" -- \
+  psql -U postgres -d storedb -t -A -c "SELECT count(*) FROM orders WHERE status='pending'"
+```
+
+## Naming Conventions
+
+- **Pod labels**: `app.kubernetes.io/name=<component>` (standard Kubernetes labels)
+- **PGO labels**: `postgres-operator.crunchydata.com/role=master|replica`
+- **Service names**: `<component>-primary` for DB write endpoint, `<component>-replicas` for read
+
+## Common Environment Variables
+
+| Variable | Description | Example | Secret? |
+|----------|-------------|---------|---------|
+| `CONTEXT` | Kubernetes context for the cluster | `gke_my-project_us-central1_prod` | No |
+| `NAMESPACE` | Target namespace | `store-backend` | No |
+| `kubeconfig` | Path to kubeconfig file (injected by runner) | — | Yes |
+| `DATABASE_NAME` | Target database | `storedb` | No |
+| `ORDER_AGE_THRESHOLD` | Minutes before a pending order is considered stuck | `30` | No |
+
+## Task Authoring Rules
+
+- Always use `--context=$CONTEXT` with every `kubectl` command
+- Always set `KUBECONFIG` from the secret: `export KUBECONFIG=$kubeconfig`
+- Use `--request-timeout=30s` on kubectl calls to avoid runner timeouts
+- For database queries, always target the **replica** pod, never the primary
+- Use `psql -U postgres` (superuser) for connections — the application user
+  may not have local socket auth configured on replicas
+- Include `set -euo pipefail` at the top of bash scripts
+- Print diagnostic info to stdout (report) and structured issues to FD 3
+- Issue severity guide:
+  - **1 (critical)**: Service down, data loss risk, payment failures
+  - **2 (high)**: Degraded performance, stuck orders, replication lag
+  - **3 (medium)**: Warning thresholds crossed, non-urgent attention needed
+  - **4 (low)**: Informational, optimization opportunities
+
+## SLX Conventions
+
+- **Naming**: `<component>-<check-type>` (e.g. `orders-stuck-check`,
+  `postgres-replication-lag`, `redis-connection-health`)
+- **Access tag**: Use `read-only` for all monitoring/health-check tasks
+- **Data tag**: Use `logs-bulk` for tasks that collect command output and logs
+- **SLI schedule**: Light health checks every 5 minutes; heavy DB queries every hour
+  (use `cron_schedule: "0 * * * *"`)
+
+## Known Gotchas
+
+- The worker system does NOT use Kubernetes Jobs — it uses Celery tasks tracked
+  in PostgreSQL. Do not look for `kind: Job` resources.
+- Redis Sentinel is the Celery broker — connection issues there will cause
+  background tasks to appear stuck even if workers are healthy.
+- CrunchyData PGO manages PostgreSQL — do not manually scale or modify the
+  StatefulSets; use the `PostgresCluster` CRD instead.
+- Elasticsearch pods may take 3-5 minutes to become ready after restarts due
+  to shard rebalancing.
+- The `payment-service` namespace has a stricter NetworkPolicy — health checks
+  can only reach it from pods in `store-backend`.

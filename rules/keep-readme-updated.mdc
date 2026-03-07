@@ -1,0 +1,18 @@
+---
+description: Keep README.md and AGENTS.md tool tables in sync with server.py when MCP tools are added, removed, or renamed
+alwaysApply: false
+globs:
+  - "mcp-server/server.py"
+  - "README.md"
+  - "AGENTS.md"
+---
+
+keep-readme-updated:
+
+- When adding, removing, or renaming an `@mcp.tool()` function in `mcp-server/server.py`, update both tool tables:
+  1. The "Available MCP Tools" section in the root `README.md`
+  2. The "MCP Tools" section in `AGENTS.md`
+- Each tool should have one row with its function name and a short description derived from the first line of its docstring.
+- Tools are grouped into "Workspace Intelligence" (read-only queries) and "Task Authoring / Tool Builder" (script lifecycle).
+- If a new tool doesn't fit either group, add a new section in both files.
+- Keep the "How It Works" workflow diagram in `README.md` current if the workflow changes.

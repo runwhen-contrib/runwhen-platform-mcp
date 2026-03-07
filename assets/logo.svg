@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <rect width="128" height="128" rx="24" fill="#1a1a2e"/>
+  <path d="M32 40h16l12 24-12 24H32l12-24L32 40z" fill="#00d4aa"/>
+  <path d="M64 40h16l12 24-12 24H64l12-24L64 40z" fill="#00d4aa" opacity="0.7"/>
+  <circle cx="100" cy="64" r="8" fill="#00d4aa" opacity="0.4"/>
+  <text x="64" y="108" text-anchor="middle" font-family="system-ui,sans-serif" font-size="14" font-weight="700" fill="#ffffff">RunWhen</text>
+</svg>

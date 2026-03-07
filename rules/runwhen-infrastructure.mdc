@@ -1,0 +1,18 @@
+---
+description: Infrastructure conventions for scripts targeting Kubernetes and databases via RunWhen runners
+alwaysApply: false
+globs:
+  - "**/*.sh"
+  - "**/*.py"
+  - "**/RUNWHEN.md"
+---
+
+runwhen-infrastructure:
+
+- Always use `--context=$CONTEXT` with every `kubectl` command.
+- Set `KUBECONFIG` from the runner-injected secret: `export KUBECONFIG=$kubeconfig`.
+- Use `--request-timeout=30s` on kubectl calls to avoid runner timeouts.
+- For database queries, target replica pods unless the RUNWHEN.md says otherwise.
+- Use `set -euo pipefail` at the top of bash scripts.
+- Print diagnostic info to stdout for the report; write structured issues to FD 3.
+- Issue severity: 1=critical (service down), 2=high (degraded), 3=medium (warning), 4=low (informational).

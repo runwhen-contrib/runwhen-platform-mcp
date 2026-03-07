@@ -1,0 +1,16 @@
+---
+description: Rules for authoring RunWhen task scripts that conform to the platform contract
+alwaysApply: true
+---
+
+runwhen-task-contract:
+
+- Before writing any RunWhen task or script, call `get_workspace_context` to load the project's RUNWHEN.md rules.
+- Python tasks must define a top-level `main()` that returns `List[Dict]` with keys: `issue title`, `issue description`, `issue severity` (1-4), `issue next steps`.
+- Python SLIs must define `main()` returning a float between 0 and 1.
+- Bash tasks must define `main()` and write issue JSON to file descriptor 3 (`>&3`).
+- Bash SLIs must define `main()` and write a float to file descriptor 3.
+- Never call `main()` directly or use `if __name__ == "__main__"` — the runner invokes it.
+- Secret vars are injected as env vars pointing to file paths (e.g. `kubeconfig` is a path, set `KUBECONFIG=$kubeconfig`).
+- Use `validate_script` before `run_script` to catch contract violations early.
+- When committing with `commit_slx`, always set the `access` tag (`read-write` or `read-only`) and `data` tag (`logs-bulk`, `config`, or `logs-stacktrace`).

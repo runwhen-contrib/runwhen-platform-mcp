@@ -1,0 +1,23 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.egg
+
+# OS and editor
+.DS_Store
+*.swp
+*.swo
+
+# Logs and temp
+*.log
+tmp/
+temp/

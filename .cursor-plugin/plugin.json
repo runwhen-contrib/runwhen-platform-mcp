@@ -1,0 +1,22 @@
+{
+  "name": "runwhen-platform",
+  "displayName": "RunWhen Platform",
+  "version": "0.1.0",
+  "description": "Infrastructure automation for RunWhen — monitor, troubleshoot, and automate with AI agents. Includes MCP server, task authoring rules, and SRE skills.",
+  "author": {
+    "name": "RunWhen",
+    "email": "support@runwhen.com"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "runwhen",
+    "infrastructure",
+    "sre",
+    "kubernetes",
+    "automation",
+    "mcp",
+    "health-checks",
+    "incident-response"
+  ],
+  "logo": "assets/logo.svg"
+}

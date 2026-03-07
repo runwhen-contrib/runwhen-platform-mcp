@@ -1,0 +1,30 @@
+name: Publish PyPI Package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'runwhen_platform_mcp/**'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - '.github/workflows/pypi.yaml'
+  workflow_dispatch:
+
+jobs:
+  publish-pypi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Publish to PyPI
+        uses: runwhen-contrib/github-actions/publish-pypi@main
+        with:
+          pip_package_name: runwhen-platform-mcp
+          pypi_token: ${{ secrets.PYPI_TOKEN }}
+          version_file: VERSION
+          slack_channel: "#codecollections"
+          slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}

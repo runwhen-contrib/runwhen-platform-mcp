@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "runwhen": {
+      "command": "runwhen-mcp",
+      "env": {
+        "RW_API_URL": "${RW_API_URL}",
+        "RUNWHEN_TOKEN": "${RUNWHEN_TOKEN}",
+        "DEFAULT_WORKSPACE": "${DEFAULT_WORKSPACE}"
+      }
+    }
+  }
+}

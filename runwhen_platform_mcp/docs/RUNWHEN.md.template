@@ -1,0 +1,88 @@
+# RUNWHEN.md — Workspace Context for Task Authoring
+
+<!--
+This template defines the structure of a RUNWHEN.md file. Place a copy in your
+project root — the MCP server auto-discovers it by walking up from the current
+working directory (like .editorconfig or CLAUDE.md).
+
+Agents call `get_workspace_context` before writing scripts and use this file
+to understand the rules, relationships, and conventions of the target
+infrastructure.
+
+Delete the HTML comments once you've filled in each section.
+-->
+
+## Infrastructure Overview
+
+<!-- High-level description of the infrastructure this workspace monitors.
+     List clusters, cloud accounts, key namespaces, and their purposes. -->
+
+- **Cluster**: _e.g. `gke_my-project_us-central1_prod-cluster`_
+- **Cloud Provider**: _e.g. GCP / AWS / Azure_
+- **Key Namespaces**: _e.g. `backend-services`, `frontend`, `data-pipeline`_
+
+## Architecture & Components
+
+<!-- Describe the major components, their relationships, and how they're deployed.
+     Include diagrams if helpful (Mermaid syntax works). -->
+
+| Component | Type | Namespace | Notes |
+|-----------|------|-----------|-------|
+| _e.g. api-server_ | _Deployment_ | _backend_ | _Main API, 3 replicas_ |
+| _e.g. postgres_ | _StatefulSet_ | _database_ | _Managed by CrunchyData PGO_ |
+
+## Database Access Rules
+
+<!-- Specify which databases exist, how to connect, and any constraints.
+     This is critical for scripts that run queries. -->
+
+- **Read queries** should target: _e.g. replica pods with label `postgres-operator.crunchydata.com/role=replica`_
+- **Connection method**: _e.g. `kubectl exec` into the pod, use `psql -U postgres -d <dbname>`_
+- **Write operations**: _e.g. Never run write queries from monitoring tasks_
+- **Available databases**: _e.g. `appdb`, `usearch`, `analytics`_
+
+## Naming Conventions
+
+<!-- Describe how resources are named so scripts can discover them reliably. -->
+
+- **Pod labels**: _e.g. `app.kubernetes.io/name=<component>`_
+- **Service names**: _e.g. `<component>-svc` in each namespace_
+- **ConfigMaps / Secrets**: _e.g. `<component>-config`, `<component>-credentials`_
+
+## Common Environment Variables
+
+<!-- List the env vars that tasks in this workspace typically need.
+     These map to workspace secrets or user-provided values. -->
+
+| Variable | Description | Example | Secret? |
+|----------|-------------|---------|---------|
+| `CONTEXT` | Kubernetes context | `gke_my-project_us-central1_prod` | No |
+| `NAMESPACE` | Target namespace | `backend-services` | No |
+| `kubeconfig` | Path to kubeconfig file | _(injected by runner)_ | Yes |
+
+## Task Authoring Rules
+
+<!-- Specific rules that ALL scripts in this workspace must follow.
+     These override general defaults. -->
+
+- _e.g. Always use `--context=$CONTEXT` with kubectl commands_
+- _e.g. Never use `kubectl delete` in read-only tasks_
+- _e.g. Include resource limits in issue descriptions_
+- _e.g. Timeouts: set `--request-timeout=30s` on all kubectl calls_
+
+## SLX Conventions
+
+<!-- How SLXs should be named, tagged, and organized in this workspace. -->
+
+- **Naming**: _e.g. `<component>-<check-type>` → `postgres-replication-lag`_
+- **Access tag**: _e.g. Most monitoring tasks use `read-only`_
+- **Data tag**: _e.g. Database queries use `logs-bulk`, config checks use `config`_
+- **SLI schedule**: _e.g. Health checks run every 5 minutes, heavy queries every hour_
+
+## Known Gotchas
+
+<!-- Pitfalls, edge cases, or non-obvious behaviors that script authors should know. -->
+
+- _e.g. PGO replica pods restart during maintenance windows (Tue 2-4am UTC)_
+- _e.g. The `analytics` namespace uses a different kubeconfig context_
+- _e.g. Redis Sentinel requires connecting to the sentinel service first_
