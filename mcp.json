@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "runwhen": {
-      "command": "runwhen-mcp",
+      "command": "runwhen-platform-mcp",
       "env": {
         "RW_API_URL": "${RW_API_URL}",
         "RUNWHEN_TOKEN": "${RUNWHEN_TOKEN}",

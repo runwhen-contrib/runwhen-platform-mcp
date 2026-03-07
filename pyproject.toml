@@ -23,7 +23,7 @@ classifiers = [
 dynamic = ["version", "dependencies"]
 
 [project.scripts]
-runwhen-mcp = "runwhen_platform_mcp.server:main"
+runwhen-platform-mcp = "runwhen_platform_mcp.server:main"
 
 [project.urls]
 homepage = "https://github.com/runwhen-contrib/runwhen-platform-mcp"

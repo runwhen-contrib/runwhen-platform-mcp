@@ -1829,7 +1829,7 @@ async def commit_slx(
 
 
 def main() -> None:
-    """Entry point for the runwhen-mcp console script."""
+    """Entry point for the runwhen-platform-mcp console script."""
     mcp.run()
 
 
