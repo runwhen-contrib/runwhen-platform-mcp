@@ -365,23 +365,23 @@ async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
         return resp.status_code, resp.json()
 
 
-async def _papi_delete(path: str) -> tuple[int, Any]:
+async def _papi_delete(
+    path: str,
+    body: dict[str, Any] | None = None,
+) -> tuple[int, Any]:
     """Make an authenticated DELETE request to PAPI. Returns (status_code, json|text).
 
     Handles Django APPEND_SLASH redirects by retrying with a trailing
-    slash, preserving the DELETE method.
+    slash, preserving the DELETE method and body.
     """
     path = _normalize_path(path)
+    kwargs: dict[str, Any] = {"headers": _headers()}
+    if body is not None:
+        kwargs["json"] = body
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
-        resp = await client.delete(
-            f"{PAPI_URL}{path}",
-            headers=_headers(),
-        )
+        resp = await client.delete(f"{PAPI_URL}{path}", **kwargs)
         if _is_slash_redirect(resp):
-            resp = await client.delete(
-                f"{PAPI_URL}{path}/",
-                headers=_headers(),
-            )
+            resp = await client.delete(f"{PAPI_URL}{path}/", **kwargs)
         _raise_for_papi_status(resp, path)
         if resp.status_code == 204:
             return resp.status_code, {}
@@ -1951,7 +1951,8 @@ async def delete_slx(
         commit_message = f"Remove SLX: {slx_name}"
 
     status_code, data = await _papi_delete(
-        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}"
+        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
+        body={"commit_msg": commit_message},
     )
 
     result = {
