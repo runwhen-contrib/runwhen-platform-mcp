@@ -322,6 +322,22 @@ async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
         return resp.status_code, resp.json()
 
 
+async def _papi_delete(path: str) -> tuple[int, Any]:
+    """Make an authenticated DELETE request to PAPI. Returns (status_code, json|text)."""
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        resp = await client.delete(
+            f"{PAPI_URL}{path}",
+            headers=_headers(),
+        )
+        _raise_for_papi_status(resp, path)
+        if resp.status_code == 204:
+            return resp.status_code, {}
+        try:
+            return resp.status_code, resp.json()
+        except Exception:
+            return resp.status_code, {"message": resp.text[:500]}
+
+
 def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
     if resp.status_code == 401:
         raise ValueError(
@@ -403,15 +419,17 @@ def _ensure_required_tags(
 ) -> list[dict[str, str]]:
     """Ensure the required ``access`` and ``data`` tags are present.
 
-    User-supplied tags are preserved; ``access`` and ``data`` entries are
-    added or overwritten so they always reflect the caller's intent.
+    User-supplied tags are preserved (including duplicate names).
+    ``access`` and ``data`` entries are added or replaced so they always
+    reflect the caller's intent.
     """
-    merged: dict[str, str] = {}
+    result: list[dict[str, str]] = []
     for tag in tags or []:
-        merged[tag["name"]] = tag["value"]
-    merged["access"] = access
-    merged["data"] = data
-    return [{"name": k, "value": v} for k, v in merged.items()]
+        if tag["name"] not in ("access", "data"):
+            result.append(tag)
+    result.append({"name": "access", "value": access})
+    result.append({"name": "data", "value": data})
+    return result
 
 
 def _build_slx_yaml(
@@ -424,6 +442,7 @@ def _build_slx_yaml(
     image_url: str | None = None,
     access: str = "read-write",
     data: str = "logs-bulk",
+    additional_context: dict[str, str] | None = None,
 ) -> str:
     """Generate slx.yaml content."""
     spec: dict[str, Any] = {
@@ -433,6 +452,8 @@ def _build_slx_yaml(
         "owners": owners,
         "tags": _ensure_required_tags(tags, access, data),
     }
+    if additional_context:
+        spec["additionalContext"] = additional_context
 
     doc = {
         "apiVersion": "runwhen.com/v1",
@@ -502,6 +523,9 @@ def _build_runbook_yaml(
             "labels": {
                 "workspace": workspace,
                 "slx": f"{workspace}--{slx_name}",
+            },
+            "annotations": {
+                "internal.runwhen.com/manually-created": "true",
             },
         },
         "spec": spec,
@@ -1660,6 +1684,7 @@ async def commit_slx(
     image_url: str | None = None,
     access: str = "read-write",
     data: str = "logs-bulk",
+    resource_path: str | None = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -1713,6 +1738,9 @@ async def commit_slx(
         data: Data type tag describing the report content — "logs-bulk" for general
             log/command output, "config" for configuration data, "logs-stacktrace"
             for stacktrace analysis (default: "logs-bulk").
+        resource_path: Optional resource path for workspace-chat / usearch indexing.
+            Sets ``spec.additionalContext.resourcePath`` in the runbook YAML.
+            Example: "github" for GitHub-based tasks, or a Kubernetes namespace path.
     """
     ws = _resolve_workspace(workspace_name)
     script_b64 = base64.b64encode(script.encode()).decode()
@@ -1736,6 +1764,10 @@ async def commit_slx(
     if owners is None:
         owners = [await _get_user_email()]
 
+    additional_context: dict[str, str] | None = None
+    if resource_path:
+        additional_context = {"resourcePath": resource_path}
+
     slx_yaml = _build_slx_yaml(
         workspace=ws,
         slx_name=slx_name,
@@ -1746,6 +1778,7 @@ async def commit_slx(
         image_url=image_url,
         access=access,
         data=data,
+        additional_context=additional_context,
     )
 
     files: dict[str, str] = {"slx.yaml": slx_yaml}
@@ -1823,6 +1856,43 @@ async def commit_slx(
         "branch": branch,
         "committed_files": list(files.keys()),
         "committed_types": type_label,
+        "response": data,
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def delete_slx(
+    slx_name: str,
+    workspace_name: str | None = None,
+    branch: str = "main",
+    commit_message: str | None = None,
+) -> str:
+    """Delete an SLX from the workspace Git repo.
+
+    Removes the SLX directory (slx.yaml, runbook.yaml, sli.yaml) from the
+    workspace configuration repository.
+
+    Args:
+        slx_name: Short name of the SLX to delete (e.g. "k8s-pod-health").
+        workspace_name: The workspace to delete from. Uses DEFAULT_WORKSPACE if not provided.
+        branch: Git branch to delete from (default: "main").
+        commit_message: Custom commit message. Auto-generated if not provided.
+    """
+    ws = _resolve_workspace(workspace_name)
+
+    if not commit_message:
+        commit_message = f"Remove SLX: {slx_name}"
+
+    status_code, data = await _papi_delete(
+        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}"
+    )
+
+    result = {
+        "status": "deleted" if status_code in (200, 204) else f"status_{status_code}",
+        "slx_name": slx_name,
+        "workspace": ws,
+        "branch": branch,
         "response": data,
     }
     return json.dumps(result, indent=2)

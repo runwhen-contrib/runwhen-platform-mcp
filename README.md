@@ -80,6 +80,61 @@ Configure the RunWhen MCP server in your client as shown below. Use the JSON blo
 
 Go to **Cursor Settings** → **MCP** → **New MCP Server** (or edit `.cursor/mcp.json`). Paste the config from [Getting started](#getting-started). If you use a venv, set `command` to the full path to `.venv/bin/runwhen-platform-mcp`.
 
+### VS Code (GitHub Copilot)
+
+VS Code supports MCP servers through GitHub Copilot. Add the config to your **workspace** or **user** settings:
+
+- **Workspace**: `.vscode/mcp.json` in your project root
+- **User**: `settings.json` → `"mcp.servers"` key
+
+#### Windows with venv
+
+```powershell
+git clone https://github.com/runwhen-contrib/runwhen-platform-mcp.git
+cd runwhen-platform-mcp
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e .
+```
+
+Then add to `.vscode/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "runwhen": {
+      "command": "C:\\path\\to\\runwhen-platform-mcp\\.venv\\Scripts\\runwhen-platform-mcp.exe",
+      "env": {
+        "RW_API_URL": "https://papi.beta.runwhen.com",
+        "RUNWHEN_TOKEN": "your-jwt-token",
+        "DEFAULT_WORKSPACE": "your-workspace"
+      }
+    }
+  }
+}
+```
+
+Replace `C:\\path\\to\\` with the actual path where you cloned the repo. To find the exact path, run `where runwhen-platform-mcp` in a terminal with the venv activated.
+
+> **Tip**: On Windows, pip installs console scripts as `.exe` files in `.venv\Scripts\`. Always use the **full absolute path** with backslashes in the MCP config.
+
+#### macOS / Linux with venv
+
+```json
+{
+  "mcpServers": {
+    "runwhen": {
+      "command": "/path/to/runwhen-platform-mcp/.venv/bin/runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.beta.runwhen.com",
+        "RUNWHEN_TOKEN": "your-jwt-token",
+        "DEFAULT_WORKSPACE": "your-workspace"
+      }
+    }
+  }
+}
+```
+
 ### Claude Desktop
 
 Add the config to:

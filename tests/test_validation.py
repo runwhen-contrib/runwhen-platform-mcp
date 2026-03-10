@@ -115,3 +115,16 @@ class TestEnsureRequiredTags:
         assert values["access"] == "read-only"
         assert values["data"] == "config"
         assert values["custom"] == "x"
+
+    def test_preserves_duplicate_tag_names(self) -> None:
+        tags = [
+            {"name": "repo", "value": "agentfarm"},
+            {"name": "repo", "value": "usearch"},
+            {"name": "repo", "value": "468-platform"},
+            {"name": "platform", "value": "github"},
+        ]
+        result = _ensure_required_tags(tags, "read-only", "logs-bulk")
+        repo_tags = [t for t in result if t["name"] == "repo"]
+        assert len(repo_tags) == 3
+        repo_values = sorted(t["value"] for t in repo_tags)
+        assert repo_values == ["468-platform", "agentfarm", "usearch"]
