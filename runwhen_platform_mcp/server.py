@@ -160,14 +160,24 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
                         continue
                     if not issue.get("title") and len(issue) == 0:
                         continue
-                    result["issues"].append({
-                        k: v for k, v in issue.items()
-                        if k in (
-                            "title", "severity", "details", "nextSteps",
-                            "expected", "actual", "reproduceHint",
-                            "taskName", "observedAt",
-                        )
-                    })
+                    result["issues"].append(
+                        {
+                            k: v
+                            for k, v in issue.items()
+                            if k
+                            in (
+                                "title",
+                                "severity",
+                                "details",
+                                "nextSteps",
+                                "expected",
+                                "actual",
+                                "reproduceHint",
+                                "taskName",
+                                "observedAt",
+                            )
+                        }
+                    )
                 except json.JSONDecodeError:
                     pass
 
@@ -181,9 +191,9 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
                     obj = entry.get("obj", "")
                     if isinstance(obj, str):
                         if obj.startswith("Command stdout: "):
-                            result["stdout"].append(obj[len("Command stdout: "):])
+                            result["stdout"].append(obj[len("Command stdout: ") :])
                         elif obj.startswith("Command stderr: "):
-                            result["stderr"].append(obj[len("Command stderr: "):])
+                            result["stderr"].append(obj[len("Command stderr: ") :])
                         else:
                             result["report"].append(obj)
                     elif isinstance(obj, dict):
@@ -257,7 +267,7 @@ async def _get_user_email(token: str | None = None) -> str:
             return val
 
     # Preferred: whoami endpoint returns the current user from the JWT
-    for path in ("/api/v3/users/whoami", "/api/v3/users/whoami/"):
+    for path in ("/api/v3/users/whoami",):
         try:
             data = await _papi_get(path)
             email = data.get("primaryEmail") or data.get("primary_email")
@@ -275,7 +285,7 @@ async def _get_user_email(token: str | None = None) -> str:
     user_id = payload.get("user_id") or payload.get("sub")
     if user_id is not None:
         try:
-            data = await _papi_get(f"/api/v3/users/{user_id}/")
+            data = await _papi_get(f"/api/v3/users/{user_id}")
             email = data.get("primaryEmail") or data.get("primary_email")
             if email:
                 _user_email_cache[token] = email
@@ -288,18 +298,40 @@ async def _get_user_email(token: str | None = None) -> str:
     return fallback
 
 
-
 def _resolve_workspace(workspace_name: str | None) -> str:
     ws = workspace_name or DEFAULT_WORKSPACE
     if not ws:
-        raise ValueError(
-            "workspace_name is required (or set DEFAULT_WORKSPACE in .env)"
-        )
+        raise ValueError("workspace_name is required (or set DEFAULT_WORKSPACE in .env)")
     return ws
+
+
+def _normalize_path(path: str) -> str:
+    """Normalize an API path to have no trailing slash.
+
+    All call-sites use the slash-free form. The HTTP helpers handle
+    Django's APPEND_SLASH 301 redirects by retrying with a trailing
+    slash when needed (preserving the HTTP method).
+    """
+    return path.rstrip("/")
+
+
+def _is_slash_redirect(resp: httpx.Response) -> bool:
+    """Return True if the response is a redirect that just adds a trailing slash.
+
+    Django's APPEND_SLASH returns 301 to the same path with ``/`` appended.
+    Following a 301/302 causes httpx to downgrade POST/DELETE to GET, which
+    breaks mutating requests. We detect this pattern and retry with the
+    correct path instead.
+    """
+    if resp.status_code not in (301, 302, 307, 308):
+        return False
+    location = resp.headers.get("location", "")
+    return location.rstrip("/").endswith(resp.request.url.path.rstrip("/"))
 
 
 async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
     """Make an authenticated GET request to PAPI."""
+    path = _normalize_path(path)
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         resp = await client.get(
             f"{PAPI_URL}{path}",
@@ -311,15 +343,52 @@ async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
 
 async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
-    """Make an authenticated POST request to PAPI. Returns (status_code, json)."""
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    """Make an authenticated POST request to PAPI. Returns (status_code, json).
+
+    Handles Django APPEND_SLASH redirects by retrying with a trailing
+    slash, preserving the POST method and body.
+    """
+    path = _normalize_path(path)
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         resp = await client.post(
             f"{PAPI_URL}{path}",
             headers=_headers(),
             json=body,
         )
+        if _is_slash_redirect(resp):
+            resp = await client.post(
+                f"{PAPI_URL}{path}/",
+                headers=_headers(),
+                json=body,
+            )
         _raise_for_papi_status(resp, path)
         return resp.status_code, resp.json()
+
+
+async def _papi_delete(
+    path: str,
+    body: dict[str, Any] | None = None,
+) -> tuple[int, Any]:
+    """Make an authenticated DELETE request to PAPI. Returns (status_code, json|text).
+
+    Handles Django APPEND_SLASH redirects by retrying with a trailing
+    slash, preserving the DELETE method and body.
+    """
+    path = _normalize_path(path)
+    kwargs: dict[str, Any] = {"headers": _headers()}
+    if body is not None:
+        kwargs["json"] = body
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        resp = await client.delete(f"{PAPI_URL}{path}", **kwargs)
+        if _is_slash_redirect(resp):
+            resp = await client.delete(f"{PAPI_URL}{path}/", **kwargs)
+        _raise_for_papi_status(resp, path)
+        if resp.status_code == 204:
+            return resp.status_code, {}
+        try:
+            return resp.status_code, resp.json()
+        except Exception:
+            return resp.status_code, {"message": resp.text[:500]}
 
 
 def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
@@ -353,9 +422,8 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
             warnings.append("Do not call main() directly — the runner invokes it.")
         if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', script):
             warnings.append('Do not use if __name__ == "__main__" — the runner invokes main().')
-        if task_type == "sli" and "return" in script:
-            if not re.search(r"return\s+[\d.]", script):
-                warnings.append("SLI main() should return a float between 0 and 1.")
+        if task_type == "sli" and "return" in script and not re.search(r"return\s+[\d.]", script):
+            warnings.append("SLI main() should return a float between 0 and 1.")
     elif interpreter == "bash":
         if not re.search(r"^main\s*\(\s*\)", script, re.MULTILINE):
             warnings.append("Script must define a main() function.")
@@ -370,9 +438,26 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
 def _extract_env_vars(script: str, interpreter: str) -> list[str]:
     """Extract environment variable names referenced in a script."""
     builtin_vars = {
-        "HOME", "USER", "PATH", "SHELL", "PWD", "OLDPWD", "TERM", "LANG",
-        "LC_ALL", "HOSTNAME", "RANDOM", "LINENO", "SECONDS", "PIPESTATUS",
-        "BASH_SOURCE", "FUNCNAME", "IFS", "PS1", "PS2", "_",
+        "HOME",
+        "USER",
+        "PATH",
+        "SHELL",
+        "PWD",
+        "OLDPWD",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "HOSTNAME",
+        "RANDOM",
+        "LINENO",
+        "SECONDS",
+        "PIPESTATUS",
+        "BASH_SOURCE",
+        "FUNCNAME",
+        "IFS",
+        "PS1",
+        "PS2",
+        "_",
     }
     found: set[str] = set()
 
@@ -384,7 +469,7 @@ def _extract_env_vars(script: str, interpreter: str) -> list[str]:
         ):
             found.add(m.group(1) or m.group(2))
     elif interpreter == "bash":
-        for m in re.finditer(r'\$\{?(\w+)\}?', script):
+        for m in re.finditer(r"\$\{?(\w+)\}?", script):
             name = m.group(1)
             if name not in builtin_vars and not name.isdigit():
                 found.add(name)
@@ -403,15 +488,17 @@ def _ensure_required_tags(
 ) -> list[dict[str, str]]:
     """Ensure the required ``access`` and ``data`` tags are present.
 
-    User-supplied tags are preserved; ``access`` and ``data`` entries are
-    added or overwritten so they always reflect the caller's intent.
+    User-supplied tags are preserved (including duplicate names).
+    ``access`` and ``data`` entries are added or replaced so they always
+    reflect the caller's intent.
     """
-    merged: dict[str, str] = {}
+    result: list[dict[str, str]] = []
     for tag in tags or []:
-        merged[tag["name"]] = tag["value"]
-    merged["access"] = access
-    merged["data"] = data
-    return [{"name": k, "value": v} for k, v in merged.items()]
+        if tag["name"] not in ("access", "data"):
+            result.append(tag)
+    result.append({"name": "access", "value": access})
+    result.append({"name": "data", "value": data})
+    return result
 
 
 def _build_slx_yaml(
@@ -424,6 +511,7 @@ def _build_slx_yaml(
     image_url: str | None = None,
     access: str = "read-write",
     data: str = "logs-bulk",
+    additional_context: dict[str, str] | None = None,
 ) -> str:
     """Generate slx.yaml content."""
     spec: dict[str, Any] = {
@@ -433,6 +521,8 @@ def _build_slx_yaml(
         "owners": owners,
         "tags": _ensure_required_tags(tags, access, data),
     }
+    if additional_context:
+        spec["additionalContext"] = additional_context
 
     doc = {
         "apiVersion": "runwhen.com/v1",
@@ -472,9 +562,7 @@ def _build_runbook_yaml(
     env_vars = env_vars or {}
     secret_vars = secret_vars or {}
 
-    config_provided.append(
-        {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)}
-    )
+    config_provided.append({"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)})
     config_provided.append(
         {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))}
     )
@@ -482,9 +570,7 @@ def _build_runbook_yaml(
     for k, v in env_vars.items():
         config_provided.append({"name": k, "value": v})
 
-    secrets_provided = [
-        {"name": k, "workspaceKey": v} for k, v in secret_vars.items()
-    ]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
 
     spec: dict[str, Any] = {
         "location": location,
@@ -502,6 +588,9 @@ def _build_runbook_yaml(
             "labels": {
                 "workspace": workspace,
                 "slx": f"{workspace}--{slx_name}",
+            },
+            "annotations": {
+                "internal.runwhen.com/manually-created": "true",
             },
         },
         "spec": spec,
@@ -528,9 +617,7 @@ def _build_sli_yaml(
     env_vars = env_vars or {}
     secret_vars = secret_vars or {}
 
-    config_provided.append(
-        {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)}
-    )
+    config_provided.append({"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)})
     config_provided.append(
         {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))}
     )
@@ -538,9 +625,7 @@ def _build_sli_yaml(
     for k, v in env_vars.items():
         config_provided.append({"name": k, "value": v})
 
-    secrets_provided = [
-        {"name": k, "workspaceKey": v} for k, v in secret_vars.items()
-    ]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
 
     spec: dict[str, Any] = {
         "location": location,
@@ -661,12 +746,12 @@ async def _consume_agentfarm_sse(
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code == 401:
                     raise ValueError(
-                        f"AgentFarm returned 401 Unauthorized. "
+                        "AgentFarm returned 401 Unauthorized. "
                         "Your RUNWHEN_TOKEN may be expired or invalid."
                     )
                 if resp.status_code == 403:
                     raise ValueError(
-                        f"AgentFarm returned 403 Forbidden. "
+                        "AgentFarm returned 403 Forbidden. "
                         "You may not have access to this workspace."
                     )
                 resp.raise_for_status()
@@ -790,9 +875,7 @@ async def _agentfarm_request(
             headers=_agentfarm_headers(),
         )
         if resp.status_code >= 400:
-            raise ValueError(
-                f"AgentFarm {method} {path}: {resp.status_code} {resp.text[:500]}"
-            )
+            raise ValueError(f"AgentFarm {method} {path}: {resp.status_code} {resp.text[:500]}")
         if resp.status_code == 204:
             return {}
         return resp.json()
@@ -860,7 +943,7 @@ async def list_workspaces() -> str:
 
     Returns workspace names, display names, and basic metadata.
     """
-    data = await _papi_get("/api/v3/workspaces/")
+    data = await _papi_get("/api/v3/workspaces")
     workspaces = data if isinstance(data, list) else data.get("results", data)
     summary = []
     for ws in workspaces:
@@ -929,7 +1012,9 @@ async def list_chat_rules(
     page: int = 1,
     page_size: int = 50,
 ) -> str:
-    """List chat rules (workspace chat rules). Uses AgentFarm internal API; may require network access.
+    """List chat rules (workspace chat rules).
+
+    Uses AgentFarm internal API; may require network access.
 
     Args:
         scope_type: Filter by scope (platform, org, workspace, persona, user).
@@ -1116,7 +1201,7 @@ async def get_workspace_issues(
     params: dict[str, Any] = {"limit": limit}
     if severity is not None:
         params["severity"] = severity
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/", params=params)
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues", params=params)
     return json.dumps(data, indent=2)
 
 
@@ -1133,7 +1218,7 @@ async def get_workspace_slxs(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
     return json.dumps(data, indent=2)
 
 
@@ -1153,7 +1238,7 @@ async def get_run_sessions(
     """
     ws = _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"limit": limit}
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/", params=params)
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions", params=params)
     return json.dumps(data, indent=2)
 
 
@@ -1171,9 +1256,7 @@ async def get_workspace_config_index(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/workspace-configuration-index"
-    )
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/workspace-configuration-index")
     return json.dumps(data, indent=2)
 
 
@@ -1189,7 +1272,7 @@ async def get_issue_details(
         workspace_name: The workspace the issue belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/{issue_id}/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/{issue_id}")
     return json.dumps(data, indent=2)
 
 
@@ -1208,7 +1291,7 @@ async def get_slx_runbook(
         workspace_name: The workspace the SLX belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook")
     return json.dumps(data, indent=2)
 
 
@@ -1227,7 +1310,7 @@ async def search_workspace(
     """
     ws = _resolve_workspace(workspace_name)
     data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/autocomplete/",
+        f"/api/v3/workspaces/{ws}/autocomplete",
         params={"q": query},
     )
     return json.dumps(data, indent=2)
@@ -1317,21 +1400,25 @@ async def get_workspace_context(
     ctx = _load_workspace_context(force=reload)
 
     if not ctx["found"]:
-        return json.dumps({
-            "status": "no_context",
-            "message": (
-                "No RUNWHEN.md file found. Create a RUNWHEN.md in your project root "
-                "describing infrastructure conventions, database access rules, naming "
-                "patterns, and other constraints. See the MCP server docs for the "
-                "recommended format."
-            ),
-        })
+        return json.dumps(
+            {
+                "status": "no_context",
+                "message": (
+                    "No RUNWHEN.md file found. Create a RUNWHEN.md in your project root "
+                    "describing infrastructure conventions, database access rules, naming "
+                    "patterns, and other constraints. See the MCP server docs for the "
+                    "recommended format."
+                ),
+            }
+        )
 
-    return json.dumps({
-        "status": "ok",
-        "source": ctx["path"],
-        "content": ctx["content"],
-    })
+    return json.dumps(
+        {
+            "status": "ok",
+            "source": ctx["path"],
+            "content": ctx["content"],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1370,7 +1457,7 @@ async def get_workspace_locations(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/locations/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/locations")
     return json.dumps(data, indent=2)
 
 
@@ -1443,22 +1530,29 @@ async def run_script(
 
     Args:
         script: The full script source code (raw text, the backend base64-encodes it).
-        location: Runner location (e.g. "northamerica-northeast2-01"). Use get_workspace_locations to list.
-        workspace_name: The workspace to run in. Uses DEFAULT_WORKSPACE if not provided.
+        location: Runner location (e.g. "northamerica-northeast2-01").
+            Use get_workspace_locations to list.
+        workspace_name: The workspace to run in.
+            Uses DEFAULT_WORKSPACE if not provided.
         interpreter: "bash" or "python" (default: "bash").
         run_type: "task" or "sli" (default: "task").
-        env_vars: Environment variables for the script (e.g. {"NAMESPACE": "default"}).
-        secret_vars: Secret mappings (env var name → workspace secret key, e.g. {"kubeconfig": "kubeconfig"}).
+        env_vars: Environment variables for the script
+            (e.g. {"NAMESPACE": "default"}).
+        secret_vars: Secret mappings — env var name to workspace secret key
+            (e.g. {"kubeconfig": "kubeconfig"}).
     """
     ws = _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
     if warnings:
-        return json.dumps({
-            "error": "Script validation failed",
-            "warnings": warnings,
-            "message": "Fix the warnings and try again. Use validate_script for details.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Script validation failed",
+                "warnings": warnings,
+                "message": "Fix the warnings and try again. Use validate_script for details.",
+            },
+            indent=2,
+        )
 
     body: dict[str, Any] = {
         "command": script,
@@ -1469,9 +1563,7 @@ async def run_script(
         "secretVars": secret_vars or {},
     }
 
-    status_code, data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/author/run", body
-    )
+    status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
     return json.dumps(data, indent=2)
 
 
@@ -1490,9 +1582,7 @@ async def get_run_status(
         workspace_name: The workspace the run belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/author/run/{run_id}/status"
-    )
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
     return json.dumps(data, indent=2)
 
 
@@ -1516,9 +1606,7 @@ async def get_run_output(
         fetch_logs: If True, download and parse artifact contents (default: True).
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/author/run/{run_id}/output"
-    )
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
 
     if not fetch_logs or not isinstance(data, dict):
         return json.dumps(data, indent=2)
@@ -1574,10 +1662,13 @@ async def run_script_and_wait(
 
     warnings = _validate_script(script, interpreter, run_type)
     if warnings:
-        return json.dumps({
-            "error": "Script validation failed",
-            "warnings": warnings,
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Script validation failed",
+                "warnings": warnings,
+            },
+            indent=2,
+        )
 
     body: dict[str, Any] = {
         "command": script,
@@ -1588,9 +1679,7 @@ async def run_script_and_wait(
         "secretVars": secret_vars or {},
     }
 
-    _, run_data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/author/run", body
-    )
+    _, run_data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
 
     run_id = run_data.get("runId")
     if not run_id:
@@ -1601,25 +1690,19 @@ async def run_script_and_wait(
     while status == "RUNNING" and elapsed < MAX_POLL_DURATION_S:
         await asyncio.sleep(POLL_INTERVAL_S)
         elapsed += POLL_INTERVAL_S
-        status_data = await _papi_get(
-            f"/api/v3/workspaces/{ws}/author/run/{run_id}/status"
-        )
+        status_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
         status = status_data.get("status", "UNKNOWN")
 
     await asyncio.sleep(ARTIFACT_SETTLE_DELAY_S)
 
-    output_data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/author/run/{run_id}/output"
-    )
+    output_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
 
     parsed: dict[str, Any] = {"issues": [], "stdout": "", "stderr": "", "report": ""}
     if isinstance(output_data, dict):
         parsed = await _fetch_and_parse_artifacts(output_data)
         if not parsed["stdout"] and not parsed["issues"] and output_data.get("artifacts"):
             await asyncio.sleep(3)
-            output_data = await _papi_get(
-                f"/api/v3/workspaces/{ws}/author/run/{run_id}/output"
-            )
+            output_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
             if isinstance(output_data, dict):
                 parsed = await _fetch_and_parse_artifacts(output_data)
 
@@ -1660,6 +1743,7 @@ async def commit_slx(
     image_url: str | None = None,
     access: str = "read-write",
     data: str = "logs-bulk",
+    resource_path: str | None = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -1713,28 +1797,42 @@ async def commit_slx(
         data: Data type tag describing the report content — "logs-bulk" for general
             log/command output, "config" for configuration data, "logs-stacktrace"
             for stacktrace analysis (default: "logs-bulk").
+        resource_path: Optional resource path for workspace-chat / usearch indexing.
+            Sets ``spec.additionalContext.resourcePath`` in the runbook YAML.
+            Example: "github" for GitHub-based tasks, or a Kubernetes namespace path.
     """
     ws = _resolve_workspace(workspace_name)
     script_b64 = base64.b64encode(script.encode()).decode()
 
     if sli_script and cron_schedule:
-        return json.dumps({
-            "error": "Cannot specify both sli_script and cron_schedule. "
-                     "Use sli_script for a custom SLI metric, or cron_schedule "
-                     "to trigger the runbook on a schedule.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Cannot specify both sli_script and cron_schedule. "
+                "Use sli_script for a custom SLI metric, or cron_schedule "
+                "to trigger the runbook on a schedule.",
+            },
+            indent=2,
+        )
 
     if access not in VALID_ACCESS_TAGS:
-        return json.dumps({
-            "error": f"Invalid access tag '{access}'. Must be one of: {', '.join(VALID_ACCESS_TAGS)}",
-        }, indent=2)
+        valid = ", ".join(VALID_ACCESS_TAGS)
+        return json.dumps(
+            {"error": f"Invalid access tag '{access}'. Must be one of: {valid}"},
+            indent=2,
+        )
     if data not in VALID_DATA_TAGS:
-        return json.dumps({
-            "error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}",
-        }, indent=2)
+        valid = ", ".join(VALID_DATA_TAGS)
+        return json.dumps(
+            {"error": f"Invalid data tag '{data}'. Must be one of: {valid}"},
+            indent=2,
+        )
 
     if owners is None:
         owners = [await _get_user_email()]
+
+    additional_context: dict[str, str] | None = None
+    if resource_path:
+        additional_context = {"resourcePath": resource_path}
 
     slx_yaml = _build_slx_yaml(
         workspace=ws,
@@ -1746,6 +1844,7 @@ async def commit_slx(
         image_url=image_url,
         access=access,
         data=data,
+        additional_context=additional_context,
     )
 
     files: dict[str, str] = {"slx.yaml": slx_yaml}
@@ -1823,6 +1922,44 @@ async def commit_slx(
         "branch": branch,
         "committed_files": list(files.keys()),
         "committed_types": type_label,
+        "response": data,
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def delete_slx(
+    slx_name: str,
+    workspace_name: str | None = None,
+    branch: str = "main",
+    commit_message: str | None = None,
+) -> str:
+    """Delete an SLX from the workspace Git repo.
+
+    Removes the SLX directory (slx.yaml, runbook.yaml, sli.yaml) from the
+    workspace configuration repository.
+
+    Args:
+        slx_name: Short name of the SLX to delete (e.g. "k8s-pod-health").
+        workspace_name: The workspace to delete from. Uses DEFAULT_WORKSPACE if not provided.
+        branch: Git branch to delete from (default: "main").
+        commit_message: Custom commit message. Auto-generated if not provided.
+    """
+    ws = _resolve_workspace(workspace_name)
+
+    if not commit_message:
+        commit_message = f"Remove SLX: {slx_name}"
+
+    status_code, data = await _papi_delete(
+        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
+        body={"commit_msg": commit_message},
+    )
+
+    result = {
+        "status": "deleted" if status_code in (200, 204) else f"status_{status_code}",
+        "slx_name": slx_name,
+        "workspace": ws,
+        "branch": branch,
         "response": data,
     }
     return json.dumps(result, indent=2)

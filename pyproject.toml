@@ -34,6 +34,34 @@ where = ["."]
 [tool.setuptools.package-data]
 runwhen_platform_mcp = ["docs/*.md", "docs/*.template", "docs/*.example"]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
+    "mypy>=1.15",
+    "types-PyYAML>=6.0",
+]
+
 [tool.setuptools.dynamic]
 version = { file = "VERSION" }
 dependencies = { file = "requirements.txt" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "runwhen_platform_mcp.server"
+warn_return_any = false
