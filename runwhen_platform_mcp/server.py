@@ -333,6 +333,7 @@ async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
 
 async def _papi_delete(path: str) -> tuple[int, Any]:
     """Make an authenticated DELETE request to PAPI. Returns (status_code, json|text)."""
+    path = path.rstrip("/")
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         resp = await client.delete(
             f"{PAPI_URL}{path}",
