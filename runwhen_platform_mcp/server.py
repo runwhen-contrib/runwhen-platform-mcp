@@ -257,7 +257,7 @@ async def _get_user_email(token: str | None = None) -> str:
             return val
 
     # Preferred: whoami endpoint returns the current user from the JWT
-    for path in ("/api/v3/users/whoami", "/api/v3/users/whoami/"):
+    for path in ("/api/v3/users/whoami",):
         try:
             data = await _papi_get(path)
             email = data.get("primaryEmail") or data.get("primary_email")
@@ -275,7 +275,7 @@ async def _get_user_email(token: str | None = None) -> str:
     user_id = payload.get("user_id") or payload.get("sub")
     if user_id is not None:
         try:
-            data = await _papi_get(f"/api/v3/users/{user_id}/")
+            data = await _papi_get(f"/api/v3/users/{user_id}")
             email = data.get("primaryEmail") or data.get("primary_email")
             if email:
                 _user_email_cache[token] = email
@@ -300,6 +300,7 @@ def _resolve_workspace(workspace_name: str | None) -> str:
 
 async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
     """Make an authenticated GET request to PAPI."""
+    path = path.rstrip("/")
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         resp = await client.get(
             f"{PAPI_URL}{path}",
@@ -312,6 +313,7 @@ async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
 async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
     """Make an authenticated POST request to PAPI. Returns (status_code, json)."""
+    path = path.rstrip("/")
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         resp = await client.post(
             f"{PAPI_URL}{path}",
@@ -884,7 +886,7 @@ async def list_workspaces() -> str:
 
     Returns workspace names, display names, and basic metadata.
     """
-    data = await _papi_get("/api/v3/workspaces/")
+    data = await _papi_get("/api/v3/workspaces")
     workspaces = data if isinstance(data, list) else data.get("results", data)
     summary = []
     for ws in workspaces:
@@ -1140,7 +1142,7 @@ async def get_workspace_issues(
     params: dict[str, Any] = {"limit": limit}
     if severity is not None:
         params["severity"] = severity
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/", params=params)
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues", params=params)
     return json.dumps(data, indent=2)
 
 
@@ -1157,7 +1159,7 @@ async def get_workspace_slxs(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
     return json.dumps(data, indent=2)
 
 
@@ -1177,7 +1179,7 @@ async def get_run_sessions(
     """
     ws = _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"limit": limit}
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/", params=params)
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions", params=params)
     return json.dumps(data, indent=2)
 
 
@@ -1213,7 +1215,7 @@ async def get_issue_details(
         workspace_name: The workspace the issue belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/{issue_id}/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/{issue_id}")
     return json.dumps(data, indent=2)
 
 
@@ -1232,7 +1234,7 @@ async def get_slx_runbook(
         workspace_name: The workspace the SLX belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook")
     return json.dumps(data, indent=2)
 
 
@@ -1251,7 +1253,7 @@ async def search_workspace(
     """
     ws = _resolve_workspace(workspace_name)
     data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/autocomplete/",
+        f"/api/v3/workspaces/{ws}/autocomplete",
         params={"q": query},
     )
     return json.dumps(data, indent=2)
@@ -1394,7 +1396,7 @@ async def get_workspace_locations(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/locations/")
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/locations")
     return json.dumps(data, indent=2)
 
 
