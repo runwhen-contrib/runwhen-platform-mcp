@@ -305,9 +305,33 @@ def _resolve_workspace(workspace_name: str | None) -> str:
     return ws
 
 
+def _normalize_path(path: str) -> str:
+    """Normalize an API path to have no trailing slash.
+
+    All call-sites use the slash-free form. The HTTP helpers handle
+    Django's APPEND_SLASH 301 redirects by retrying with a trailing
+    slash when needed (preserving the HTTP method).
+    """
+    return path.rstrip("/")
+
+
+def _is_slash_redirect(resp: httpx.Response) -> bool:
+    """Return True if the response is a redirect that just adds a trailing slash.
+
+    Django's APPEND_SLASH returns 301 to the same path with ``/`` appended.
+    Following a 301/302 causes httpx to downgrade POST/DELETE to GET, which
+    breaks mutating requests. We detect this pattern and retry with the
+    correct path instead.
+    """
+    if resp.status_code not in (301, 302, 307, 308):
+        return False
+    location = resp.headers.get("location", "")
+    return location.rstrip("/").endswith(resp.request.url.path.rstrip("/"))
+
+
 async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
     """Make an authenticated GET request to PAPI."""
-    path = path.rstrip("/")
+    path = _normalize_path(path)
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         resp = await client.get(
             f"{PAPI_URL}{path}",
@@ -319,26 +343,45 @@ async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
 
 
 async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
-    """Make an authenticated POST request to PAPI. Returns (status_code, json)."""
-    path = path.rstrip("/")
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    """Make an authenticated POST request to PAPI. Returns (status_code, json).
+
+    Handles Django APPEND_SLASH redirects by retrying with a trailing
+    slash, preserving the POST method and body.
+    """
+    path = _normalize_path(path)
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         resp = await client.post(
             f"{PAPI_URL}{path}",
             headers=_headers(),
             json=body,
         )
+        if _is_slash_redirect(resp):
+            resp = await client.post(
+                f"{PAPI_URL}{path}/",
+                headers=_headers(),
+                json=body,
+            )
         _raise_for_papi_status(resp, path)
         return resp.status_code, resp.json()
 
 
 async def _papi_delete(path: str) -> tuple[int, Any]:
-    """Make an authenticated DELETE request to PAPI. Returns (status_code, json|text)."""
-    path = path.rstrip("/")
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    """Make an authenticated DELETE request to PAPI. Returns (status_code, json|text).
+
+    Handles Django APPEND_SLASH redirects by retrying with a trailing
+    slash, preserving the DELETE method.
+    """
+    path = _normalize_path(path)
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         resp = await client.delete(
             f"{PAPI_URL}{path}",
             headers=_headers(),
         )
+        if _is_slash_redirect(resp):
+            resp = await client.delete(
+                f"{PAPI_URL}{path}/",
+                headers=_headers(),
+            )
         _raise_for_papi_status(resp, path)
         if resp.status_code == 204:
             return resp.status_code, {}
