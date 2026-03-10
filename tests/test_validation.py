@@ -1,7 +1,5 @@
 """Unit tests for script validation and helper functions."""
 
-import pytest
-
 from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
@@ -13,10 +11,11 @@ class TestValidateScript:
     """Tests for _validate_script."""
 
     def test_python_task_valid(self) -> None:
-        script = '''
-def main():
-    return [{"issue title": "x", "issue description": "y", "issue severity": 1, "issue next steps": "z"}]
-'''
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 1, "issue next steps": "z"}]\n'
+        )
         assert _validate_script(script, "python", "task") == []
 
     def test_python_task_missing_main(self) -> None:
@@ -25,44 +24,44 @@ def main():
         assert any("main()" in w for w in warnings)
 
     def test_python_task_calls_main_directly(self) -> None:
-        script = '''
+        script = """
 def main():
     pass
 main()
-'''
+"""
         warnings = _validate_script(script, "python", "task")
         assert any("Do not call main()" in w for w in warnings)
 
     def test_python_sli_valid(self) -> None:
-        script = '''
+        script = """
 def main():
     return 0.95
-'''
+"""
         assert _validate_script(script, "python", "sli") == []
 
     def test_bash_task_valid(self) -> None:
-        script = '''
+        script = """
 main() {
   echo '[{"issue title":"x"}]' >&3
 }
-'''
+"""
         assert _validate_script(script, "bash", "task") == []
 
     def test_bash_task_missing_fd3(self) -> None:
-        script = '''
+        script = """
 main() {
   echo "no fd3"
 }
-'''
+"""
         warnings = _validate_script(script, "bash", "task")
         assert any("file descriptor 3" in w for w in warnings)
 
     def test_bash_task_dev_fd3_accepted(self) -> None:
-        script = '''
+        script = """
 main() {
   echo '[]' > /dev/fd/3
 }
-'''
+"""
         assert _validate_script(script, "bash", "task") == []
 
 
@@ -78,17 +77,17 @@ class TestExtractEnvVars:
         assert _extract_env_vars(script, "python") == ["NAMESPACE"]
 
     def test_bash_simple_var(self) -> None:
-        script = 'echo $NAMESPACE'
+        script = "echo $NAMESPACE"
         assert "NAMESPACE" in _extract_env_vars(script, "bash")
 
     def test_bash_ignores_builtins(self) -> None:
-        script = 'echo $HOME $PATH'
+        script = "echo $HOME $PATH"
         result = _extract_env_vars(script, "bash")
         assert "HOME" not in result
         assert "PATH" not in result
 
     def test_bash_braced_var(self) -> None:
-        script = 'echo ${KUBECONFIG}'
+        script = "echo ${KUBECONFIG}"
         assert _extract_env_vars(script, "bash") == ["KUBECONFIG"]
 
 

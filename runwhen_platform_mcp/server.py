@@ -160,14 +160,24 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
                         continue
                     if not issue.get("title") and len(issue) == 0:
                         continue
-                    result["issues"].append({
-                        k: v for k, v in issue.items()
-                        if k in (
-                            "title", "severity", "details", "nextSteps",
-                            "expected", "actual", "reproduceHint",
-                            "taskName", "observedAt",
-                        )
-                    })
+                    result["issues"].append(
+                        {
+                            k: v
+                            for k, v in issue.items()
+                            if k
+                            in (
+                                "title",
+                                "severity",
+                                "details",
+                                "nextSteps",
+                                "expected",
+                                "actual",
+                                "reproduceHint",
+                                "taskName",
+                                "observedAt",
+                            )
+                        }
+                    )
                 except json.JSONDecodeError:
                     pass
 
@@ -181,9 +191,9 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
                     obj = entry.get("obj", "")
                     if isinstance(obj, str):
                         if obj.startswith("Command stdout: "):
-                            result["stdout"].append(obj[len("Command stdout: "):])
+                            result["stdout"].append(obj[len("Command stdout: ") :])
                         elif obj.startswith("Command stderr: "):
-                            result["stderr"].append(obj[len("Command stderr: "):])
+                            result["stderr"].append(obj[len("Command stderr: ") :])
                         else:
                             result["report"].append(obj)
                     elif isinstance(obj, dict):
@@ -288,13 +298,10 @@ async def _get_user_email(token: str | None = None) -> str:
     return fallback
 
 
-
 def _resolve_workspace(workspace_name: str | None) -> str:
     ws = workspace_name or DEFAULT_WORKSPACE
     if not ws:
-        raise ValueError(
-            "workspace_name is required (or set DEFAULT_WORKSPACE in .env)"
-        )
+        raise ValueError("workspace_name is required (or set DEFAULT_WORKSPACE in .env)")
     return ws
 
 
@@ -371,9 +378,8 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
             warnings.append("Do not call main() directly — the runner invokes it.")
         if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', script):
             warnings.append('Do not use if __name__ == "__main__" — the runner invokes main().')
-        if task_type == "sli" and "return" in script:
-            if not re.search(r"return\s+[\d.]", script):
-                warnings.append("SLI main() should return a float between 0 and 1.")
+        if task_type == "sli" and "return" in script and not re.search(r"return\s+[\d.]", script):
+            warnings.append("SLI main() should return a float between 0 and 1.")
     elif interpreter == "bash":
         if not re.search(r"^main\s*\(\s*\)", script, re.MULTILINE):
             warnings.append("Script must define a main() function.")
@@ -388,9 +394,26 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
 def _extract_env_vars(script: str, interpreter: str) -> list[str]:
     """Extract environment variable names referenced in a script."""
     builtin_vars = {
-        "HOME", "USER", "PATH", "SHELL", "PWD", "OLDPWD", "TERM", "LANG",
-        "LC_ALL", "HOSTNAME", "RANDOM", "LINENO", "SECONDS", "PIPESTATUS",
-        "BASH_SOURCE", "FUNCNAME", "IFS", "PS1", "PS2", "_",
+        "HOME",
+        "USER",
+        "PATH",
+        "SHELL",
+        "PWD",
+        "OLDPWD",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "HOSTNAME",
+        "RANDOM",
+        "LINENO",
+        "SECONDS",
+        "PIPESTATUS",
+        "BASH_SOURCE",
+        "FUNCNAME",
+        "IFS",
+        "PS1",
+        "PS2",
+        "_",
     }
     found: set[str] = set()
 
@@ -402,7 +425,7 @@ def _extract_env_vars(script: str, interpreter: str) -> list[str]:
         ):
             found.add(m.group(1) or m.group(2))
     elif interpreter == "bash":
-        for m in re.finditer(r'\$\{?(\w+)\}?', script):
+        for m in re.finditer(r"\$\{?(\w+)\}?", script):
             name = m.group(1)
             if name not in builtin_vars and not name.isdigit():
                 found.add(name)
@@ -495,9 +518,7 @@ def _build_runbook_yaml(
     env_vars = env_vars or {}
     secret_vars = secret_vars or {}
 
-    config_provided.append(
-        {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)}
-    )
+    config_provided.append({"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)})
     config_provided.append(
         {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))}
     )
@@ -505,9 +526,7 @@ def _build_runbook_yaml(
     for k, v in env_vars.items():
         config_provided.append({"name": k, "value": v})
 
-    secrets_provided = [
-        {"name": k, "workspaceKey": v} for k, v in secret_vars.items()
-    ]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
 
     spec: dict[str, Any] = {
         "location": location,
@@ -554,9 +573,7 @@ def _build_sli_yaml(
     env_vars = env_vars or {}
     secret_vars = secret_vars or {}
 
-    config_provided.append(
-        {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)}
-    )
+    config_provided.append({"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)})
     config_provided.append(
         {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))}
     )
@@ -564,9 +581,7 @@ def _build_sli_yaml(
     for k, v in env_vars.items():
         config_provided.append({"name": k, "value": v})
 
-    secrets_provided = [
-        {"name": k, "workspaceKey": v} for k, v in secret_vars.items()
-    ]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
 
     spec: dict[str, Any] = {
         "location": location,
@@ -687,12 +702,12 @@ async def _consume_agentfarm_sse(
             async with client.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code == 401:
                     raise ValueError(
-                        f"AgentFarm returned 401 Unauthorized. "
+                        "AgentFarm returned 401 Unauthorized. "
                         "Your RUNWHEN_TOKEN may be expired or invalid."
                     )
                 if resp.status_code == 403:
                     raise ValueError(
-                        f"AgentFarm returned 403 Forbidden. "
+                        "AgentFarm returned 403 Forbidden. "
                         "You may not have access to this workspace."
                     )
                 resp.raise_for_status()
@@ -816,9 +831,7 @@ async def _agentfarm_request(
             headers=_agentfarm_headers(),
         )
         if resp.status_code >= 400:
-            raise ValueError(
-                f"AgentFarm {method} {path}: {resp.status_code} {resp.text[:500]}"
-            )
+            raise ValueError(f"AgentFarm {method} {path}: {resp.status_code} {resp.text[:500]}")
         if resp.status_code == 204:
             return {}
         return resp.json()
@@ -955,7 +968,9 @@ async def list_chat_rules(
     page: int = 1,
     page_size: int = 50,
 ) -> str:
-    """List chat rules (workspace chat rules). Uses AgentFarm internal API; may require network access.
+    """List chat rules (workspace chat rules).
+
+    Uses AgentFarm internal API; may require network access.
 
     Args:
         scope_type: Filter by scope (platform, org, workspace, persona, user).
@@ -1197,9 +1212,7 @@ async def get_workspace_config_index(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/workspace-configuration-index"
-    )
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/workspace-configuration-index")
     return json.dumps(data, indent=2)
 
 
@@ -1343,21 +1356,25 @@ async def get_workspace_context(
     ctx = _load_workspace_context(force=reload)
 
     if not ctx["found"]:
-        return json.dumps({
-            "status": "no_context",
-            "message": (
-                "No RUNWHEN.md file found. Create a RUNWHEN.md in your project root "
-                "describing infrastructure conventions, database access rules, naming "
-                "patterns, and other constraints. See the MCP server docs for the "
-                "recommended format."
-            ),
-        })
+        return json.dumps(
+            {
+                "status": "no_context",
+                "message": (
+                    "No RUNWHEN.md file found. Create a RUNWHEN.md in your project root "
+                    "describing infrastructure conventions, database access rules, naming "
+                    "patterns, and other constraints. See the MCP server docs for the "
+                    "recommended format."
+                ),
+            }
+        )
 
-    return json.dumps({
-        "status": "ok",
-        "source": ctx["path"],
-        "content": ctx["content"],
-    })
+    return json.dumps(
+        {
+            "status": "ok",
+            "source": ctx["path"],
+            "content": ctx["content"],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1469,22 +1486,29 @@ async def run_script(
 
     Args:
         script: The full script source code (raw text, the backend base64-encodes it).
-        location: Runner location (e.g. "northamerica-northeast2-01"). Use get_workspace_locations to list.
-        workspace_name: The workspace to run in. Uses DEFAULT_WORKSPACE if not provided.
+        location: Runner location (e.g. "northamerica-northeast2-01").
+            Use get_workspace_locations to list.
+        workspace_name: The workspace to run in.
+            Uses DEFAULT_WORKSPACE if not provided.
         interpreter: "bash" or "python" (default: "bash").
         run_type: "task" or "sli" (default: "task").
-        env_vars: Environment variables for the script (e.g. {"NAMESPACE": "default"}).
-        secret_vars: Secret mappings (env var name → workspace secret key, e.g. {"kubeconfig": "kubeconfig"}).
+        env_vars: Environment variables for the script
+            (e.g. {"NAMESPACE": "default"}).
+        secret_vars: Secret mappings — env var name to workspace secret key
+            (e.g. {"kubeconfig": "kubeconfig"}).
     """
     ws = _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
     if warnings:
-        return json.dumps({
-            "error": "Script validation failed",
-            "warnings": warnings,
-            "message": "Fix the warnings and try again. Use validate_script for details.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Script validation failed",
+                "warnings": warnings,
+                "message": "Fix the warnings and try again. Use validate_script for details.",
+            },
+            indent=2,
+        )
 
     body: dict[str, Any] = {
         "command": script,
@@ -1495,9 +1519,7 @@ async def run_script(
         "secretVars": secret_vars or {},
     }
 
-    status_code, data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/author/run", body
-    )
+    status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
     return json.dumps(data, indent=2)
 
 
@@ -1516,9 +1538,7 @@ async def get_run_status(
         workspace_name: The workspace the run belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/author/run/{run_id}/status"
-    )
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
     return json.dumps(data, indent=2)
 
 
@@ -1542,9 +1562,7 @@ async def get_run_output(
         fetch_logs: If True, download and parse artifact contents (default: True).
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/author/run/{run_id}/output"
-    )
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
 
     if not fetch_logs or not isinstance(data, dict):
         return json.dumps(data, indent=2)
@@ -1600,10 +1618,13 @@ async def run_script_and_wait(
 
     warnings = _validate_script(script, interpreter, run_type)
     if warnings:
-        return json.dumps({
-            "error": "Script validation failed",
-            "warnings": warnings,
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Script validation failed",
+                "warnings": warnings,
+            },
+            indent=2,
+        )
 
     body: dict[str, Any] = {
         "command": script,
@@ -1614,9 +1635,7 @@ async def run_script_and_wait(
         "secretVars": secret_vars or {},
     }
 
-    _, run_data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/author/run", body
-    )
+    _, run_data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
 
     run_id = run_data.get("runId")
     if not run_id:
@@ -1627,25 +1646,19 @@ async def run_script_and_wait(
     while status == "RUNNING" and elapsed < MAX_POLL_DURATION_S:
         await asyncio.sleep(POLL_INTERVAL_S)
         elapsed += POLL_INTERVAL_S
-        status_data = await _papi_get(
-            f"/api/v3/workspaces/{ws}/author/run/{run_id}/status"
-        )
+        status_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
         status = status_data.get("status", "UNKNOWN")
 
     await asyncio.sleep(ARTIFACT_SETTLE_DELAY_S)
 
-    output_data = await _papi_get(
-        f"/api/v3/workspaces/{ws}/author/run/{run_id}/output"
-    )
+    output_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
 
     parsed: dict[str, Any] = {"issues": [], "stdout": "", "stderr": "", "report": ""}
     if isinstance(output_data, dict):
         parsed = await _fetch_and_parse_artifacts(output_data)
         if not parsed["stdout"] and not parsed["issues"] and output_data.get("artifacts"):
             await asyncio.sleep(3)
-            output_data = await _papi_get(
-                f"/api/v3/workspaces/{ws}/author/run/{run_id}/output"
-            )
+            output_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
             if isinstance(output_data, dict):
                 parsed = await _fetch_and_parse_artifacts(output_data)
 
@@ -1748,20 +1761,27 @@ async def commit_slx(
     script_b64 = base64.b64encode(script.encode()).decode()
 
     if sli_script and cron_schedule:
-        return json.dumps({
-            "error": "Cannot specify both sli_script and cron_schedule. "
-                     "Use sli_script for a custom SLI metric, or cron_schedule "
-                     "to trigger the runbook on a schedule.",
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "Cannot specify both sli_script and cron_schedule. "
+                "Use sli_script for a custom SLI metric, or cron_schedule "
+                "to trigger the runbook on a schedule.",
+            },
+            indent=2,
+        )
 
     if access not in VALID_ACCESS_TAGS:
-        return json.dumps({
-            "error": f"Invalid access tag '{access}'. Must be one of: {', '.join(VALID_ACCESS_TAGS)}",
-        }, indent=2)
+        valid = ", ".join(VALID_ACCESS_TAGS)
+        return json.dumps(
+            {"error": f"Invalid access tag '{access}'. Must be one of: {valid}"},
+            indent=2,
+        )
     if data not in VALID_DATA_TAGS:
-        return json.dumps({
-            "error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}",
-        }, indent=2)
+        valid = ", ".join(VALID_DATA_TAGS)
+        return json.dumps(
+            {"error": f"Invalid data tag '{data}'. Must be one of: {valid}"},
+            indent=2,
+        )
 
     if owners is None:
         owners = [await _get_user_email()]
