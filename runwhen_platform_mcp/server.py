@@ -511,7 +511,7 @@ def _build_slx_yaml(
     image_url: str | None = None,
     access: str = "read-write",
     data: str = "logs-bulk",
-    additional_context: dict[str, str] | None = None,
+    additional_context: dict[str, Any] | None = None,
 ) -> str:
     """Generate slx.yaml content."""
     spec: dict[str, Any] = {
@@ -1744,6 +1744,7 @@ async def commit_slx(
     access: str = "read-write",
     data: str = "logs-bulk",
     resource_path: str | None = None,
+    hierarchy: list[str] | None = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -1798,8 +1799,12 @@ async def commit_slx(
             log/command output, "config" for configuration data, "logs-stacktrace"
             for stacktrace analysis (default: "logs-bulk").
         resource_path: Optional resource path for workspace-chat / usearch indexing.
-            Sets ``spec.additionalContext.resourcePath`` in the runbook YAML.
+            Sets ``spec.additionalContext.resourcePath`` in the SLX YAML.
             Example: "github" for GitHub-based tasks, or a Kubernetes namespace path.
+        hierarchy: Optional list of tag names defining the SLX grouping hierarchy.
+            Sets ``spec.additionalContext.hierarchy`` in the SLX YAML.
+            Each entry should be a tag name whose value forms a segment of the
+            hierarchical path (e.g. ["resource_type", "resource_name"]).
     """
     ws = _resolve_workspace(workspace_name)
     script_b64 = base64.b64encode(script.encode()).decode()
@@ -1830,9 +1835,13 @@ async def commit_slx(
     if owners is None:
         owners = [await _get_user_email()]
 
-    additional_context: dict[str, str] | None = None
-    if resource_path:
-        additional_context = {"resourcePath": resource_path}
+    additional_context: dict[str, Any] | None = None
+    if resource_path or hierarchy:
+        additional_context = {}
+        if resource_path:
+            additional_context["resourcePath"] = resource_path
+        if hierarchy:
+            additional_context["hierarchy"] = hierarchy
 
     slx_yaml = _build_slx_yaml(
         workspace=ws,
