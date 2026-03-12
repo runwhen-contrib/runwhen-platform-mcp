@@ -1,8 +1,9 @@
-name: Release (Date-based)
+name: Release
 
 on:
-  schedule:
-    - cron: '0 12 * * 1'
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
