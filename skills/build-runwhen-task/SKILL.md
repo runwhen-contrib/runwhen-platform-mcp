@@ -76,7 +76,14 @@ Call `commit_slx` with:
 - `statement`: what should be true (e.g. "Replication lag should be under 30s")
 - `access`: `read-only` for monitoring, `read-write` for remediation
 - `data`: `logs-bulk` for command output, `config` for config checks, `logs-stacktrace` for stack traces
+- `resource_path`: infrastructure location for search indexing (see [configure-resource-path](../configure-resource-path/SKILL.md))
+- `hierarchy`: tag-name list for UI grouping (see [configure-hierarchy](../configure-hierarchy/SKILL.md))
+- `tags`: resource tags (e.g. `resource_type`, `resource_name`, `cluster`, `namespace`)
 
 Optionally add an SLI:
 - `sli_script` for a custom health metric (returns 0-1)
 - `cron_schedule` for time-based triggering (e.g. `"0 * * * *"` for hourly)
+
+### 8. Wait for reconciliation
+
+After `commit_slx` succeeds, the commit must reconcile through the system before the SLX appears in workspace search, UI, or chat results. Allow 1-3 minutes. Do not assume the SLX is immediately queryable — reading the config back via `get_workspace_config_index` or `search_workspace` may return stale results until reconciliation completes.

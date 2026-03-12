@@ -78,6 +78,25 @@ class TestBuildSlxYaml:
         doc = self._parse(additional_context={"resourcePath": "github"})
         assert doc["spec"]["additionalContext"]["resourcePath"] == "github"
 
+    def test_additional_context_with_hierarchy(self) -> None:
+        doc = self._parse(
+            additional_context={
+                "resourcePath": "runwhen/papi",
+                "hierarchy": ["resource_type", "resource_name"],
+            },
+        )
+        ac = doc["spec"]["additionalContext"]
+        assert ac["resourcePath"] == "runwhen/papi"
+        assert ac["hierarchy"] == ["resource_type", "resource_name"]
+
+    def test_additional_context_hierarchy_only(self) -> None:
+        doc = self._parse(
+            additional_context={"hierarchy": ["resource_type", "resource_name"]},
+        )
+        ac = doc["spec"]["additionalContext"]
+        assert ac["hierarchy"] == ["resource_type", "resource_name"]
+        assert "resourcePath" not in ac
+
     def test_no_additional_context_by_default(self) -> None:
         doc = self._parse()
         assert "additionalContext" not in doc["spec"]
