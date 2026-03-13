@@ -542,6 +542,25 @@ def _build_slx_yaml(
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
+async def _get_codebundle_ref(workspace: str) -> str:
+    """Resolve the codebundle branch used by this workspace's tool-builder runtime.
+
+    Fetches the debugslx runbook to discover which ``ref`` the workspace is
+    configured to use.  Falls back to ``"main"`` when the debugslx is not
+    reachable (e.g. workspace has no debugslx, network error, or the API
+    response format is unexpected).
+    """
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/debugslx/runbook")
+        if isinstance(data, dict):
+            ref = data.get("spec", {}).get("codeBundle", {}).get("ref")
+            if ref:
+                return ref
+    except Exception:
+        pass
+    return "main"
+
+
 def _build_runbook_yaml(
     workspace: str,
     slx_name: str,
@@ -551,6 +570,7 @@ def _build_runbook_yaml(
     location: str,
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
+    codebundle_ref: str | None = None,
 ) -> str:
     """Generate runbook.yaml content for a Tool Builder task."""
     config_provided = [
@@ -572,9 +592,13 @@ def _build_runbook_yaml(
 
     secrets_provided = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
 
+    bundle = dict(RB_CODE_BUNDLE)
+    if codebundle_ref:
+        bundle["ref"] = codebundle_ref
+
     spec: dict[str, Any] = {
         "location": location,
-        "codeBundle": dict(RB_CODE_BUNDLE),
+        "codeBundle": bundle,
         "configProvided": config_provided,
     }
     if secrets_provided:
@@ -607,6 +631,7 @@ def _build_sli_yaml(
     interval_seconds: int = 300,
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
+    codebundle_ref: str | None = None,
 ) -> str:
     """Generate sli.yaml content for a Tool Builder SLI."""
     config_provided = [
@@ -627,8 +652,11 @@ def _build_sli_yaml(
 
     secrets_provided = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
 
+    bundle = dict(SLI_CODE_BUNDLE)
+    if codebundle_ref:
+        bundle["ref"] = codebundle_ref
+
     spec: dict[str, Any] = {
-        "location": location,
         "locations": [location],
         "displayUnitsLong": "OK",
         "displayUnitsShort": "ok",
@@ -640,7 +668,7 @@ def _build_sli_yaml(
                 "sessionTTL": "10m",
             }
         },
-        "codeBundle": dict(SLI_CODE_BUNDLE),
+        "codeBundle": bundle,
         "configProvided": config_provided,
     }
     if secrets_provided:
@@ -669,6 +697,7 @@ def _build_cron_sli_yaml(
     interval_seconds: int = 60,
     target_slx: str | None = None,
     dry_run: bool = False,
+    codebundle_ref: str | None = None,
 ) -> str:
     """Generate sli.yaml for the cron-scheduler-sli codebundle.
 
@@ -683,8 +712,11 @@ def _build_cron_sli_yaml(
     if target_slx:
         config_provided.append({"name": "TARGET_SLX", "value": target_slx})
 
+    bundle = dict(CRON_SLI_CODE_BUNDLE)
+    if codebundle_ref:
+        bundle["ref"] = codebundle_ref
+
     spec: dict[str, Any] = {
-        "location": location,
         "locations": [location],
         "displayUnitsLong": "OK",
         "displayUnitsShort": "ok",
@@ -696,7 +728,7 @@ def _build_cron_sli_yaml(
                 "sessionTTL": "10m",
             }
         },
-        "codeBundle": dict(CRON_SLI_CODE_BUNDLE),
+        "codeBundle": bundle,
         "configProvided": config_provided,
     }
 
@@ -1745,6 +1777,7 @@ async def commit_slx(
     data: str = "logs-bulk",
     resource_path: str | None = None,
     hierarchy: list[str] | None = None,
+    codebundle_ref: str | None = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -1805,6 +1838,9 @@ async def commit_slx(
             Sets ``spec.additionalContext.hierarchy`` in the SLX YAML.
             Each entry should be a tag name whose value forms a segment of the
             hierarchical path (e.g. ["resource_type", "resource_name"]).
+        codebundle_ref: Git ref (branch/tag) for the codebundle. When not provided,
+            automatically resolved from the workspace's debugslx configuration
+            (falls back to "main").
     """
     ws = _resolve_workspace(workspace_name)
     script_b64 = base64.b64encode(script.encode()).decode()
@@ -1834,6 +1870,9 @@ async def commit_slx(
 
     if owners is None:
         owners = [await _get_user_email()]
+
+    if not codebundle_ref:
+        codebundle_ref = await _get_codebundle_ref(ws)
 
     additional_context: dict[str, Any] | None = None
     if resource_path or hierarchy:
@@ -1869,6 +1908,7 @@ async def commit_slx(
             location=location,
             env_vars=env_vars,
             secret_vars=secret_vars,
+            codebundle_ref=codebundle_ref,
         )
         committed_types.append("task")
 
@@ -1884,6 +1924,7 @@ async def commit_slx(
                 interval_seconds=sli_interval_seconds,
                 env_vars=env_vars,
                 secret_vars=secret_vars,
+                codebundle_ref=codebundle_ref,
             )
             committed_types.append("sli (custom script)")
 
@@ -1894,6 +1935,7 @@ async def commit_slx(
                 location=location,
                 cron_schedule=cron_schedule,
                 interval_seconds=sli_interval_seconds,
+                codebundle_ref=codebundle_ref,
             )
             committed_types.append("sli (cron-scheduler)")
 
@@ -1907,6 +1949,7 @@ async def commit_slx(
             interval_seconds=interval_seconds,
             env_vars=env_vars,
             secret_vars=secret_vars,
+            codebundle_ref=codebundle_ref,
         )
         committed_types.append("sli")
 
@@ -1929,6 +1972,7 @@ async def commit_slx(
         "slx_name": slx_name,
         "workspace": ws,
         "branch": branch,
+        "codebundle_ref": codebundle_ref,
         "committed_files": list(files.keys()),
         "committed_types": type_label,
         "response": data,

@@ -416,7 +416,6 @@ metadata:
     workspace: "workspace"
     slx: "workspace--slx-short-name"
 spec:
-  location: "location-01-us-west1"
   locations:
     - "location-01-us-west1"
   displayUnitsLong: "OK"
@@ -452,7 +451,7 @@ Tool Builder scripts use the generic code collection:
 | Constant | Value |
 |----------|-------|
 | Repo URL | `https://github.com/runwhen-contrib/rw-generic-codecollection.git` |
-| Ref | `main` |
+| Ref | Auto-detected from workspace debugslx (default: `main`) |
 | Runbook path | `codebundles/tool-builder/runbook.robot` |
 | SLI path | `codebundles/tool-builder/sli.robot` |
 
@@ -461,8 +460,14 @@ Cron-scheduler SLI uses the workspace utilities collection:
 | Constant | Value |
 |----------|-------|
 | Repo URL | `https://github.com/runwhen-contrib/rw-workspace-utils.git` |
-| Ref | `main` |
+| Ref | Auto-detected from workspace debugslx (default: `main`) |
 | SLI path | `codebundles/cron-scheduler-sli/sli.robot` |
+
+The codebundle `ref` is resolved at commit time by querying the workspace's
+debugslx runbook configuration. This ensures committed SLXs use the same
+codebundle branch that the tool-builder runtime uses when testing scripts.
+Different workspaces may use different branches. The `commit_slx` tool also
+accepts an explicit `codebundle_ref` parameter to override auto-detection.
 
 ## End-to-End Flow (UI)
 
@@ -616,7 +621,6 @@ metadata:
     workspace: "workspace"
     slx: "workspace--slx-short-name"
 spec:
-  location: "location-01-us-west1"
   locations:
     - "location-01-us-west1"
   displayUnitsLong: "OK"

@@ -168,6 +168,11 @@ class TestBuildRunbookYaml:
         doc = self._parse()
         assert "secretsProvided" not in doc["spec"]
 
+    def test_has_location_singular(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["location"] == "loc-01"
+        assert "locations" not in doc["spec"]
+
     def test_no_additional_context_on_runbook(self) -> None:
         doc = self._parse()
         assert "additionalContext" not in doc["spec"]
@@ -177,6 +182,14 @@ class TestBuildRunbookYaml:
         cb = doc["spec"]["codeBundle"]
         assert "repoUrl" in cb
         assert "pathToRobot" in cb
+
+    def test_code_bundle_default_ref(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["codeBundle"]["ref"] == "main"
+
+    def test_code_bundle_custom_ref(self) -> None:
+        doc = self._parse(codebundle_ref="v2.0")
+        assert doc["spec"]["codeBundle"]["ref"] == "v2.0"
 
 
 class TestBuildSliYaml:
@@ -225,6 +238,19 @@ class TestBuildSliYaml:
         cb = doc["spec"]["codeBundle"]
         assert "repoUrl" in cb
 
+    def test_code_bundle_default_ref(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["codeBundle"]["ref"] == "main"
+
+    def test_code_bundle_custom_ref(self) -> None:
+        doc = self._parse(codebundle_ref="staging")
+        assert doc["spec"]["codeBundle"]["ref"] == "staging"
+
+    def test_has_locations_list_not_singular(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["locations"] == ["loc-01"]
+        assert "location" not in doc["spec"]
+
     def test_env_and_secret_vars(self) -> None:
         doc = self._parse(
             env_vars={"NS": "prod"},
@@ -254,6 +280,19 @@ class TestBuildCronSliYaml:
         doc = self._parse()
         assert doc["kind"] == "ServiceLevelIndicator"
         assert doc["metadata"]["name"] == FULL_NAME
+
+    def test_has_locations_list_not_singular(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["locations"] == ["loc-01"]
+        assert "location" not in doc["spec"]
+
+    def test_code_bundle_default_ref(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["codeBundle"]["ref"] == "main"
+
+    def test_code_bundle_custom_ref(self) -> None:
+        doc = self._parse(codebundle_ref="develop")
+        assert doc["spec"]["codeBundle"]["ref"] == "develop"
 
     def test_cron_schedule_in_config(self) -> None:
         doc = self._parse(cron_schedule="0 8 * * 1-5")
