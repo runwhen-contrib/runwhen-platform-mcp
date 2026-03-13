@@ -542,23 +542,32 @@ def _build_slx_yaml(
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
-async def _get_codebundle_ref(workspace: str) -> str:
-    """Resolve the codebundle branch used by this workspace's tool-builder runtime.
+async def _get_debugslx(workspace: str) -> dict[str, Any]:
+    """Fetch the workspace's debugslx runbook data.
 
-    Fetches the debugslx runbook to discover which ``ref`` the workspace is
-    configured to use.  Falls back to ``"main"`` when the debugslx is not
-    reachable (e.g. workspace has no debugslx, network error, or the API
-    response format is unexpected).
+    The debugslx is the built-in SLX that the Tool Builder runtime uses.
+    Its runbook response contains the codebundle configuration (ref, repoUrl)
+    and the available runner locations under ``status.runnerLocations``.
+
+    Returns an empty dict when the debugslx is unreachable.
     """
     try:
         data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/debugslx/runbook")
         if isinstance(data, dict):
-            ref = data.get("spec", {}).get("codeBundle", {}).get("ref")
-            if ref:
-                return ref
+            return data
     except Exception:
         pass
-    return "main"
+    return {}
+
+
+async def _get_codebundle_ref(workspace: str) -> str:
+    """Resolve the codebundle branch used by this workspace's tool-builder runtime.
+
+    Falls back to ``"main"`` when the debugslx is unreachable.
+    """
+    data = await _get_debugslx(workspace)
+    ref = data.get("codeBundleRef") or data.get("spec", {}).get("codeBundle", {}).get("ref")
+    return ref or "main"
 
 
 def _build_runbook_yaml(
@@ -1489,8 +1498,19 @@ async def get_workspace_locations(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/locations")
-    return json.dumps(data, indent=2)
+    data = await _get_debugslx(ws)
+    runner_locations = data.get("status", {}).get("runnerLocations", [])
+    locations = [
+        {
+            "location": rl["location"],
+            "locationUUID": rl.get("locationUUID", rl["location"]),
+            "lastUpdated": rl.get("lastUpdated"),
+            "status": rl.get("status", {}).get("code"),
+        }
+        for rl in runner_locations
+        if "location" in rl
+    ]
+    return json.dumps(locations, indent=2)
 
 
 @mcp.tool()
