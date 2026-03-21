@@ -1,0 +1,48 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.runwhen/runwhen-platform-mcp",
+  "title": "RunWhen Platform",
+  "description": "AI SRE platform — workspace chat, issue triage, task authoring, and infrastructure health checks via 27+ tools",
+  "version": "0.0.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.{domain}.runwhen.com/mcp",
+      "variables": {
+        "domain": {
+          "description": "RunWhen environment (e.g. 'beta', 'app')",
+          "isRequired": true,
+          "choices": ["beta", "app"],
+          "default": "app"
+        }
+      }
+    }
+  ],
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "runwhen-platform-mcp",
+      "transport": {
+        "type": "stdio"
+      },
+      "environment_variables": [
+        {
+          "name": "RW_API_URL",
+          "description": "RunWhen PAPI URL (e.g. https://papi.beta.runwhen.com)",
+          "isRequired": true
+        },
+        {
+          "name": "RUNWHEN_TOKEN",
+          "description": "RunWhen JWT or Personal Access Token",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "DEFAULT_WORKSPACE",
+          "description": "Default workspace name",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

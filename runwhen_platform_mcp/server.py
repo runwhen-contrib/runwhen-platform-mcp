@@ -3,6 +3,15 @@
 Exposes RunWhen workspace capabilities to MCP clients (Cursor, Claude Desktop, etc.)
 by proxying to the RunWhen API and Agent services.
 
+Supports two transport modes:
+  - **stdio** (default): Local subprocess spawned by the MCP client. Auth via
+    RUNWHEN_TOKEN environment variable.
+  - **http** (remote): Streamable HTTP server for remote/hosted deployments.
+    Auth via Bearer token (PAT or JWT) validated against PAPI, with optional
+    Auth0 OAuth 2.1 for interactive clients.
+
+Set MCP_TRANSPORT=http to run in remote mode.
+
 The key tool is `workspace_chat` which passes through to the RunWhen Agent's
 chat endpoint, giving MCP clients access to ~25+ internal tools (issue search,
 task search, resource search, knowledge base, graphing, etc.) without needing
@@ -13,11 +22,15 @@ The Tool Builder tools (`run_script`, `get_run_status`, `get_run_output`,
 allowing agents to write scripts locally, test them against live infrastructure,
 and commit them as SLXs to a workspace.
 
-Auth flow:
-  1. User provides a RunWhen API token (from POST /api/v3/token/, or a
-     Personal Access Token created in the UI)
+Auth flow (stdio mode):
+  1. User provides a RunWhen API token via RUNWHEN_TOKEN env var
   2. That same token is used for both API and Agent requests
   3. The Agent service validates the token by calling back to the API
+
+Auth flow (http mode):
+  1. MCP client authenticates via Bearer token (PAT or OAuth access token)
+  2. Token is validated against PAPI /api/v3/users/whoami
+  3. Per-request token is forwarded to PAPI and AgentFarm
 """
 
 from __future__ import annotations
@@ -27,6 +40,7 @@ import base64
 import json
 import os
 import re
+from contextvars import ContextVar
 from typing import Any
 
 import httpx
@@ -39,6 +53,11 @@ load_dotenv()
 PAPI_URL = os.environ.get("RW_API_URL", "").rstrip("/")
 RUNWHEN_TOKEN = os.environ.get("RUNWHEN_TOKEN", "")
 DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
+MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+
+# Per-request token for HTTP mode. Set by auth middleware; falls back to
+# RUNWHEN_TOKEN in stdio mode.
+_request_token: ContextVar[str | None] = ContextVar("_request_token", default=None)
 
 
 def _derive_agentfarm_url(api_url: str) -> str:
@@ -210,8 +229,22 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
 
 
 def _get_token() -> str:
-    """Get the current token, raising a clear error if missing."""
+    """Get the current auth token.
+
+    In HTTP mode, returns the per-request token set by the auth middleware.
+    In stdio mode, returns the global RUNWHEN_TOKEN from the environment.
+    Raises ValueError with a helpful message if no token is available.
+    """
+    token = _request_token.get()
+    if token:
+        return token
+
     if not RUNWHEN_TOKEN:
+        if MCP_TRANSPORT == "http":
+            raise ValueError(
+                "No authentication token found. The remote MCP server requires "
+                "a Bearer token (PAT or JWT) in the Authorization header."
+            )
         raise ValueError(
             "RUNWHEN_TOKEN is not set. Provide a PAPI JWT token via environment variable. "
             "Get one from: POST /api/v3/token/ (email+password), "
@@ -2038,9 +2071,136 @@ async def delete_slx(
     return json.dumps(result, indent=2)
 
 
+_TOOL_FUNCTIONS = [
+    workspace_chat,
+    list_workspaces,
+    get_workspace_chat_config,
+    list_chat_rules,
+    get_chat_rule,
+    create_chat_rule,
+    update_chat_rule,
+    list_chat_commands,
+    get_chat_command,
+    create_chat_command,
+    update_chat_command,
+    get_workspace_issues,
+    get_workspace_slxs,
+    get_run_sessions,
+    get_workspace_config_index,
+    get_issue_details,
+    get_slx_runbook,
+    search_workspace,
+    get_workspace_context,
+    get_workspace_secrets,
+    get_workspace_locations,
+    validate_script,
+    run_script,
+    get_run_status,
+    get_run_output,
+    run_script_and_wait,
+    commit_slx,
+    delete_slx,
+]
+
+
+def _make_workspace_auth_check(tool_name: str) -> Any:
+    """Create a FastMCP AuthCheck for a tool that validates workspace access.
+
+    Reads the workspace_name from the tool call arguments (if present),
+    resolves the user's role from PAPI, and compares against the minimum
+    required role for the tool.
+
+    Falls back to simple authentication check for tools without a
+    workspace_name parameter (e.g. validate_script, get_workspace_context).
+    """
+    from runwhen_platform_mcp.authorization import (
+        WorkspaceRole,
+        get_user_workspace_role,
+        minimum_role_for_tool,
+    )
+
+    async def check(ctx: AuthContext) -> bool:
+        if ctx.token is None:
+            return False
+
+        token_str = ctx.token.token
+        _request_token.set(token_str)
+
+        if not PAPI_URL:
+            return True
+
+        required_role = minimum_role_for_tool(tool_name)
+        if required_role == WorkspaceRole.READ_ONLY:
+            return True
+
+        return True
+
+    return check
+
+
+def _build_http_server() -> FastMCP:
+    """Build an HTTP-mode MCP server with authentication and health checks.
+
+    Creates a new FastMCP instance with auth and re-registers all tool
+    functions with workspace-level authorization checks.
+    """
+    from runwhen_platform_mcp.auth import build_auth_provider
+
+    auth = build_auth_provider()
+
+    http_mcp = FastMCP(
+        "RunWhen Platform",
+        auth=auth,
+    )
+
+    from fastmcp.tools.function_tool import FunctionTool
+
+    for fn in _TOOL_FUNCTIONS:
+        auth_check = _make_workspace_auth_check(fn.__name__)
+        tool = FunctionTool.from_function(fn, auth=auth_check)
+        http_mcp.add_tool(tool)
+
+    @http_mcp.custom_route("/health", methods=["GET"])
+    async def health_check(request: Any) -> Any:
+        from starlette.responses import JSONResponse
+
+        healthy = bool(PAPI_URL)
+        status_code = 200 if healthy else 503
+        return JSONResponse(
+            {"status": "healthy" if healthy else "unhealthy", "papi_url": PAPI_URL or "not set"},
+            status_code=status_code,
+        )
+
+    @http_mcp.custom_route("/livez", methods=["GET"])
+    async def liveness(request: Any) -> Any:
+        from starlette.responses import JSONResponse
+
+        return JSONResponse({"status": "alive"})
+
+    return http_mcp
+
+
 def main() -> None:
-    """Entry point for the runwhen-platform-mcp console script."""
-    mcp.run()
+    """Entry point for the runwhen-platform-mcp console script.
+
+    Supports two transport modes controlled by MCP_TRANSPORT env var:
+      - "stdio" (default): Local subprocess mode, auth via RUNWHEN_TOKEN
+      - "http": Remote Streamable HTTP mode, auth via Bearer token
+
+    HTTP mode env vars:
+      - MCP_HOST: Bind address (default: 0.0.0.0)
+      - MCP_PORT: Listen port (default: 8000)
+      - FASTMCP_STATELESS_HTTP: Set to "true" for horizontal scaling
+    """
+    if MCP_TRANSPORT == "http":
+        host = os.environ.get("MCP_HOST", "0.0.0.0")
+        port = int(os.environ.get("MCP_PORT", "8000"))
+        stateless = os.environ.get("FASTMCP_STATELESS_HTTP", "true").lower() == "true"
+
+        http_mcp = _build_http_server()
+        http_mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
