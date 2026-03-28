@@ -41,6 +41,11 @@
           "name": "DEFAULT_WORKSPACE",
           "description": "Default workspace name",
           "isRequired": false
+        },
+        {
+          "name": "MCP_SERVER_LABEL",
+          "description": "Human-readable label (e.g. 'prod', 'beta') included in server name for multi-environment setups",
+          "isRequired": false
         }
       ]
     }

@@ -1,0 +1,24 @@
+{
+  "_comment": "Multi-environment MCP config. Each entry points at a different RunWhen environment/workspace. Use MCP_SERVER_LABEL to give each server a clear identity that LLMs can distinguish. IMPORTANT: Only enable ONE server at a time unless you need cross-environment workflows. Multiple active servers with identical tool names confuse LLM agents.",
+
+  "mcpServers": {
+    "runwhen": {
+      "command": "runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.app.runwhen.com",
+        "RUNWHEN_TOKEN": "<your-prod-token>",
+        "DEFAULT_WORKSPACE": "my-prod-workspace",
+        "MCP_SERVER_LABEL": "prod"
+      }
+    },
+    "runwhen-beta": {
+      "command": "runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.beta.runwhen.com",
+        "RUNWHEN_TOKEN": "<your-beta-token>",
+        "DEFAULT_WORKSPACE": "my-beta-workspace",
+        "MCP_SERVER_LABEL": "beta"
+      }
+    }
+  }
+}

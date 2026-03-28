@@ -54,6 +54,7 @@ PAPI_URL = os.environ.get("RW_API_URL", "").rstrip("/")
 RUNWHEN_TOKEN = os.environ.get("RUNWHEN_TOKEN", "")
 DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+MCP_SERVER_LABEL = os.environ.get("MCP_SERVER_LABEL", "")
 
 # Per-request token for HTTP mode. Set by auth middleware; falls back to
 # RUNWHEN_TOKEN in stdio mode.
@@ -68,33 +69,89 @@ def _derive_agentfarm_url(api_url: str) -> str:
 AGENTFARM_URL = _derive_agentfarm_url(PAPI_URL)
 RUNWHEN_CONTEXT_FILE = os.environ.get("RUNWHEN_CONTEXT_FILE", "")
 
+
+def _derive_env_label() -> str:
+    """Derive a short environment label from ``RW_API_URL``.
+
+    Examples: ``https://papi.beta.runwhen.com`` → ``beta``,
+              ``https://papi.app.runwhen.com`` → ``app``.
+    """
+    if not PAPI_URL:
+        return ""
+    m = re.search(r"://papi\.(\w+)\.", PAPI_URL)
+    return m.group(1) if m else ""
+
+
+def _build_server_name() -> str:
+    """Build a unique, human-readable MCP server name.
+
+    When ``MCP_SERVER_LABEL`` is set, use it directly.  Otherwise combine
+    the environment label and default workspace so that each MCP server
+    instance is distinguishable when multiple environments are registered
+    in the same MCP client.
+    """
+    if MCP_SERVER_LABEL:
+        return f"RunWhen Platform ({MCP_SERVER_LABEL})"
+    parts: list[str] = []
+    env = _derive_env_label()
+    if env:
+        parts.append(env)
+    if DEFAULT_WORKSPACE:
+        parts.append(DEFAULT_WORKSPACE)
+    if parts:
+        return f"RunWhen Platform ({'/'.join(parts)})"
+    return "RunWhen Platform"
+
+
+def _build_server_instructions() -> str:
+    """Build the MCP server instructions with environment identity.
+
+    Including the target environment and workspace in the instructions helps
+    LLM agents route tool calls to the correct server when multiple RunWhen
+    MCP servers are registered (e.g. beta vs prod, different workspaces).
+    """
+    env = _derive_env_label()
+    identity_parts: list[str] = []
+    if env:
+        identity_parts.append(f"environment={env}")
+    if DEFAULT_WORKSPACE:
+        identity_parts.append(f"workspace={DEFAULT_WORKSPACE}")
+    if PAPI_URL:
+        identity_parts.append(f"api={PAPI_URL}")
+
+    identity = (
+        f"Server identity: {', '.join(identity_parts)}.\n"
+        "When multiple RunWhen MCP servers are configured, use THIS server's "
+        "tools for operations targeting the environment and workspace above.\n\n"
+        if identity_parts
+        else ""
+    )
+
+    return (
+        f"{identity}"
+        "RunWhen Platform MCP server — workspace intelligence, task authoring, "
+        "and infrastructure automation.\n\n"
+        "PRIMARY TOOL: `workspace_chat` — ask the RunWhen AI assistant about "
+        "infrastructure (issues, tasks, run sessions, resources, knowledge base).\n\n"
+        "TASK AUTHORING WORKFLOW:\n"
+        "1. `get_workspace_context` — load RUNWHEN.md rules (ALWAYS call first)\n"
+        "2. `get_workspace_secrets` + `get_workspace_locations` — discover config\n"
+        "3. `validate_script` — check contract compliance\n"
+        "4. `run_script_and_wait` — test against live infrastructure\n"
+        "5. `commit_slx` — save as SLX (supports task + SLI together)\n\n"
+        "SCRIPT CONTRACT:\n"
+        "- Python task: `main()` returns List[Dict] with keys: "
+        "'issue title', 'issue description', 'issue severity' (1-4), 'issue next steps'\n"
+        "- Bash task: `main()` writes issue JSON array to FD 3 (>&3)\n"
+        "- Python/Bash SLI: `main()` returns/writes float 0-1\n\n"
+        "REQUIRED TAGS for `commit_slx`: "
+        "access='read-write'|'read-only', data='logs-bulk'|'config'|'logs-stacktrace'"
+    )
+
+
 mcp = FastMCP(
-    "RunWhen Platform",
-    instructions=(
-        "RunWhen Platform MCP server. Use `workspace_chat` to ask the RunWhen AI assistant "
-        "about your infrastructure — it can search issues, tasks, run sessions, resources, "
-        "knowledge base articles, and more. Use the other tools for direct data access.\n\n"
-        "Tool Builder: Use `run_script` to test bash/python scripts against live infrastructure, "
-        "`get_run_status` and `get_run_output` to monitor and retrieve results, and `commit_slx` "
-        "to save a tested script as an SLX in the workspace. `commit_slx` supports creating "
-        "both a task (runbook) and SLI together — either a custom SLI script or a cron-scheduled "
-        "SLI that triggers the runbook on a schedule. Use `get_workspace_secrets` to "
-        "discover available secrets.\n\n"
-        "IMPORTANT — Before writing any task or script, call `get_workspace_context` to load "
-        "domain-specific rules from the project's RUNWHEN.md file. This includes infrastructure "
-        "conventions, database access rules, naming patterns, and other constraints that scripts "
-        "must follow.\n\n"
-        "IMPORTANT — Issue format for task scripts:\n"
-        "  Python: return a list of dicts with keys: 'issue title', 'issue description', "
-        "'issue severity' (int 1-4), 'issue next steps', and optionally 'issue observed at'.\n"
-        "  Bash: write JSON array to FD 3 with keys: 'issue title', 'issue description', "
-        "'issue severity', 'issue next steps'.\n\n"
-        "IMPORTANT — Required SLX tags (set via commit_slx parameters):\n"
-        "  access: 'read-write' (task modifies resources) or 'read-only' (task only inspects).\n"
-        "  data: 'logs-bulk' (general command output), 'config' (configuration data), "
-        "or 'logs-stacktrace' (stacktrace analysis).\n"
-        "See docs/tool-builder-flow.md for the full contract."
-    ),
+    _build_server_name(),
+    instructions=_build_server_instructions(),
 )
 
 # ---------------------------------------------------------------------------
@@ -1311,7 +1368,7 @@ async def get_run_sessions(
         limit: Maximum number of run sessions to return (default 20).
     """
     ws = _resolve_workspace(workspace_name)
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {"page": 1, "page-size": limit}
     data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions", params=params)
     return json.dumps(data, indent=2)
 
@@ -1383,9 +1440,9 @@ async def search_workspace(
         workspace_name: The workspace to search. Uses DEFAULT_WORKSPACE if not provided.
     """
     ws = _resolve_workspace(workspace_name)
-    data = await _papi_get(
+    _, data = await _papi_post(
         f"/api/v3/workspaces/{ws}/autocomplete",
-        params={"q": query},
+        {"query": query},
     )
     return json.dumps(data, indent=2)
 
@@ -1546,6 +1603,29 @@ async def get_workspace_locations(
     return json.dumps(locations, indent=2)
 
 
+def _resolve_script(script: str | None, script_path: str | None) -> str:
+    """Return script content from either an inline string or a local file path.
+
+    Exactly one of *script* or *script_path* must be provided.  When
+    *script_path* is used, the file is read in its entirety and returned
+    as-is.  This avoids passing very large scripts through the MCP JSON-RPC
+    message payload.
+    """
+    if script and script_path:
+        raise ValueError(
+            "Provide either 'script' (inline) or 'script_path' (file), not both."
+        )
+    if script_path:
+        path = os.path.expanduser(script_path)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Script file not found: {path}")
+        with open(path) as f:
+            return f.read()
+    if script:
+        return script
+    raise ValueError("One of 'script' or 'script_path' must be provided.")
+
+
 @mcp.tool()
 async def validate_script(
     script: str,
@@ -1590,13 +1670,14 @@ async def validate_script(
 
 @mcp.tool()
 async def run_script(
-    script: str,
-    location: str,
+    script: str | None = None,
+    location: str = "",
     workspace_name: str | None = None,
     interpreter: str = "bash",
     run_type: str = "task",
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
+    script_path: str | None = None,
 ) -> str:
     """Execute a script on a RunWhen runner for testing.
 
@@ -1625,7 +1706,14 @@ async def run_script(
             (e.g. {"NAMESPACE": "default"}).
         secret_vars: Secret mappings — env var name to workspace secret key
             (e.g. {"kubeconfig": "kubeconfig"}).
+        script_path: Local file path to read the script from. Use instead of
+            'script' when the script is large. Mutually exclusive with 'script'.
     """
+    try:
+        script = _resolve_script(script, script_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+
     ws = _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
@@ -1710,13 +1798,14 @@ async def get_run_output(
 
 @mcp.tool()
 async def run_script_and_wait(
-    script: str,
-    location: str,
+    script: str | None = None,
+    location: str = "",
     workspace_name: str | None = None,
     interpreter: str = "bash",
     run_type: str = "task",
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
+    script_path: str | None = None,
 ) -> str:
     """Execute a script and wait for results (combines run + poll + output).
 
@@ -1742,7 +1831,14 @@ async def run_script_and_wait(
         run_type: "task" or "sli" (default: "task").
         env_vars: Environment variables for the script.
         secret_vars: Secret mappings (env var name → workspace secret key).
+        script_path: Local file path to read the script from. Use instead of
+            'script' when the script is large. Mutually exclusive with 'script'.
     """
+    try:
+        script = _resolve_script(script, script_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+
     ws = _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
@@ -1808,9 +1904,9 @@ async def commit_slx(
     slx_name: str,
     alias: str,
     statement: str,
-    script: str,
-    task_title: str,
-    location: str,
+    script: str | None = None,
+    task_title: str = "",
+    location: str = "",
     interpreter: str = "bash",
     task_type: str = "task",
     workspace_name: str | None = None,
@@ -1831,6 +1927,8 @@ async def commit_slx(
     resource_path: str | None = None,
     hierarchy: list[str] | None = None,
     codebundle_ref: str | None = None,
+    script_path: str | None = None,
+    sli_script_path: str | None = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -1894,7 +1992,23 @@ async def commit_slx(
         codebundle_ref: Git ref (branch/tag) for the codebundle. When not provided,
             automatically resolved from the workspace's debugslx configuration
             (falls back to "main").
+        script_path: Local file path to read the main script from. Use instead of
+            'script' when the script is large. Mutually exclusive with 'script'.
+        sli_script_path: Local file path to read the SLI script from. Use instead
+            of 'sli_script' when the SLI script is large. Mutually exclusive with
+            'sli_script'.
     """
+    try:
+        script = _resolve_script(script, script_path)
+    except (ValueError, FileNotFoundError) as exc:
+        return json.dumps({"error": str(exc)}, indent=2)
+
+    if sli_script_path:
+        try:
+            sli_script = _resolve_script(sli_script, sli_script_path)
+        except (ValueError, FileNotFoundError) as exc:
+            return json.dumps({"error": f"SLI script: {exc}"}, indent=2)
+
     ws = _resolve_workspace(workspace_name)
     script_b64 = base64.b64encode(script.encode()).decode()
 
@@ -2020,8 +2134,9 @@ async def commit_slx(
         body,
     )
 
+    success = status_code in (200, 201)
     result = {
-        "status": "created" if status_code == 201 else "updated",
+        "status": "committed" if success else f"error_{status_code}",
         "slx_name": slx_name,
         "workspace": ws,
         "branch": branch,
@@ -2149,7 +2264,8 @@ def _build_http_server() -> FastMCP:
     auth = build_auth_provider()
 
     http_mcp = FastMCP(
-        "RunWhen Platform",
+        _build_server_name(),
+        instructions=_build_server_instructions(),
         auth=auth,
     )
 

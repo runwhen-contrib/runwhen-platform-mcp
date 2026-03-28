@@ -14,76 +14,34 @@ End-to-end workflow for creating a RunWhen SLX from scratch.
 - Automating incident response with scheduled checks
 - Adding an SLI (health metric) to an existing task
 
-## Instructions
+## Workflow
 
-Follow these steps in order:
+1. **Load context** — `get_workspace_context` (ALWAYS first — loads RUNWHEN.md rules)
+2. **Discover config** — `get_workspace_secrets` + `get_workspace_locations`
+3. **Write script** — Use the reference templates below as starting points
+4. **Validate** — `validate_script` checks contract compliance
+5. **Test** — `run_script_and_wait` with location, env_vars, secret_vars
+6. **Iterate** — Fix based on output, re-test until issues/severity/next-steps are correct
+7. **Commit** — `commit_slx` with metadata (see reference examples)
+8. **Wait** — Allow 1-3 minutes for reconciliation before querying the SLX
 
-### 1. Load context
+## Reference templates
 
-Call `get_workspace_context` to read the project's RUNWHEN.md file. This contains infrastructure conventions, database access rules, naming patterns, and constraints that your script must follow. Do not skip this step.
+Read these files for complete, contract-compliant script templates:
 
-### 2. Discover configuration
+| Template | Path | Use for |
+|----------|------|---------|
+| Bash task | `references/bash-task-template.sh` | Bash health checks that report issues |
+| Python task | `references/python-task-template.py` | Python health checks that report issues |
+| Bash SLI | `references/bash-sli-template.sh` | Bash health metric (returns 0-1) |
+| Python SLI | `references/python-sli-template.py` | Python health metric (returns 0-1) |
+| Commit examples | `references/commit-examples.md` | `commit_slx` call patterns for common scenarios |
 
-Call `get_workspace_secrets` and `get_workspace_locations` to find available secrets (e.g. kubeconfig) and runner locations for the target workspace.
+## Key rules
 
-### 3. Write the script
-
-Write a bash or python script following the RunWhen contract:
-
-**Python task** — `main()` returns `List[Dict]` with issue keys:
-```python
-def main():
-    import os, subprocess
-    issues = []
-    # Your logic here — use os.environ for config, subprocess for kubectl
-    issues.append({
-        "issue title": "Descriptive title",
-        "issue description": "Details about the problem",
-        "issue severity": 2,
-        "issue next steps": "Concrete remediation guidance",
-    })
-    return issues
-```
-
-**Bash task** — `main()` writes issue JSON to FD 3:
-```bash
-main() {
-    # Your logic here
-    issues='[]'
-    jq -n --argjson issues "$issues" '$issues' >&3
-}
-```
-
-Apply rules from RUNWHEN.md (e.g. replica targeting, kubectl flags, auth patterns).
-
-### 4. Validate
-
-Call `validate_script` with the script to check contract compliance before testing.
-
-### 5. Test
-
-Call `run_script_and_wait` with the script, a runner location, and any required env_vars / secret_vars. Review the returned issues, stdout, stderr, and report.
-
-### 6. Iterate
-
-If output is wrong or incomplete, fix the script and re-test. Repeat until the issues, severity levels, and next steps are correct.
-
-### 7. Commit
-
-Call `commit_slx` with:
-- `slx_name`: lowercase-kebab-case (e.g. `postgres-replication-lag`)
-- `alias`: human-readable name
-- `statement`: what should be true (e.g. "Replication lag should be under 30s")
-- `access`: `read-only` for monitoring, `read-write` for remediation
-- `data`: `logs-bulk` for command output, `config` for config checks, `logs-stacktrace` for stack traces
-- `resource_path`: infrastructure location for search indexing (see [configure-resource-path](../configure-resource-path/SKILL.md))
-- `hierarchy`: tag-name list for UI grouping (see [configure-hierarchy](../configure-hierarchy/SKILL.md))
-- `tags`: resource tags (e.g. `resource_type`, `resource_name`, `cluster`, `namespace`)
-
-Optionally add an SLI:
-- `sli_script` for a custom health metric (returns 0-1)
-- `cron_schedule` for time-based triggering (e.g. `"0 * * * *"` for hourly)
-
-### 8. Wait for reconciliation
-
-After `commit_slx` succeeds, the commit must reconcile through the system before the SLX appears in workspace search, UI, or chat results. Allow 1-3 minutes. Do not assume the SLX is immediately queryable — reading the config back via `get_workspace_config_index` or `search_workspace` may return stale results until reconciliation completes.
+- Secrets are **file paths** on runners — use `read_secret()` pattern or `export KUBECONFIG=$kubeconfig`
+- Always `--context=$CONTEXT` and `--request-timeout=30s` with kubectl
+- Severity: 1=critical (down), 2=high (degraded), 3=medium (warning), 4=low (info)
+- Set `access` tag: `read-only` for monitoring, `read-write` for remediation
+- Set `data` tag: `logs-bulk` | `config` | `logs-stacktrace`
+- Configure `resource_path` and `hierarchy` for search/UI grouping (see configure-resource-path and configure-hierarchy skills)

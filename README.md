@@ -154,6 +154,39 @@ Any client that supports MCP over stdio can use this server. Register a local MC
 
 See your client’s docs for where to add MCP servers (e.g. Continue, Codex, Gemini CLI, etc.).
 
+### Multiple environments
+
+If you work across multiple RunWhen environments (e.g. beta and production, or separate workspaces), you can register multiple MCP servers. **Important:** only enable one at a time unless you specifically need cross-environment workflows — multiple active servers with identical tool names confuse LLM agents.
+
+Use `MCP_SERVER_LABEL` to give each server a clear identity:
+
+```json
+{
+  "mcpServers": {
+    "runwhen": {
+      "command": "runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.app.runwhen.com",
+        "RUNWHEN_TOKEN": "your-prod-token",
+        "DEFAULT_WORKSPACE": "my-prod-workspace",
+        "MCP_SERVER_LABEL": "prod"
+      }
+    },
+    "runwhen-beta": {
+      "command": "runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.beta.runwhen.com",
+        "RUNWHEN_TOKEN": "your-beta-token",
+        "DEFAULT_WORKSPACE": "my-beta-workspace",
+        "MCP_SERVER_LABEL": "beta"
+      }
+    }
+  }
+}
+```
+
+The server includes its label, environment, and workspace in its name and instructions so agents can route tool calls to the correct instance. See `mcp-multi-env.json` for a full example.
+
 ---
 
 ## Your first prompt
@@ -226,6 +259,7 @@ The server exposes these tools, grouped by use case.
 | `RW_API_URL` | Yes | RunWhen API base URL (e.g. `https://papi.beta.runwhen.com`). Agent URL is derived (subdomain `papi` → `agentfarm`). |
 | `RUNWHEN_TOKEN` | Yes | RunWhen API token (JWT or Personal Access Token). Used for both API and Agent. |
 | `DEFAULT_WORKSPACE` | No | Default workspace so tools don’t need `workspace_name` every time. |
+| `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 
 See `.env.example` in the repo.
