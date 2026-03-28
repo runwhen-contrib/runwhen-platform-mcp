@@ -13,9 +13,9 @@ Contract requirements:
 Secrets are injected as file paths via env vars.
 Example: os.environ["kubeconfig"] is a FILE PATH, not the value.
 """
+
 import os
 import subprocess
-import json
 
 
 def read_secret(env_var: str) -> str:
@@ -29,9 +29,7 @@ def read_secret(env_var: str) -> str:
 
 def run_cmd(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
     """Run a shell command and return (returncode, stdout, stderr)."""
-    result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=timeout
-    )
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
@@ -57,15 +55,17 @@ def main():
         lines = [line for line in stdout.splitlines() if line.strip()]
         pod_names = [line.split()[0] for line in lines[:5]]
 
-        issues.append({
-            "issue title": f"{len(lines)} pod(s) not ready in namespace {namespace}",
-            "issue description": f"Pods not in Running/Succeeded state: {', '.join(pod_names)}",
-            "issue severity": 2,
-            "issue next steps": (
-                f"Run: kubectl describe pod <name> -n {namespace} "
-                "to check events and conditions"
-            ),
-        })
+        issues.append(
+            {
+                "issue title": f"{len(lines)} pod(s) not ready in namespace {namespace}",
+                "issue description": f"Pods not in Running/Succeeded state: {', '.join(pod_names)}",
+                "issue severity": 2,
+                "issue next steps": (
+                    f"Run: kubectl describe pod <name> -n {namespace} "
+                    "to check events and conditions"
+                ),
+            }
+        )
 
     # Print diagnostic info (appears in report)
     print(f"Checked namespace: {namespace}")

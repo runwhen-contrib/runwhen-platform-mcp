@@ -7,14 +7,13 @@ Common patterns:
   - Binary: 1.0 if check passes, 0.0 if it fails
   - Percentage: convert to 0-1 scale (e.g. 95% → 0.95)
 """
+
 import os
 import subprocess
 
 
 def run_cmd(cmd: str, timeout: int = 30) -> tuple[int, str, str]:
-    result = subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=timeout
-    )
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 

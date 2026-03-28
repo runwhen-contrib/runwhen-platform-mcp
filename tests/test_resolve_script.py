@@ -1,8 +1,5 @@
 """Tests for _resolve_script and script_path support (RW-441)."""
 
-import os
-import tempfile
-
 import pytest
 
 from runwhen_platform_mcp.server import _resolve_script

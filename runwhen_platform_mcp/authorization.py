@@ -21,16 +21,18 @@ from typing import Any
 import httpx
 from fastmcp.server.auth import AuthContext
 
-WRITE_TOOLS = frozenset({
-    "run_script",
-    "run_script_and_wait",
-    "commit_slx",
-    "delete_slx",
-    "create_chat_rule",
-    "update_chat_rule",
-    "create_chat_command",
-    "update_chat_command",
-})
+WRITE_TOOLS = frozenset(
+    {
+        "run_script",
+        "run_script_and_wait",
+        "commit_slx",
+        "delete_slx",
+        "create_chat_rule",
+        "update_chat_rule",
+        "create_chat_command",
+        "update_chat_command",
+    }
+)
 
 
 class WorkspaceRole(IntEnum):

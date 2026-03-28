@@ -16,7 +16,6 @@ Provides auth strategies that integrate with the RunWhen platform:
 from __future__ import annotations
 
 import os
-from typing import Any
 
 import httpx
 from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier

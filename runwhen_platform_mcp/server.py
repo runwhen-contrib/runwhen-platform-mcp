@@ -55,9 +55,7 @@ RUNWHEN_TOKEN = os.environ.get("RUNWHEN_TOKEN", "")
 DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
 MCP_SERVER_LABEL = os.environ.get("MCP_SERVER_LABEL", "")
-REGISTRY_URL = os.environ.get(
-    "RUNWHEN_REGISTRY_URL", "https://registry.runwhen.com"
-).rstrip("/")
+REGISTRY_URL = os.environ.get("RUNWHEN_REGISTRY_URL", "https://registry.runwhen.com").rstrip("/")
 
 # Per-request token for HTTP mode. Set by auth middleware; falls back to
 # RUNWHEN_TOKEN in stdio mode.
@@ -880,6 +878,7 @@ def _build_cron_sli_yaml(
 # Registry codebundle YAML builders (different shape from Tool Builder)
 # ---------------------------------------------------------------------------
 
+
 def _build_registry_runbook_yaml(
     workspace: str,
     slx_name: str,
@@ -891,12 +890,8 @@ def _build_registry_runbook_yaml(
     ref: str = "main",
 ) -> str:
     """Generate runbook.yaml for a registry codebundle (no inline script)."""
-    config_provided = [
-        {"name": k, "value": v} for k, v in (config_vars or {}).items()
-    ]
-    secrets_provided = [
-        {"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()
-    ]
+    config_provided = [{"name": k, "value": v} for k, v in (config_vars or {}).items()]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()]
 
     spec: dict[str, Any] = {
         "location": location,
@@ -941,12 +936,8 @@ def _build_registry_sli_yaml(
     description: str = "",
 ) -> str:
     """Generate sli.yaml for a registry codebundle (no inline script)."""
-    config_provided = [
-        {"name": k, "value": v} for k, v in (config_vars or {}).items()
-    ]
-    secrets_provided = [
-        {"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()
-    ]
+    config_provided = [{"name": k, "value": v} for k, v in (config_vars or {}).items()]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()]
 
     spec: dict[str, Any] = {
         "locations": [location],
@@ -1760,6 +1751,7 @@ async def delete_knowledge_base_article(
 # CodeBundle Registry (public, no auth required)
 # ---------------------------------------------------------------------------
 
+
 async def _registry_get(path: str, params: dict | None = None) -> httpx.Response:
     """GET against the public CodeBundle Registry API (no auth needed)."""
     url = f"{REGISTRY_URL}{path}"
@@ -1795,7 +1787,9 @@ async def search_registry(
 
     resp = await _registry_get("/api/v1/codebundles", params=params)
     if resp.status_code != 200:
-        return json.dumps({"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]})
+        return json.dumps(
+            {"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]}
+        )
 
     data = resp.json()
     bundles = data.get("codebundles", data if isinstance(data, list) else [])
@@ -1824,10 +1818,13 @@ async def search_registry(
             entry["resource_types"] = ct.get("resource_types", [])
         results.append(entry)
 
-    return json.dumps({
-        "total_count": data.get("total_count", len(results)),
-        "results": results,
-    }, indent=2)
+    return json.dumps(
+        {
+            "total_count": data.get("total_count", len(results)),
+            "results": results,
+        },
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -1848,9 +1845,17 @@ async def get_registry_codebundle(
         f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
     )
     if resp.status_code == 404:
-        return json.dumps({"error": f"Codebundle '{codebundle_slug}' not found in collection '{collection_slug}'."})
+        return json.dumps(
+            {
+                "error": (
+                    f"Codebundle '{codebundle_slug}' not found in collection '{collection_slug}'."
+                )
+            }
+        )
     if resp.status_code != 200:
-        return json.dumps({"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]})
+        return json.dumps(
+            {"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]}
+        )
 
     return resp.text
 
@@ -1926,9 +1931,17 @@ async def deploy_registry_codebundle(
         return json.dumps({"error": "At least one of deploy_runbook or deploy_sli must be True."})
 
     if access not in VALID_ACCESS_TAGS:
-        return json.dumps({"error": f"Invalid access tag '{access}'. Must be one of: {', '.join(VALID_ACCESS_TAGS)}"})
+        return json.dumps(
+            {
+                "error": (
+                    f"Invalid access tag '{access}'. Must be one of: {', '.join(VALID_ACCESS_TAGS)}"
+                )
+            }
+        )
     if data not in VALID_DATA_TAGS:
-        return json.dumps({"error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}"})
+        return json.dumps(
+            {"error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}"}
+        )
 
     ws = _resolve_workspace(workspace_name)
 
@@ -2189,9 +2202,7 @@ def _resolve_script(script: str | None, script_path: str | None) -> str:
     message payload.
     """
     if script and script_path:
-        raise ValueError(
-            "Provide either 'script' (inline) or 'script_path' (file), not both."
-        )
+        raise ValueError("Provide either 'script' (inline) or 'script_path' (file), not both.")
     if script_path:
         path = os.path.expanduser(script_path)
         if not os.path.isfile(path):
@@ -2939,9 +2950,10 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
     Falls back to simple authentication check for tools without a
     workspace_name parameter (e.g. validate_script, get_workspace_context).
     """
+    from fastmcp.server.auth import AuthContext
+
     from runwhen_platform_mcp.authorization import (
         WorkspaceRole,
-        get_user_workspace_role,
         minimum_role_for_tool,
     )
 
