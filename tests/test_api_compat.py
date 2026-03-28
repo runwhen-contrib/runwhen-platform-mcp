@@ -159,3 +159,29 @@ class TestKnowledgeBaseSchema:
         tool = _find_tool(tools, "delete_knowledge_base_article")
         props = tool.parameters.get("properties", {})
         assert "note_id" in props
+
+
+class TestRegistrySchema:
+    """Validate CodeBundle Registry tools."""
+
+    def test_search_registry_registered(self, tools) -> None:
+        tool = _find_tool(tools, "search_registry")
+        assert tool is not None
+
+    def test_search_registry_params(self, tools) -> None:
+        tool = _find_tool(tools, "search_registry")
+        props = tool.parameters.get("properties", {})
+        assert "search" in props
+        assert "platform" in props
+        assert "tags" in props
+        assert "max_results" in props
+
+    def test_get_registry_codebundle_registered(self, tools) -> None:
+        tool = _find_tool(tools, "get_registry_codebundle")
+        assert tool is not None
+
+    def test_get_registry_codebundle_params(self, tools) -> None:
+        tool = _find_tool(tools, "get_registry_codebundle")
+        props = tool.parameters.get("properties", {})
+        assert "collection_slug" in props
+        assert "codebundle_slug" in props

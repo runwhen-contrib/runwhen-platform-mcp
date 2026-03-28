@@ -7,9 +7,16 @@ description: Build, test, and commit a RunWhen automation task (SLX). Use when c
 
 End-to-end workflow for creating a RunWhen SLX from scratch.
 
+## Before you start — check the registry
+
+**Always search the CodeBundle Registry first** using the
+`find-and-deploy-codebundle` skill. There may already be a
+production-ready codebundle for the task. Only proceed here
+if the registry has no suitable match.
+
 ## When to use
 
-- Creating a new health check or monitoring task
+- Creating a new health check or monitoring task **that doesn't exist in the registry**
 - Building a troubleshooting runbook for infrastructure
 - Automating incident response with scheduled checks
 - Adding an SLI (health metric) to an existing task

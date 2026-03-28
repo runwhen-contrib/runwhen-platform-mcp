@@ -55,6 +55,9 @@ RUNWHEN_TOKEN = os.environ.get("RUNWHEN_TOKEN", "")
 DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
 MCP_SERVER_LABEL = os.environ.get("MCP_SERVER_LABEL", "")
+REGISTRY_URL = os.environ.get(
+    "RUNWHEN_REGISTRY_URL", "https://registry.runwhen.com"
+).rstrip("/")
 
 # Per-request token for HTTP mode. Set by auth middleware; falls back to
 # RUNWHEN_TOKEN in stdio mode.
@@ -136,7 +139,11 @@ def _build_server_instructions() -> str:
         "NOTE: workspace_chat can SEARCH and DESCRIBE tasks but CANNOT EXECUTE them.\n\n"
         "RUN EXISTING TASKS: `run_slx` — execute a committed SLX runbook. "
         "Use this (not workspace_chat) when the user asks to run/trigger a task.\n\n"
+        "REGISTRY SEARCH: `search_registry` — search the CodeBundle Registry for "
+        "reusable automation BEFORE writing custom scripts. Use `get_registry_codebundle` "
+        "for full details on a specific codebundle.\n\n"
         "TASK AUTHORING WORKFLOW:\n"
+        "0. `search_registry` — check for existing codebundles first\n"
         "1. `get_workspace_context` — load RUNWHEN.md rules (ALWAYS call first)\n"
         "2. `get_workspace_secrets` + `get_workspace_locations` — discover config\n"
         "3. `validate_script` — check contract compliance\n"
@@ -1635,6 +1642,105 @@ async def delete_knowledge_base_article(
 
 
 # ---------------------------------------------------------------------------
+# CodeBundle Registry (public, no auth required)
+# ---------------------------------------------------------------------------
+
+async def _registry_get(path: str, params: dict | None = None) -> httpx.Response:
+    """GET against the public CodeBundle Registry API (no auth needed)."""
+    url = f"{REGISTRY_URL}{path}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        return await client.get(url, params=params)
+
+
+@mcp.tool()
+async def search_registry(
+    search: str,
+    platform: str | None = None,
+    tags: str | None = None,
+    max_results: int = 10,
+) -> str:
+    """Search the RunWhen CodeBundle Registry for reusable automation.
+
+    Use this BEFORE writing a custom script — there may already be a
+    production-ready codebundle for the task.  Returns codebundles with
+    their tasks, SLIs, required env vars, and deployment metadata.
+
+    Args:
+        search: Free-text search query (e.g. "kubernetes pod health",
+                "postgres backup", "gcp iam audit").
+        platform: Filter by platform (e.g. "Kubernetes", "GCP", "AWS").
+        tags: Comma-separated support tags (e.g. "GKE,KUBERNETES").
+        max_results: Maximum number of results to return (default 10).
+    """
+    params: dict[str, str | int] = {"search": search, "limit": max_results}
+    if platform:
+        params["platform"] = platform
+    if tags:
+        params["tags"] = tags
+
+    resp = await _registry_get("/api/v1/codebundles", params=params)
+    if resp.status_code != 200:
+        return json.dumps({"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]})
+
+    data = resp.json()
+    bundles = data.get("codebundles", data if isinstance(data, list) else [])
+
+    results = []
+    for b in bundles[:max_results]:
+        entry: dict = {
+            "name": b.get("name"),
+            "display_name": b.get("display_name"),
+            "slug": b.get("slug"),
+            "description": b.get("ai_enhanced_description") or b.get("description"),
+            "platform": b.get("platform"),
+            "support_tags": b.get("support_tags", []),
+            "tasks": b.get("tasks", []),
+            "slis": b.get("slis", []),
+            "access_level": b.get("access_level"),
+            "runbook_source_url": b.get("runbook_source_url"),
+        }
+        cc = b.get("codecollection")
+        if cc:
+            entry["codecollection_slug"] = cc.get("slug")
+            entry["codecollection_git_url"] = cc.get("git_url")
+        ct = b.get("configuration_type", {})
+        if ct.get("type") == "Automatically Discovered":
+            entry["auto_discoverable"] = True
+            entry["resource_types"] = ct.get("resource_types", [])
+        results.append(entry)
+
+    return json.dumps({
+        "total_count": data.get("total_count", len(results)),
+        "results": results,
+    }, indent=2)
+
+
+@mcp.tool()
+async def get_registry_codebundle(
+    collection_slug: str,
+    codebundle_slug: str,
+) -> str:
+    """Get full details of a specific codebundle from the registry.
+
+    Use after search_registry to get complete information including
+    configuration templates, environment variables, and deployment instructions.
+
+    Args:
+        collection_slug: The codecollection slug (e.g. "rw-cli-codecollection").
+        codebundle_slug: The codebundle slug (e.g. "k8s-podresources-health").
+    """
+    resp = await _registry_get(
+        f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
+    )
+    if resp.status_code == 404:
+        return json.dumps({"error": f"Codebundle '{codebundle_slug}' not found in collection '{collection_slug}'."})
+    if resp.status_code != 200:
+        return json.dumps({"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]})
+
+    return resp.text
+
+
+# ---------------------------------------------------------------------------
 # Workspace Context (RUNWHEN.md)
 # ---------------------------------------------------------------------------
 
@@ -2522,6 +2628,8 @@ _TOOL_FUNCTIONS = [
     create_knowledge_base_article,
     update_knowledge_base_article,
     delete_knowledge_base_article,
+    search_registry,
+    get_registry_codebundle,
     get_workspace_context,
     get_workspace_secrets,
     get_workspace_locations,

@@ -237,6 +237,10 @@ The server exposes these tools, grouped by use case.
   - `create_chat_command` — Create a command (name, commandContent, scopeType, scopeId).
   - `update_chat_command` — Update a command by ID.
 
+- **CodeBundle Registry** (2 tools)
+  - `search_registry` — Search the public CodeBundle Registry for reusable automation. **Always check before writing custom scripts.**
+  - `get_registry_codebundle` — Get full details of a specific codebundle (tasks, SLIs, env vars, source URL).
+
 - **Task authoring — Tool Builder** (9 tools)
   - `get_workspace_context` — Load `RUNWHEN.md` from the project. **Call before writing scripts** so the agent follows your conventions.
   - `validate_script` — Validate a script against the RunWhen contract (main, issue format, FD 3 for bash).
@@ -261,6 +265,7 @@ The server exposes these tools, grouped by use case.
 | `DEFAULT_WORKSPACE` | No | Default workspace so tools don’t need `workspace_name` every time. |
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
+| `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
 
 See `.env.example` in the repo.
 
@@ -286,8 +291,9 @@ Workspace roles: **readonly**, **readandrun**, **readandrunwithassistant**, **re
 ### How it works
 
 - **Workspace chat**: The server forwards `workspace_chat` to the RunWhen Agent (AgentFarm), which has many internal tools. You ask in natural language; optional `persona_name` selects the assistant.
-- **Tool Builder flow**: Load context (`get_workspace_context`) → write script → validate → get secrets/locations → test with `run_script_and_wait` → iterate → `commit_slx` → verify with `get_workspace_slxs`.
-- **Knowledge base**: Search happens inside `workspace_chat`. To add notes, use the **/remember** command in the RunWhen UI.
+- **Tool Builder flow**: Search registry (`search_registry`) → load context (`get_workspace_context`) → write script → validate → get secrets/locations → test with `run_script_and_wait` → iterate → `commit_slx` → verify with `get_workspace_slxs`.
+- **Knowledge base**: Full CRUD via `list_knowledge_base_articles`, `create_knowledge_base_article`, `update_knowledge_base_article`, `delete_knowledge_base_article`. Search also works inside `workspace_chat`.
+- **CodeBundle Registry**: Search for existing automation before building custom. The registry at `registry.runwhen.com` is public and requires no authentication.
 
 ### Infrastructure context (RUNWHEN.md)
 

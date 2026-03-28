@@ -35,6 +35,8 @@ EXPECTED_TOOLS = {
     "create_knowledge_base_article",
     "update_knowledge_base_article",
     "delete_knowledge_base_article",
+    "search_registry",
+    "get_registry_codebundle",
     "get_workspace_context",
     "get_workspace_secrets",
     "get_workspace_locations",
