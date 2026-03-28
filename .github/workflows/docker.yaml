@@ -36,12 +36,19 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'release'
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate PR tag
+        if: github.event_name == 'pull_request'
+        id: pr-tag
+        run: |
+          BRANCH=$(echo "${{ github.head_ref }}" | sed 's/[^a-zA-Z0-9]/-/g')
+          SHORT_SHA=${GITHUB_SHA::8}
+          echo "tag=pr-${BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Extract metadata
         id: meta
@@ -51,14 +58,14 @@ jobs:
           tags: |
             type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-            type=ref,event=pr,suffix=-${{ github.sha }}
+            type=raw,value=${{ steps.pr-tag.outputs.tag }},enable=${{ github.event_name == 'pull_request' }}
 
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
-          push: ${{ github.event_name == 'release' }}
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
