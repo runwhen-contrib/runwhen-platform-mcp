@@ -12,6 +12,17 @@ and more.
 - Before starting a custom `build-runwhen-task` workflow — always check the
   registry first
 
+## Key concept: two different deployment paths
+
+| Path | Tool | When to use |
+|------|------|-------------|
+| **Registry codebundle** | `deploy_registry_codebundle` | Pre-built automation from the registry. Points to the codebundle's own git repo + robot file. No inline script. |
+| **Custom script** | `commit_slx` | Hand-written bash/python script. Uses the Tool Builder codebundle with an inline base64-encoded script. |
+
+These are **not interchangeable** — the YAML structure is fundamentally
+different. Registry codebundles use the codebundle's own `runbook.robot` /
+`sli.robot` files from its codecollection git repo.
+
 ## Workflow
 
 ### 1. Search the registry
@@ -34,16 +45,18 @@ If a result looks promising, fetch the full details:
 ```
 get_registry_codebundle(
     collection_slug="rw-cli-codecollection",
-    codebundle_slug="k8s-podresources-health"
+    codebundle_slug="k8s-namespace-healthcheck"
 )
 ```
 
-Key fields to check:
+Key fields to examine:
 - **tasks** / **slis**: what the codebundle actually does
+- **user_variables**: the config vars you need to provide (NAMESPACE, CONTEXT, etc.)
 - **support_tags**: which platforms and services it covers
 - **access_level**: "read-only" vs "read-write"
-- **runbook_source_url**: link to the source code on GitHub
-- **configuration_type**: whether it is auto-discoverable or manual
+- **runbook_path** / **sli_path**: confirms whether runbook and/or SLI exist
+- **codecollection.git_url**: the repo URL needed for deployment
+- **runbook_source_url**: link to source code on GitHub
 
 ### 3. Decide: deploy existing OR build custom
 
@@ -53,19 +66,41 @@ Key fields to check:
 | Registry has a partial match — covers most needs | Deploy it + note any gaps |
 | Registry has nothing relevant | Switch to `build-runwhen-task` skill |
 
-### 4. Deploy via commit_slx
+### 4. Deploy with deploy_registry_codebundle
 
-Registry codebundles are pre-packaged — but to deploy one to a workspace
-you still use `commit_slx`. The key difference: you'll use the codebundle's
-**source scripts** (from GitHub) rather than writing your own.
+```
+deploy_registry_codebundle(
+    slx_name="k8s-ns-health-prod",
+    alias="Production Namespace Health",
+    statement="All pods in the production namespace should be healthy",
+    repo_url="https://github.com/runwhen-contrib/rw-cli-codecollection",
+    codebundle_path="codebundles/k8s-namespace-healthcheck",
+    location="location-01-us-west1",
+    config_vars={
+        "NAMESPACE": "production",
+        "CONTEXT": "prod-cluster",
+        "KUBERNETES_DISTRIBUTION_BINARY": "kubectl",
+        "ANOMALY_THRESHOLD": "3.0"
+    },
+    secret_vars={"kubeconfig": "kubeconfig"},
+    deploy_runbook=True,
+    deploy_sli=True,
+    sli_interval_seconds=180,
+    access="read-only",
+    data="config"
+)
+```
 
-Typical flow:
-1. Read the codebundle source from `runbook_source_url`
-2. Identify the main task/SLI scripts and required env vars
-3. `get_workspace_secrets` — map required secrets (e.g. `kubeconfig`)
-4. `get_workspace_locations` — pick a runner location
-5. `run_script_and_wait` — test the script with appropriate env/secret vars
-6. `commit_slx` — commit with proper tags, env vars, and secret mappings
+How to fill in the parameters:
+- **repo_url** → from `codecollection.git_url` in registry response
+- **codebundle_path** → derive from `runbook_path` (strip `/runbook.robot`)
+  or from `runbook_source_url` (the path after `/tree/main/`)
+- **config_vars** → from `user_variables` in registry response
+- **deploy_runbook** → True if `runbook_path` is not null
+- **deploy_sli** → True if `sli_path` is not null
+- **access** → from `access_level` in registry response
+- **secret_vars** → usually `{"kubeconfig": "kubeconfig"}` for Kubernetes
+  codebundles; check the template for other secrets
 
 ### 5. Tell the user what you found
 
@@ -74,26 +109,31 @@ Always summarize:
 - How many results came back
 - Which codebundle you selected and why
 - What tasks/SLIs it provides
+- The `user_variables` you configured and why
 - Any gaps that would need custom work
 
 ## What NOT to do
 
+- **Don't use `commit_slx` for registry codebundles** — it generates the
+  wrong YAML structure (Tool Builder inline scripts vs registry codebundle
+  references)
 - Don't skip the registry search and jump straight to custom scripts
-- Don't try to install or clone the codebundle's git repo — the registry
-  is for discovery, and deployment goes through `commit_slx`
+- Don't try to install or clone the codebundle's git repo
 - Don't assume the registry has everything — if no match, build custom
-- Don't deploy a codebundle without confirming it covers the user's needs
+- Don't deploy without confirming config_vars with the user
 
 ## Example conversation flow
 
 **User**: "Add a health check for our Kubernetes pods in the production namespace"
 
 **Agent**:
-1. `search_registry(search="kubernetes pod health")`
-2. Finds `k8s-podresources-health` with 4 tasks covering resource limits,
-   utilization, and VPA recommendations
-3. `get_registry_codebundle(collection_slug="rw-cli-codecollection", codebundle_slug="k8s-podresources-health")`
-4. Reviews the full details and confirms it matches the user's needs
-5. Tells user: "I found an existing codebundle that checks pod resource
-   health. It includes 4 tasks: [list]. Shall I deploy it to your workspace?"
-6. On confirmation, proceeds with the deploy workflow
+1. `search_registry(search="kubernetes namespace health")`
+2. Finds `k8s-namespace-healthcheck` — 9 tasks + 4 SLIs covering events,
+   restarts, pending pods, workload conditions
+3. `get_registry_codebundle(collection_slug="rw-cli-codecollection",
+   codebundle_slug="k8s-namespace-healthcheck")`
+4. Reviews `user_variables`: needs NAMESPACE, CONTEXT, KUBERNETES_DISTRIBUTION_BINARY
+5. `get_workspace_locations()` + `get_workspace_secrets()`
+6. Tells user: "I found a production-ready codebundle with 9 tasks and 4 SLIs.
+   It needs NAMESPACE, CONTEXT, and a kubeconfig secret. Shall I deploy it?"
+7. On confirmation: `deploy_registry_codebundle(...)` with all the config

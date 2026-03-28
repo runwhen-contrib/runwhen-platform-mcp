@@ -237,9 +237,10 @@ The server exposes these tools, grouped by use case.
   - `create_chat_command` — Create a command (name, commandContent, scopeType, scopeId).
   - `update_chat_command` — Update a command by ID.
 
-- **CodeBundle Registry** (2 tools)
+- **CodeBundle Registry** (3 tools)
   - `search_registry` — Search the public CodeBundle Registry for reusable automation. **Always check before writing custom scripts.**
   - `get_registry_codebundle` — Get full details of a specific codebundle (tasks, SLIs, env vars, source URL).
+  - `deploy_registry_codebundle` — Deploy a registry codebundle as an SLX. Generates native codebundle YAML (different from `commit_slx` which embeds inline scripts).
 
 - **Task authoring — Tool Builder** (9 tools)
   - `get_workspace_context` — Load `RUNWHEN.md` from the project. **Call before writing scripts** so the agent follows your conventions.

@@ -11,6 +11,8 @@ import yaml
 
 from runwhen_platform_mcp.server import (
     _build_cron_sli_yaml,
+    _build_registry_runbook_yaml,
+    _build_registry_sli_yaml,
     _build_runbook_yaml,
     _build_sli_yaml,
     _build_slx_yaml,
@@ -314,3 +316,134 @@ class TestBuildCronSliYaml:
         doc = self._parse(dry_run=True)
         config = {c["name"]: c["value"] for c in doc["spec"]["configProvided"]}
         assert config["DRY_RUN"] == "true"
+
+
+REPO_URL = "https://github.com/runwhen-contrib/rw-cli-codecollection.git"
+CB_PATH = "codebundles/k8s-namespace-healthcheck"
+
+
+class TestBuildRegistryRunbookYaml:
+    """Tests for _build_registry_runbook_yaml."""
+
+    def _parse(self, **kwargs):
+        defaults = dict(
+            workspace=WS,
+            slx_name=SLX,
+            repo_url=REPO_URL,
+            path_to_robot=f"{CB_PATH}/runbook.robot",
+            location="loc-01",
+        )
+        defaults.update(kwargs)
+        raw = _build_registry_runbook_yaml(**defaults)
+        return yaml.safe_load(raw)
+
+    def test_basic_structure(self) -> None:
+        doc = self._parse()
+        assert doc["apiVersion"] == "runwhen.com/v1"
+        assert doc["kind"] == "Runbook"
+        assert doc["metadata"]["name"] == FULL_NAME
+
+    def test_code_bundle_points_to_codebundle_repo(self) -> None:
+        doc = self._parse()
+        cb = doc["spec"]["codeBundle"]
+        assert cb["repoUrl"] == REPO_URL
+        assert cb["pathToRobot"] == f"{CB_PATH}/runbook.robot"
+        assert cb["ref"] == "main"
+
+    def test_no_gen_cmd_or_interpreter(self) -> None:
+        """Registry runbooks should NOT have Tool Builder config vars."""
+        doc = self._parse()
+        config_names = [c["name"] for c in doc["spec"]["configProvided"]]
+        assert "GEN_CMD" not in config_names
+        assert "INTERPRETER" not in config_names
+
+    def test_config_vars_present(self) -> None:
+        doc = self._parse(config_vars={"NAMESPACE": "prod", "CONTEXT": "my-cluster"})
+        config = {c["name"]: c["value"] for c in doc["spec"]["configProvided"]}
+        assert config["NAMESPACE"] == "prod"
+        assert config["CONTEXT"] == "my-cluster"
+
+    def test_secret_vars_present(self) -> None:
+        doc = self._parse(secret_vars={"kubeconfig": "kubeconfig"})
+        secrets = doc["spec"]["secretsProvided"]
+        assert secrets[0]["name"] == "kubeconfig"
+        assert secrets[0]["workspaceKey"] == "kubeconfig"
+
+    def test_no_secrets_when_empty(self) -> None:
+        doc = self._parse()
+        assert "secretsProvided" not in doc["spec"]
+
+    def test_custom_ref(self) -> None:
+        doc = self._parse(ref="v2.1.0")
+        assert doc["spec"]["codeBundle"]["ref"] == "v2.1.0"
+
+    def test_has_location_singular(self) -> None:
+        doc = self._parse()
+        assert "location" in doc["spec"]
+        assert "locations" not in doc["spec"]
+
+
+class TestBuildRegistrySliYaml:
+    """Tests for _build_registry_sli_yaml."""
+
+    def _parse(self, **kwargs):
+        defaults = dict(
+            workspace=WS,
+            slx_name=SLX,
+            repo_url=REPO_URL,
+            path_to_robot=f"{CB_PATH}/sli.robot",
+            location="loc-01",
+        )
+        defaults.update(kwargs)
+        raw = _build_registry_sli_yaml(**defaults)
+        return yaml.safe_load(raw)
+
+    def test_basic_structure(self) -> None:
+        doc = self._parse()
+        assert doc["apiVersion"] == "runwhen.com/v1"
+        assert doc["kind"] == "ServiceLevelIndicator"
+        assert doc["metadata"]["name"] == FULL_NAME
+
+    def test_code_bundle_points_to_codebundle_repo(self) -> None:
+        doc = self._parse()
+        cb = doc["spec"]["codeBundle"]
+        assert cb["repoUrl"] == REPO_URL
+        assert cb["pathToRobot"] == f"{CB_PATH}/sli.robot"
+        assert cb["ref"] == "main"
+
+    def test_no_gen_cmd_or_interpreter(self) -> None:
+        doc = self._parse()
+        config_names = [c["name"] for c in doc["spec"]["configProvided"]]
+        assert "GEN_CMD" not in config_names
+        assert "INTERPRETER" not in config_names
+
+    def test_has_locations_list(self) -> None:
+        doc = self._parse()
+        assert "locations" in doc["spec"]
+        assert isinstance(doc["spec"]["locations"], list)
+
+    def test_interval_default(self) -> None:
+        doc = self._parse()
+        assert doc["spec"]["intervalSeconds"] == 300
+
+    def test_interval_custom(self) -> None:
+        doc = self._parse(interval_seconds=180)
+        assert doc["spec"]["intervalSeconds"] == 180
+
+    def test_alert_config_present(self) -> None:
+        doc = self._parse()
+        assert "alertConfig" in doc["spec"]
+
+    def test_description(self) -> None:
+        doc = self._parse(description="Measures namespace health")
+        assert doc["spec"]["description"] == "Measures namespace health"
+
+    def test_config_and_secret_vars(self) -> None:
+        doc = self._parse(
+            config_vars={"NAMESPACE": "prod"},
+            secret_vars={"kubeconfig": "kubeconfig"},
+        )
+        config = {c["name"]: c["value"] for c in doc["spec"]["configProvided"]}
+        assert config["NAMESPACE"] == "prod"
+        secrets = doc["spec"]["secretsProvided"]
+        assert secrets[0]["name"] == "kubeconfig"

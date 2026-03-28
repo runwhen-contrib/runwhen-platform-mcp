@@ -185,3 +185,19 @@ class TestRegistrySchema:
         props = tool.parameters.get("properties", {})
         assert "collection_slug" in props
         assert "codebundle_slug" in props
+
+    def test_deploy_registry_codebundle_registered(self, tools) -> None:
+        tool = _find_tool(tools, "deploy_registry_codebundle")
+        assert tool is not None
+
+    def test_deploy_registry_codebundle_params(self, tools) -> None:
+        tool = _find_tool(tools, "deploy_registry_codebundle")
+        props = tool.parameters.get("properties", {})
+        assert "slx_name" in props
+        assert "repo_url" in props
+        assert "codebundle_path" in props
+        assert "config_vars" in props
+        assert "secret_vars" in props
+        assert "deploy_runbook" in props
+        assert "deploy_sli" in props
+        assert "location" in props

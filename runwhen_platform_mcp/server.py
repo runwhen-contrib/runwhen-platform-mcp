@@ -139,9 +139,10 @@ def _build_server_instructions() -> str:
         "NOTE: workspace_chat can SEARCH and DESCRIBE tasks but CANNOT EXECUTE them.\n\n"
         "RUN EXISTING TASKS: `run_slx` — execute a committed SLX runbook. "
         "Use this (not workspace_chat) when the user asks to run/trigger a task.\n\n"
-        "REGISTRY SEARCH: `search_registry` — search the CodeBundle Registry for "
-        "reusable automation BEFORE writing custom scripts. Use `get_registry_codebundle` "
-        "for full details on a specific codebundle.\n\n"
+        "REGISTRY (search before build): `search_registry` — find reusable automation; "
+        "`get_registry_codebundle` — full details; "
+        "`deploy_registry_codebundle` — deploy a registry codebundle as an SLX "
+        "(different from `commit_slx` which embeds inline scripts).\n\n"
         "TASK AUTHORING WORKFLOW:\n"
         "0. `search_registry` — check for existing codebundles first\n"
         "1. `get_workspace_context` — load RUNWHEN.md rules (ALWAYS call first)\n"
@@ -868,6 +869,120 @@ def _build_cron_sli_yaml(
             "labels": {
                 "workspace": workspace,
                 "slx": f"{workspace}--{slx_name}",
+            },
+        },
+        "spec": spec,
+    }
+    return yaml.dump(doc, default_flow_style=False, sort_keys=False)
+
+
+# ---------------------------------------------------------------------------
+# Registry codebundle YAML builders (different shape from Tool Builder)
+# ---------------------------------------------------------------------------
+
+def _build_registry_runbook_yaml(
+    workspace: str,
+    slx_name: str,
+    repo_url: str,
+    path_to_robot: str,
+    location: str,
+    config_vars: dict[str, str] | None = None,
+    secret_vars: dict[str, str] | None = None,
+    ref: str = "main",
+) -> str:
+    """Generate runbook.yaml for a registry codebundle (no inline script)."""
+    config_provided = [
+        {"name": k, "value": v} for k, v in (config_vars or {}).items()
+    ]
+    secrets_provided = [
+        {"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()
+    ]
+
+    spec: dict[str, Any] = {
+        "location": location,
+        "codeBundle": {
+            "repoUrl": repo_url,
+            "ref": ref,
+            "pathToRobot": path_to_robot,
+        },
+        "configProvided": config_provided,
+    }
+    if secrets_provided:
+        spec["secretsProvided"] = secrets_provided
+
+    doc = {
+        "apiVersion": "runwhen.com/v1",
+        "kind": "Runbook",
+        "metadata": {
+            "name": f"{workspace}--{slx_name}",
+            "labels": {
+                "workspace": workspace,
+                "slx": f"{workspace}--{slx_name}",
+            },
+            "annotations": {
+                "internal.runwhen.com/manually-created": "true",
+            },
+        },
+        "spec": spec,
+    }
+    return yaml.dump(doc, default_flow_style=False, sort_keys=False)
+
+
+def _build_registry_sli_yaml(
+    workspace: str,
+    slx_name: str,
+    repo_url: str,
+    path_to_robot: str,
+    location: str,
+    config_vars: dict[str, str] | None = None,
+    secret_vars: dict[str, str] | None = None,
+    ref: str = "main",
+    interval_seconds: int = 300,
+    description: str = "",
+) -> str:
+    """Generate sli.yaml for a registry codebundle (no inline script)."""
+    config_provided = [
+        {"name": k, "value": v} for k, v in (config_vars or {}).items()
+    ]
+    secrets_provided = [
+        {"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()
+    ]
+
+    spec: dict[str, Any] = {
+        "locations": [location],
+        "displayUnitsLong": "OK",
+        "displayUnitsShort": "ok",
+        "intervalSeconds": interval_seconds,
+        "intervalStrategy": "intermezzo",
+        "codeBundle": {
+            "repoUrl": repo_url,
+            "ref": ref,
+            "pathToRobot": path_to_robot,
+        },
+        "configProvided": config_provided,
+        "alertConfig": {
+            "tasks": {
+                "persona": "eager-edgar",
+                "sessionTTL": "10m",
+            }
+        },
+    }
+    if description:
+        spec["description"] = description
+    if secrets_provided:
+        spec["secretsProvided"] = secrets_provided
+
+    doc = {
+        "apiVersion": "runwhen.com/v1",
+        "kind": "ServiceLevelIndicator",
+        "metadata": {
+            "name": f"{workspace}--{slx_name}",
+            "labels": {
+                "workspace": workspace,
+                "slx": f"{workspace}--{slx_name}",
+            },
+            "annotations": {
+                "internal.runwhen.com/manually-created": "true",
             },
         },
         "spec": spec,
@@ -1738,6 +1853,175 @@ async def get_registry_codebundle(
         return json.dumps({"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]})
 
     return resp.text
+
+
+@mcp.tool()
+async def deploy_registry_codebundle(
+    slx_name: str,
+    alias: str,
+    statement: str,
+    repo_url: str,
+    codebundle_path: str,
+    location: str,
+    config_vars: dict[str, str] | None = None,
+    secret_vars: dict[str, str] | None = None,
+    deploy_runbook: bool = True,
+    deploy_sli: bool = False,
+    sli_description: str = "",
+    sli_interval_seconds: int = 300,
+    ref: str = "main",
+    workspace_name: str | None = None,
+    owners: list[str] | None = None,
+    branch: str = "main",
+    tags: list[dict[str, str]] | None = None,
+    image_url: str | None = None,
+    access: str = "read-only",
+    data: str = "logs-bulk",
+    resource_path: str | None = None,
+    hierarchy: list[str] | None = None,
+    commit_message: str | None = None,
+) -> str:
+    """Deploy a registry codebundle as an SLX to a workspace.
+
+    Unlike commit_slx (which embeds inline scripts via the Tool Builder
+    codebundle), this deploys a pre-built codebundle from its own
+    codecollection repository.  The runbook.robot / sli.robot live in the
+    codebundle's git repo — no inline script is needed.
+
+    Use search_registry + get_registry_codebundle to find the right
+    codebundle, then call this tool with the values from the registry.
+
+    Args:
+        slx_name: Short name for the SLX (lowercase-kebab-case).
+        alias: Human-readable display name (e.g. "Namespace Health").
+        statement: SLX statement (e.g. "All pods should be running").
+        repo_url: Git URL of the codecollection (from registry result
+            codecollection.git_url, e.g.
+            "https://github.com/runwhen-contrib/rw-cli-codecollection.git").
+        codebundle_path: Path within the repo to the codebundle directory
+            (e.g. "codebundles/k8s-namespace-healthcheck").  The tool
+            appends /runbook.robot and /sli.robot automatically.
+        location: Runner location (use get_workspace_locations).
+        config_vars: Codebundle-specific variables (e.g.
+            {"NAMESPACE": "prod", "CONTEXT": "my-cluster"}).  These map
+            to the codebundle's user_variables from the registry.
+        secret_vars: Secret mappings (e.g. {"kubeconfig": "kubeconfig"}).
+        deploy_runbook: Deploy the runbook (task).  Default True.
+        deploy_sli: Also deploy the SLI (health indicator).  Default False.
+        sli_description: Description for the SLI metric.
+        sli_interval_seconds: How often the SLI runs (default 300).
+        ref: Git branch/tag for the codecollection (default "main").
+        workspace_name: Target workspace.  Uses DEFAULT_WORKSPACE if omitted.
+        owners: List of owner emails (defaults to current user).
+        branch: Workspace config branch (default "main").
+        tags: Additional resource tags (list of {name, value} dicts).
+        image_url: Icon URL for the SLX.
+        access: "read-only" or "read-write" (default "read-only").
+        data: "logs-bulk", "config", or "logs-stacktrace" (default "logs-bulk").
+        resource_path: Resource path for search indexing.
+        hierarchy: Tag names for hierarchical grouping.
+        commit_message: Custom commit message.
+    """
+    if not deploy_runbook and not deploy_sli:
+        return json.dumps({"error": "At least one of deploy_runbook or deploy_sli must be True."})
+
+    if access not in VALID_ACCESS_TAGS:
+        return json.dumps({"error": f"Invalid access tag '{access}'. Must be one of: {', '.join(VALID_ACCESS_TAGS)}"})
+    if data not in VALID_DATA_TAGS:
+        return json.dumps({"error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}"})
+
+    ws = _resolve_workspace(workspace_name)
+
+    # Ensure .git suffix on repo URL
+    git_url = repo_url if repo_url.endswith(".git") else f"{repo_url}.git"
+
+    # Normalise codebundle_path (strip trailing slashes)
+    cb_path = codebundle_path.rstrip("/")
+
+    if owners is None:
+        owners = [await _get_user_email()]
+
+    additional_context: dict[str, Any] | None = None
+    if resource_path or hierarchy:
+        additional_context = {}
+        if resource_path:
+            additional_context["resourcePath"] = resource_path
+        if hierarchy:
+            additional_context["hierarchy"] = hierarchy
+
+    slx_yaml = _build_slx_yaml(
+        workspace=ws,
+        slx_name=slx_name,
+        alias=alias,
+        statement=statement,
+        owners=owners,
+        tags=tags,
+        image_url=image_url,
+        access=access,
+        data=data,
+        additional_context=additional_context,
+    )
+
+    files: dict[str, str] = {"slx.yaml": slx_yaml}
+    committed_types: list[str] = []
+
+    if deploy_runbook:
+        files["runbook.yaml"] = _build_registry_runbook_yaml(
+            workspace=ws,
+            slx_name=slx_name,
+            repo_url=git_url,
+            path_to_robot=f"{cb_path}/runbook.robot",
+            location=location,
+            config_vars=config_vars,
+            secret_vars=secret_vars,
+            ref=ref,
+        )
+        committed_types.append("runbook")
+
+    if deploy_sli:
+        files["sli.yaml"] = _build_registry_sli_yaml(
+            workspace=ws,
+            slx_name=slx_name,
+            repo_url=git_url,
+            path_to_robot=f"{cb_path}/sli.robot",
+            location=location,
+            config_vars=config_vars,
+            secret_vars=secret_vars,
+            ref=ref,
+            interval_seconds=sli_interval_seconds,
+            description=sli_description,
+        )
+        committed_types.append("sli")
+
+    type_label = " + ".join(committed_types)
+    if not commit_message:
+        commit_message = f"Deploy registry codebundle {type_label}: {alias}"
+
+    body = {
+        "commit_msg": commit_message,
+        "files": files,
+    }
+
+    status_code, resp_data = await _papi_post(
+        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
+        body,
+    )
+
+    success = status_code in (200, 201)
+    result = {
+        "status": "deployed" if success else f"error_{status_code}",
+        "slx_name": slx_name,
+        "workspace": ws,
+        "branch": branch,
+        "repo_url": git_url,
+        "codebundle_path": cb_path,
+        "ref": ref,
+        "committed_files": list(files.keys()),
+        "committed_types": type_label,
+        "config_vars": config_vars or {},
+        "response": resp_data,
+    }
+    return json.dumps(result, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -2630,6 +2914,7 @@ _TOOL_FUNCTIONS = [
     delete_knowledge_base_article,
     search_registry,
     get_registry_codebundle,
+    deploy_registry_codebundle,
     get_workspace_context,
     get_workspace_secrets,
     get_workspace_locations,
