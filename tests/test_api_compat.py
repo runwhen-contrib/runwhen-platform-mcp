@@ -95,6 +95,29 @@ class TestToolParameterTypes:
         assert "branch" in props
 
 
+class TestRunSlxSchema:
+    """run_slx should have correct parameters matching the RunRequest API."""
+
+    def test_registered(self, tools) -> None:
+        tool = _find_tool(tools, "run_slx")
+        assert tool is not None
+
+    def test_has_slx_name_param(self, tools) -> None:
+        tool = _find_tool(tools, "run_slx")
+        props = tool.parameters.get("properties", {})
+        assert "slx_name" in props
+
+    def test_has_task_titles_param(self, tools) -> None:
+        tool = _find_tool(tools, "run_slx")
+        props = tool.parameters.get("properties", {})
+        assert "task_titles" in props
+
+    def test_slx_name_is_required(self, tools) -> None:
+        tool = _find_tool(tools, "run_slx")
+        required = tool.parameters.get("required", [])
+        assert "slx_name" in required
+
+
 class TestKnowledgeBaseSchema:
     """KB tools should have correct parameters matching the Notes API."""
 

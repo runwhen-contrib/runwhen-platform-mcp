@@ -132,7 +132,10 @@ def _build_server_instructions() -> str:
         "RunWhen Platform MCP server — workspace intelligence, task authoring, "
         "and infrastructure automation.\n\n"
         "PRIMARY TOOL: `workspace_chat` — ask the RunWhen AI assistant about "
-        "infrastructure (issues, tasks, run sessions, resources, knowledge base).\n\n"
+        "infrastructure (issues, tasks, run sessions, resources, knowledge base). "
+        "NOTE: workspace_chat can SEARCH and DESCRIBE tasks but CANNOT EXECUTE them.\n\n"
+        "RUN EXISTING TASKS: `run_slx` — execute a committed SLX runbook. "
+        "Use this (not workspace_chat) when the user asks to run/trigger a task.\n\n"
         "TASK AUTHORING WORKFLOW:\n"
         "1. `get_workspace_context` — load RUNWHEN.md rules (ALWAYS call first)\n"
         "2. `get_workspace_secrets` + `get_workspace_locations` — discover config\n"
@@ -2083,6 +2086,131 @@ async def run_script_and_wait(
     return json.dumps(result, indent=2)
 
 
+# ---------------------------------------------------------------------------
+# Run Existing SLX
+# ---------------------------------------------------------------------------
+
+SLX_RUN_MAX_POLL_S = 300
+SLX_RUN_POLL_INTERVAL_S = 5
+
+
+@mcp.tool()
+async def run_slx(
+    slx_name: str,
+    workspace_name: str | None = None,
+    task_titles: str = "*",
+) -> str:
+    """Run an existing SLX's runbook tasks on the workspace runner.
+
+    This triggers execution of a previously committed SLX (not an ad-hoc script).
+    Use this when you want to run a health check, troubleshooting task, or
+    automation that already exists in the workspace.
+
+    IMPORTANT: This is different from run_script / run_script_and_wait, which
+    execute ad-hoc scripts. Use run_slx to trigger SLXs that are already
+    committed and configured in the workspace.
+
+    NOTE: workspace_chat CANNOT run tasks directly — it can only search for
+    and describe them. Use this tool to actually execute an SLX.
+
+    The tool creates a RunRequest, starts it, polls until completion, and
+    returns the results including pass/fail status and any issues found.
+
+    Args:
+        slx_name: The SLX short name (e.g. "k8s-pod-health"). Use
+            get_workspace_slxs or search_workspace to find available SLXs.
+        workspace_name: The workspace. Uses DEFAULT_WORKSPACE if not provided.
+        task_titles: Which tasks to run within the runbook. Use "*" (default)
+            to run all tasks, or "||"-separated titles for specific ones
+            (e.g. "Check Pod Status||Check Pod Restarts").
+    """
+    ws = _resolve_workspace(workspace_name)
+
+    # Step 1: Create a staged RunRequest
+    create_body: dict[str, Any] = {
+        "task_titles": task_titles,
+        "memo": {"source": "mcp-tool", "tool": "run_slx"},
+    }
+    try:
+        status_code, create_data = await _papi_post(
+            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs",
+            create_body,
+        )
+    except ValueError as exc:
+        return json.dumps({"error": f"Failed to create RunRequest: {exc}"}, indent=2)
+
+    run_request_id = create_data.get("id")
+    if not run_request_id:
+        return json.dumps(
+            {"error": "No RunRequest ID in response", "response": create_data},
+            indent=2,
+        )
+
+    # Step 2: Start the RunRequest (submits to runner)
+    try:
+        _, start_data = await _papi_post(
+            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}/start",
+            {},
+        )
+    except ValueError as exc:
+        return json.dumps(
+            {"error": f"Failed to start RunRequest: {exc}", "run_request_id": run_request_id},
+            indent=2,
+        )
+
+    # Step 3: Poll until completion
+    elapsed = 0
+    run_status = "running"
+    run_data: dict[str, Any] = {}
+    while run_status not in ("completed", "failed") and elapsed < SLX_RUN_MAX_POLL_S:
+        await asyncio.sleep(SLX_RUN_POLL_INTERVAL_S)
+        elapsed += SLX_RUN_POLL_INTERVAL_S
+        try:
+            run_data = await _papi_get(
+                f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}"
+            )
+            is_completed = run_data.get("isCompleted") or run_data.get("is_completed")
+            response_time = run_data.get("responseTime") or run_data.get("response_time")
+            if is_completed or response_time:
+                run_status = "completed"
+        except ValueError:
+            pass
+
+    if run_status != "completed":
+        return json.dumps(
+            {
+                "status": "timeout",
+                "run_request_id": run_request_id,
+                "elapsed_seconds": elapsed,
+                "message": f"RunRequest did not complete within {SLX_RUN_MAX_POLL_S}s. "
+                "It may still be running — check back later with get_run_sessions.",
+                "last_state": run_data,
+            },
+            indent=2,
+        )
+
+    # Step 4: Fetch output
+    try:
+        output_data = await _papi_get(
+            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}/output"
+        )
+    except ValueError:
+        output_data = {}
+
+    result: dict[str, Any] = {
+        "status": "completed",
+        "slx_name": slx_name,
+        "workspace": ws,
+        "run_request_id": run_request_id,
+        "elapsed_seconds": elapsed,
+        "passed_titles": run_data.get("passedTitles") or run_data.get("passed_titles", ""),
+        "failed_titles": run_data.get("failedTitles") or run_data.get("failed_titles", ""),
+        "skipped_titles": run_data.get("skippedTitles") or run_data.get("skipped_titles", ""),
+        "output": output_data,
+    }
+    return json.dumps(result, indent=2)
+
+
 @mcp.tool()
 async def commit_slx(
     slx_name: str,
@@ -2402,6 +2530,7 @@ _TOOL_FUNCTIONS = [
     get_run_status,
     get_run_output,
     run_script_and_wait,
+    run_slx,
     commit_slx,
     delete_slx,
 ]

@@ -45,3 +45,10 @@ Read these files for complete, contract-compliant script templates:
 - Set `access` tag: `read-only` for monitoring, `read-write` for remediation
 - Set `data` tag: `logs-bulk` | `config` | `logs-stacktrace`
 - Configure `resource_path` and `hierarchy` for search/UI grouping (see configure-resource-path and configure-hierarchy skills)
+
+## Running tasks after committing
+
+After committing an SLX, use `run_slx` to trigger execution — **not** `workspace_chat`.
+
+`workspace_chat` can search for and describe tasks but **cannot execute them**.
+See the `run-existing-slx` skill for the full execution workflow.

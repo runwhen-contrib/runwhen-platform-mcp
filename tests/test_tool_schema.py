@@ -43,6 +43,7 @@ EXPECTED_TOOLS = {
     "get_run_status",
     "get_run_output",
     "run_script_and_wait",
+    "run_slx",
     "commit_slx",
     "delete_slx",
 }
