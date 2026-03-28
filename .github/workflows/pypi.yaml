@@ -1,14 +1,8 @@
 name: Publish PyPI Package
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'runwhen_platform_mcp/**'
-      - 'pyproject.toml'
-      - 'requirements.txt'
-      - '.github/workflows/pypi.yaml'
+  release:
+    types: [published]
   workflow_dispatch:
 
 jobs:
@@ -26,5 +20,5 @@ jobs:
           pip_package_name: runwhen-platform-mcp
           pypi_token: ${{ secrets.PYPI_TOKEN }}
           version_file: VERSION
-          slack_channel: "#codecollections"
+          slack_channel: "#notifications"
           slack_bot_token: ${{ secrets.SLACK_BOT_TOKEN }}
