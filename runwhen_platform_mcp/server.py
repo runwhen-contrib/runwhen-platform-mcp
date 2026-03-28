@@ -481,6 +481,25 @@ async def _papi_delete(
             return resp.status_code, {"message": resp.text[:500]}
 
 
+async def _papi_patch(path: str, body: dict[str, Any]) -> tuple[int, Any]:
+    """Make an authenticated PATCH request to PAPI. Returns (status_code, json)."""
+    path = _normalize_path(path)
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        resp = await client.patch(
+            f"{PAPI_URL}{path}",
+            headers=_headers(),
+            json=body,
+        )
+        if _is_slash_redirect(resp):
+            resp = await client.patch(
+                f"{PAPI_URL}{path}/",
+                headers=_headers(),
+                json=body,
+            )
+        _raise_for_papi_status(resp, path)
+        return resp.status_code, resp.json()
+
+
 def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
     if resp.status_code == 401:
         raise ValueError(
@@ -1448,6 +1467,171 @@ async def search_workspace(
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Base (Notes) Tools
+# ---------------------------------------------------------------------------
+
+VALID_KB_STATUSES = {"active", "deprecated"}
+
+
+@mcp.tool()
+async def list_knowledge_base_articles(
+    workspace_name: str | None = None,
+    status: str | None = None,
+    search: str | None = None,
+    limit: int = 50,
+) -> str:
+    """List Knowledge Base articles (notes) in a workspace.
+
+    Returns KB articles that feed the workspace's Knowledge Overlay Graph.
+    Articles can contain operational knowledge, runbook context, architecture
+    notes, or any information useful for troubleshooting.
+
+    Args:
+        workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
+        status: Filter by status — "active" or "deprecated". Returns all if omitted.
+        search: Search within article content.
+        limit: Maximum number of articles to return (default 50, max 200).
+    """
+    ws = _resolve_workspace(workspace_name)
+    params: dict[str, Any] = {"limit": min(limit, 200), "offset": 0}
+    if status:
+        params["status"] = status
+    if search:
+        params["search"] = search
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/notes", params=params)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def get_knowledge_base_article(
+    note_id: str,
+    workspace_name: str | None = None,
+) -> str:
+    """Get a specific Knowledge Base article by ID.
+
+    Args:
+        note_id: The UUID of the KB article to retrieve.
+        workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
+    """
+    ws = _resolve_workspace(workspace_name)
+    data = await _papi_get(f"/api/v3/workspaces/{ws}/notes/{note_id}")
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def create_knowledge_base_article(
+    content: str,
+    workspace_name: str | None = None,
+    resource_paths: list[str] | None = None,
+    abstract_entities: list[str] | None = None,
+) -> str:
+    """Create a new Knowledge Base article in a workspace.
+
+    KB articles are indexed into the Knowledge Overlay Graph and become
+    searchable by the workspace AI assistant and other tools.
+
+    Content should be informative operational knowledge — architecture notes,
+    troubleshooting guides, runbook context, dependency documentation, etc.
+
+    Args:
+        content: The article content (plain text or markdown, max 20000 chars).
+        workspace_name: The workspace to create in. Uses DEFAULT_WORKSPACE if not provided.
+        resource_paths: Canonical resource paths this article relates to
+            (e.g. ["kubernetes/namespace/prod", "github/repo/my-app"]).
+            Helps the knowledge graph link articles to infrastructure resources.
+        abstract_entities: Normalized entity tokens for indexing
+            (e.g. ["pod-crashloopbackoff", "oom-killed", "memory-limits"]).
+            Improves discoverability when searching for related concepts.
+    """
+    ws = _resolve_workspace(workspace_name)
+    body: dict[str, Any] = {
+        "content": content,
+        "resourcePaths": resource_paths or [],
+        "abstractEntities": abstract_entities or [],
+        "status": "active",
+    }
+    status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/notes", body)
+    result = {
+        "status": "created" if status_code == 201 else "ok",
+        "workspace": ws,
+        "article": data,
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def update_knowledge_base_article(
+    note_id: str,
+    workspace_name: str | None = None,
+    content: str | None = None,
+    resource_paths: list[str] | None = None,
+    abstract_entities: list[str] | None = None,
+    status: str | None = None,
+    verified: bool | None = None,
+) -> str:
+    """Update an existing Knowledge Base article.
+
+    Only provided fields are updated; omitted fields remain unchanged.
+
+    Args:
+        note_id: The UUID of the KB article to update.
+        workspace_name: The workspace. Uses DEFAULT_WORKSPACE if not provided.
+        content: Updated article content (max 20000 chars).
+        resource_paths: Updated resource paths.
+        abstract_entities: Updated entity tokens.
+        status: Set to "active" or "deprecated".
+        verified: Mark as human-verified (true/false).
+    """
+    if status and status not in VALID_KB_STATUSES:
+        return json.dumps(
+            {"error": f"Invalid status '{status}'. Must be one of: {', '.join(VALID_KB_STATUSES)}"},
+            indent=2,
+        )
+
+    ws = _resolve_workspace(workspace_name)
+    body: dict[str, Any] = {}
+    if content is not None:
+        body["content"] = content
+    if resource_paths is not None:
+        body["resourcePaths"] = resource_paths
+    if abstract_entities is not None:
+        body["abstractEntities"] = abstract_entities
+    if status is not None:
+        body["status"] = status
+    if verified is not None:
+        body["verified"] = verified
+
+    if not body:
+        return json.dumps({"error": "No fields to update. Provide at least one field."}, indent=2)
+
+    _, data = await _papi_patch(f"/api/v3/workspaces/{ws}/notes/{note_id}", body)
+    return json.dumps(data, indent=2)
+
+
+@mcp.tool()
+async def delete_knowledge_base_article(
+    note_id: str,
+    workspace_name: str | None = None,
+) -> str:
+    """Delete a Knowledge Base article.
+
+    Removes the article from the workspace and the Knowledge Overlay Graph index.
+
+    Args:
+        note_id: The UUID of the KB article to delete.
+        workspace_name: The workspace. Uses DEFAULT_WORKSPACE if not provided.
+    """
+    ws = _resolve_workspace(workspace_name)
+    status_code, data = await _papi_delete(f"/api/v3/workspaces/{ws}/notes/{note_id}")
+    result = {
+        "status": "deleted" if status_code in (200, 204) else f"status_{status_code}",
+        "note_id": note_id,
+        "workspace": ws,
+    }
+    return json.dumps(result, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Workspace Context (RUNWHEN.md)
 # ---------------------------------------------------------------------------
 
@@ -2205,6 +2389,11 @@ _TOOL_FUNCTIONS = [
     get_issue_details,
     get_slx_runbook,
     search_workspace,
+    list_knowledge_base_articles,
+    get_knowledge_base_article,
+    create_knowledge_base_article,
+    update_knowledge_base_article,
+    delete_knowledge_base_article,
     get_workspace_context,
     get_workspace_secrets,
     get_workspace_locations,

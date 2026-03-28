@@ -93,3 +93,46 @@ class TestToolParameterTypes:
         props = tool.parameters.get("properties", {})
         assert "slx_name" in props
         assert "branch" in props
+
+
+class TestKnowledgeBaseSchema:
+    """KB tools should have correct parameters matching the Notes API."""
+
+    KB_TOOLS = [
+        "list_knowledge_base_articles",
+        "get_knowledge_base_article",
+        "create_knowledge_base_article",
+        "update_knowledge_base_article",
+        "delete_knowledge_base_article",
+    ]
+
+    @pytest.mark.parametrize("tool_name", KB_TOOLS)
+    def test_kb_tool_registered(self, tools, tool_name) -> None:
+        tool = _find_tool(tools, tool_name)
+        assert tool is not None, f"KB tool {tool_name} not registered"
+
+    def test_create_has_content_param(self, tools) -> None:
+        tool = _find_tool(tools, "create_knowledge_base_article")
+        props = tool.parameters.get("properties", {})
+        assert "content" in props
+        assert "resource_paths" in props
+        assert "abstract_entities" in props
+
+    def test_update_has_partial_params(self, tools) -> None:
+        tool = _find_tool(tools, "update_knowledge_base_article")
+        props = tool.parameters.get("properties", {})
+        assert "note_id" in props
+        assert "content" in props
+        assert "status" in props
+        assert "verified" in props
+
+    def test_list_has_filter_params(self, tools) -> None:
+        tool = _find_tool(tools, "list_knowledge_base_articles")
+        props = tool.parameters.get("properties", {})
+        assert "search" in props
+        assert "limit" in props
+
+    def test_delete_requires_note_id(self, tools) -> None:
+        tool = _find_tool(tools, "delete_knowledge_base_article")
+        props = tool.parameters.get("properties", {})
+        assert "note_id" in props
