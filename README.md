@@ -154,6 +154,69 @@ Any client that supports MCP over stdio can use this server. Register a local MC
 
 See your client’s docs for where to add MCP servers (e.g. Continue, Codex, Gemini CLI, etc.).
 
+### Remote (HTTP) access
+
+The MCP server supports a remote HTTP transport mode for shared deployments — no local install required. This is ideal for teams running a centralized MCP server (e.g. deployed to Kubernetes).
+
+**Connecting to a remote MCP server:**
+
+Configure your MCP client to use the remote URL instead of a local command. The exact config depends on your client:
+
+```json
+{
+  "mcpServers": {
+    "runwhen": {
+      "url": "https://mcp.your-domain.com/mcp",
+      "headers": {
+        "Authorization": "Bearer your-runwhen-token"
+      }
+    }
+  }
+}
+```
+
+Replace `mcp.your-domain.com` with your deployment's hostname and `your-runwhen-token` with a RunWhen JWT or Personal Access Token.
+
+> **Important**: Use `/mcp` (no trailing slash). The server redirects `/mcp/` → `/mcp` which can break some MCP clients.
+
+> **Note**: Not all MCP clients support remote/HTTP servers yet. Cursor, Claude Desktop (via MCP config), and the MCP Inspector all support remote URLs. Check your client's docs.
+
+**Running the server in HTTP mode yourself:**
+
+Using Docker:
+
+```bash
+docker run -p 8000:8000 \
+  -e RW_API_URL=https://papi.beta.runwhen.com \
+  ghcr.io/runwhen-contrib/runwhen-platform-mcp:latest
+```
+
+Or locally:
+
+```bash
+export MCP_TRANSPORT=http
+export MCP_HOST=0.0.0.0
+export MCP_PORT=8000
+export FASTMCP_STATELESS_HTTP=true
+export RW_API_URL=https://papi.beta.runwhen.com
+runwhen-platform-mcp
+```
+
+The server exposes:
+- `/mcp/` — Streamable HTTP MCP endpoint (POST for tool calls, GET for SSE)
+- `/health` — Health check (200 OK with version info)
+- `/livez` — Kubernetes liveness probe
+
+**Authentication in HTTP mode**: Clients send a RunWhen token via `Authorization: Bearer <token>` header. The server validates it against PAPI's whoami endpoint — both JWTs and Personal Access Tokens work. No `RUNWHEN_TOKEN` env var is needed on the server side; each client authenticates with their own token.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MCP_TRANSPORT` | Yes | Set to `http` to enable remote mode (default: `stdio`). |
+| `MCP_HOST` | No | Bind address (default: `0.0.0.0`). |
+| `MCP_PORT` | No | Listen port (default: `8000`). |
+| `FASTMCP_STATELESS_HTTP` | No | Set to `true` for horizontal scaling behind a load balancer. |
+| `RW_API_URL` | Yes | PAPI base URL. Used for token verification and API calls. |
+
 ### Multiple environments
 
 If you work across multiple RunWhen environments (e.g. beta and production, or separate workspaces), you can register multiple MCP servers. **Important:** only enable one at a time unless you specifically need cross-environment workflows — multiple active servers with identical tool names confuse LLM agents.
@@ -314,6 +377,7 @@ Put a `RUNWHEN.md` in your project root with infrastructure rules (DBs, naming, 
 | **Docs** | `runwhen_platform_mcp/docs/` | Tool Builder flow, RUNWHEN.md template/example. |
 | **Tests** | `tests/` | Pytest tests; run with `pytest tests/ -v` (see `requirements-dev.txt`). |
 | **Rules, skills, agents** | `rules/`, `skills/`, `agents/` | Optional Cursor rules, skills, and agent personas. |
+| **Docker** | `Dockerfile` | Container image for remote HTTP deployment. Published to `ghcr.io/runwhen-contrib/runwhen-platform-mcp`. |
 | **Cursor plugin** | `.cursor-plugin/`, `mcp.json` | Plugin metadata and example MCP config. |
 
 The MCP server is client-agnostic; Cursor-specific pieces are optional.
@@ -328,13 +392,13 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
-CI runs tests on push and PRs to `main` (`.github/workflows/test.yml`).
+CI runs tests on push and PRs to `main` (`.github/workflows/ci.yaml`).
 
 ---
 
 ## PyPI release
 
-Releases are published to PyPI via GitHub Actions when relevant paths change on `main`, using [runwhen-contrib/github-actions/publish-pypi](https://github.com/runwhen-contrib/github-actions) with date-based versioning (`YYYY.MM.DD.N`). Configure `PYPI_TOKEN` (and optionally `SLACK_BOT_TOKEN` / `slack_channel`) in repo secrets.
+Releases are published to PyPI via GitHub Actions on `release:published`, using [runwhen-contrib/github-actions/publish-pypi](https://github.com/runwhen-contrib/github-actions) with date-based versioning (`YYYY.MM.DD.N`). Docker images are pushed to `ghcr.io/runwhen-contrib/runwhen-platform-mcp` on every PR (tagged `pr-{branch}-{sha}`) and on release (tagged with the release version + `latest`). Configure `PYPI_TOKEN` (and optionally `SLACK_BOT_TOKEN` / `slack_channel`) in repo secrets.
 
 ---
 
