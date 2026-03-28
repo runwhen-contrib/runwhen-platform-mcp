@@ -2996,7 +2996,7 @@ def _build_http_server() -> FastMCP:
 
     for fn in _TOOL_FUNCTIONS:
         auth_check = _make_workspace_auth_check(fn.__name__)
-        tool = FunctionTool.from_function(fn, auth=auth_check)
+        tool = FunctionTool.from_function(fn, auth=auth_check)  # type: ignore[arg-type]
         http_mcp.add_tool(tool)
 
     @http_mcp.custom_route("/health", methods=["GET"])
