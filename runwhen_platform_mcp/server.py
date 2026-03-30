@@ -836,6 +836,73 @@ async def _get_debugslx(workspace: str) -> dict[str, Any]:
     return {}
 
 
+async def _get_authorized_locations(workspace: str) -> list[dict[str, Any]]:
+    """Fetch authorized runner locations for *workspace*.
+
+    Uses the dedicated ``authorizedlocations`` endpoint — the same one the
+    platform UI uses.  This always includes at least the public runner.
+    Falls back to the workspace's debugslx status when the endpoint is
+    unavailable (older PAPI versions).
+    """
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{workspace}/authorizedlocations")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return data.get("results", data.get("locations", []))
+    except Exception:
+        pass
+
+    # Fallback: try the platform-wide /api/v3/locations endpoint (PAPI v2)
+    try:
+        data = await _papi_get("/api/v3/locations")
+        results = data.get("results", []) if isinstance(data, dict) else []
+        if results:
+            return [
+                {"label": loc.get("name", ""), "value": loc.get("name", "")}
+                for loc in results
+                if loc.get("name")
+            ]
+    except Exception:
+        pass
+
+    # Final fallback: debugslx runnerLocations
+    data = await _get_debugslx(workspace)
+    runner_locations = data.get("status", {}).get("runnerLocations", [])
+    return [
+        {
+            "label": rl.get("location", ""),
+            "value": rl.get("location", ""),
+            "locationUUID": rl.get("locationUUID", rl.get("location", "")),
+            "lastUpdated": rl.get("lastUpdated"),
+        }
+        for rl in runner_locations
+        if rl.get("location")
+    ]
+
+
+async def _resolve_location(workspace: str, location: str) -> str:
+    """Return *location* if non-empty, otherwise auto-resolve from the workspace.
+
+    Queries the workspace's authorized locations endpoint (with fallbacks)
+    and picks the first available location.  Raises with a clear message
+    when no runners are found so callers never silently send an empty
+    location to PAPI.
+    """
+    if location:
+        return location
+    all_locations = await _get_authorized_locations(workspace)
+    for loc in all_locations:
+        name = loc.get("value") or loc.get("location") or loc.get("name")
+        if name:
+            return name
+    raise ValueError(
+        f"No runner locations found for workspace '{workspace}'. "
+        "Ensure at least one runner is registered. "
+        "Check the workspace configuration or contact your admin."
+    )
+
+
 async def _get_codebundle_ref(workspace: str) -> str:
     """Resolve the codebundle branch used by this workspace's tool-builder runtime.
 
@@ -2092,6 +2159,11 @@ async def deploy_registry_codebundle(
 
     ws = await _resolve_workspace(workspace_name)
 
+    try:
+        location = await _resolve_location(ws, location)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
     # Ensure .git suffix on repo URL
     git_url = repo_url if repo_url.endswith(".git") else f"{repo_url}.git"
 
@@ -2318,18 +2390,7 @@ async def get_workspace_locations(
     that can be used with run_script and commit_slx.
     """
     ws = await _resolve_workspace(workspace_name)
-    data = await _get_debugslx(ws)
-    runner_locations = data.get("status", {}).get("runnerLocations", [])
-    locations = [
-        {
-            "location": rl["location"],
-            "locationUUID": rl.get("locationUUID", rl["location"]),
-            "lastUpdated": rl.get("lastUpdated"),
-            "status": rl.get("status", {}).get("code"),
-        }
-        for rl in runner_locations
-        if "location" in rl
-    ]
+    locations = await _get_authorized_locations(ws)
     return _json_response(locations)
 
 
@@ -2487,6 +2548,11 @@ async def run_script(
             }
         )
 
+    try:
+        location = await _resolve_location(ws, location)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
     body: dict[str, Any] = {
         "command": script,
         "location": location,
@@ -2610,6 +2676,11 @@ async def run_script_and_wait(
                 "warnings": warnings,
             }
         )
+
+    try:
+        location = await _resolve_location(ws, location)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
 
     body: dict[str, Any] = {
         "command": script,
@@ -2891,6 +2962,12 @@ async def commit_slx(
             return _json_response({"error": f"SLI script: {exc}"})
 
     ws = await _resolve_workspace(workspace_name)
+
+    try:
+        location = await _resolve_location(ws, location)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
     script_b64 = base64.b64encode(script.encode()).decode()
 
     if sli_script and cron_schedule:
