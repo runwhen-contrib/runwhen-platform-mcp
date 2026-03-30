@@ -63,9 +63,7 @@ def test_list_workspaces_strict_json(live_server) -> None:
     assert isinstance(data, list)
     names = {w.get("name") for w in data if isinstance(w, dict)}
     sample = sorted(names)[:20]
-    assert _workspace() in names, (
-        f"{_workspace()} not in accessible workspaces: {sample}"
-    )
+    assert _workspace() in names, f"{_workspace()} not in accessible workspaces: {sample}"
 
 
 @pytest.mark.parametrize(
@@ -118,9 +116,9 @@ def test_get_workspace_context_strict_json(live_server) -> None:
 
 
 def test_validate_script_strict_json(live_server) -> None:
-    script = '''def main():
+    script = """def main():
     return []
-'''
+"""
     raw = _run(live_server.validate_script(script, interpreter="python", task_type="task"))
     _strict_json(raw)
 
