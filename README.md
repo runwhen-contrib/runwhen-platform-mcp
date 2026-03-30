@@ -394,6 +394,8 @@ pytest tests/ -v
 
 CI runs tests on push and PRs to `main` (`.github/workflows/ci.yaml`).
 
+Optional repository secrets **`RUNWHEN_MCP_URL`** (full streamable HTTP MCP URL, e.g. `https://mcp.<env>.runwhen.com/mcp`, no trailing slash) and **`RUNWHEN_TOKEN`** (same Bearer token as MCP clients) enable a **remote MCP HTTP smoke** step that exercises `initialize`, `tools/list`, `list_workspaces`, and `get_workspace_issues` for workspace **`t-oncall`** (the workflow sets `RW_SMOKE_WORKSPACE=t-oncall`). If either secret is unset, that step is skipped with a notice.
+
 ---
 
 ## PyPI release
