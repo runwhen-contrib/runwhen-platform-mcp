@@ -582,11 +582,10 @@ def _safe_json_parse(resp: httpx.Response, label: str) -> Any:
     """Parse JSON from an HTTP response, raising ValueError with context on failure."""
     try:
         return resp.json()
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
         raise ValueError(
-            f"{label} returned non-JSON response "
-            f"(status {resp.status_code}): {resp.text[:300]}"
-        )
+            f"{label} returned non-JSON response (status {resp.status_code}): {resp.text[:300]}"
+        ) from exc
 
 
 def _json_response(data: Any) -> str:
@@ -2011,7 +2010,9 @@ async def deploy_registry_codebundle(
         commit_message: Custom commit message.
     """
     if not deploy_runbook and not deploy_sli:
-        return _json_response({"error": "At least one of deploy_runbook or deploy_sli must be True."})
+        return _json_response(
+            {"error": ("At least one of deploy_runbook or deploy_sli must be True.")}
+        )
 
     if access not in VALID_ACCESS_TAGS:
         return _json_response(
@@ -2623,9 +2624,7 @@ async def run_slx(
 
     run_request_id = create_data.get("id")
     if not run_request_id:
-        return _json_response(
-            {"error": "No RunRequest ID in response", "response": create_data}
-        )
+        return _json_response({"error": "No RunRequest ID in response", "response": create_data})
 
     # Step 2: Start the RunRequest (submits to runner)
     try:
@@ -2814,14 +2813,10 @@ async def commit_slx(
 
     if access not in VALID_ACCESS_TAGS:
         valid = ", ".join(VALID_ACCESS_TAGS)
-        return _json_response(
-            {"error": f"Invalid access tag '{access}'. Must be one of: {valid}"}
-        )
+        return _json_response({"error": f"Invalid access tag '{access}'. Must be one of: {valid}"})
     if data not in VALID_DATA_TAGS:
         valid = ", ".join(VALID_DATA_TAGS)
-        return _json_response(
-            {"error": f"Invalid data tag '{data}'. Must be one of: {valid}"}
-        )
+        return _json_response({"error": f"Invalid data tag '{data}'. Must be one of: {valid}"})
 
     if owners is None:
         owners = [await _get_user_email()]
