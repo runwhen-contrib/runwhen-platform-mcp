@@ -30,6 +30,8 @@ permissions:
 jobs:
   docker:
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -143,7 +145,7 @@ jobs:
               - type: section
                 fields:
                   - type: mrkdwn
-                    text: "*Image:*\n`${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}`"
+                    text: "*Image:*\n`${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}:${{ needs.docker.outputs.image_tag }}`"
 
       - name: Notify Slack of failure
         if: needs.docker.result == 'failure'
