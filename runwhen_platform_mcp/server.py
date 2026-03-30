@@ -2536,6 +2536,11 @@ def _resolve_script(
                 "Invalid script_base64: must be valid base64 encoding UTF-8 text."
             ) from exc
     if script_path:
+        if MCP_TRANSPORT == "http":
+            raise ValueError(
+                "script_path is not supported in HTTP mode. "
+                "Use 'script' (inline) or 'script_base64' instead."
+            )
         path = os.path.expanduser(script_path)
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Script file not found: {path}")
@@ -2549,6 +2554,14 @@ async def validate_script(
     script: Annotated[
         str | None,
         Field(default=None, description="The full script source code (raw text)."),
+    ] = None,
+    script_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to read the script from. "
+            "Mutually exclusive with 'script' and 'script_base64'.",
+        ),
     ] = None,
     script_base64: Annotated[
         str | None,
@@ -2573,7 +2586,7 @@ async def validate_script(
     and optionally 'issue observed at'.
     """
     try:
-        script_resolved = _resolve_script(script, None, script_base64)
+        script_resolved = _resolve_script(script, script_path, script_base64)
     except ValueError as exc:
         return _json_response({"valid": False, "error": str(exc), "warnings": []})
     warnings = _validate_script(script_resolved, interpreter, task_type)

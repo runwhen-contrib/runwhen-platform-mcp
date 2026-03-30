@@ -72,7 +72,7 @@ async def _run_all() -> None:
         _check(label, raw)
 
     script = "def main():\n    return []\n"
-    raw = await srv.validate_script(script, interpreter="python", task_type="task")
+    raw = await srv.validate_script(script=script, interpreter="python", task_type="task")
     _check("validate_script", raw)
 
     slx_raw = await srv.get_workspace_slxs(ws)

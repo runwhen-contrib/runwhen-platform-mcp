@@ -20,12 +20,17 @@ WRITE_TOOLS = frozenset(
     {
         "run_script",
         "run_script_and_wait",
+        "run_slx",
         "commit_slx",
         "delete_slx",
+        "deploy_registry_codebundle",
         "create_chat_rule",
         "update_chat_rule",
         "create_chat_command",
         "update_chat_command",
+        "create_knowledge_base_article",
+        "update_knowledge_base_article",
+        "delete_knowledge_base_article",
     }
 )
 

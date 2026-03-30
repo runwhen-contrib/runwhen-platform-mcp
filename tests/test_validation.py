@@ -1,7 +1,9 @@
 """Unit tests for script validation and helper functions."""
 
 import base64
+from unittest import mock
 
+from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
@@ -33,6 +35,25 @@ class TestResolveScript:
             assert "exactly one" in str(e).lower()
         else:
             raise AssertionError("expected ValueError")
+
+    def test_script_path_blocked_in_http_mode(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "http"):
+            try:
+                _resolve_script(None, "/etc/passwd", None)
+            except ValueError as e:
+                assert "not supported in HTTP mode" in str(e)
+            else:
+                raise AssertionError("expected ValueError")
+
+    def test_script_path_allowed_in_stdio_mode(self, tmp_path: object) -> None:
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write("def main(): pass\n")
+            f.flush()
+            with mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "stdio"):
+                result = _resolve_script(None, f.name, None)
+                assert "def main()" in result
 
 
 class TestValidateScript:
@@ -155,3 +176,30 @@ class TestEnsureRequiredTags:
         assert len(repo_tags) == 3
         repo_values = sorted(t["value"] for t in repo_tags)
         assert repo_values == ["468-platform", "agentfarm", "usearch"]
+
+
+class TestWriteToolsCompleteness:
+    """Ensure WRITE_TOOLS includes all mutating tool names."""
+
+    EXPECTED_WRITE_TOOLS = {
+        "run_script",
+        "run_script_and_wait",
+        "run_slx",
+        "commit_slx",
+        "delete_slx",
+        "deploy_registry_codebundle",
+        "create_chat_rule",
+        "update_chat_rule",
+        "create_chat_command",
+        "update_chat_command",
+        "create_knowledge_base_article",
+        "update_knowledge_base_article",
+        "delete_knowledge_base_article",
+    }
+
+    def test_write_tools_contains_all_expected(self) -> None:
+        missing = self.EXPECTED_WRITE_TOOLS - WRITE_TOOLS
+        assert not missing, f"WRITE_TOOLS is missing: {missing}"
+
+    def test_no_unexpected_removals(self) -> None:
+        assert WRITE_TOOLS >= self.EXPECTED_WRITE_TOOLS
