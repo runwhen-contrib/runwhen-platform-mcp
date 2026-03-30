@@ -6,20 +6,15 @@ The role hierarchy is: ADMIN > READ_WRITE > READ_AND_RUN > READ_ONLY.
 Read-only tools (list, get, search) require at least READ_ONLY.
 Write tools (run_script, commit_slx, delete_slx) require at least READ_WRITE.
 
-Integration with FastMCP:
-  - ``require_workspace_read`` and ``require_workspace_write`` are
-    FastMCP AuthCheck callables for use with ``@mcp.tool(auth=...)``.
-  - These are wired into tool registrations for the HTTP server only
-    (stdio mode trusts the local environment).
+``_make_workspace_auth_check`` in ``server.py`` uses ``get_user_workspace_role``
+and ``minimum_role_for_tool`` to enforce per-tool authorization in HTTP mode.
 """
 
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import Any
 
 import httpx
-from fastmcp.server.auth import AuthContext
 
 WRITE_TOOLS = frozenset(
     {
@@ -90,16 +85,3 @@ async def get_user_workspace_role(
             return WorkspaceRole.from_string(role_str)
     except (httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException):
         return None
-
-
-def _check_authenticated(ctx: AuthContext) -> bool:
-    """FastMCP AuthCheck: require a valid token."""
-    return ctx.token is not None
-
-
-def require_authenticated() -> Any:
-    """Return an AuthCheck that requires the user to be authenticated.
-
-    Used for all tools in HTTP mode (even those without workspace scope).
-    """
-    return _check_authenticated

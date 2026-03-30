@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from contextvars import ContextVar
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
@@ -407,7 +408,32 @@ def _decode_jwt_payload(token: str) -> dict[str, Any]:
         return {}
 
 
-_user_email_cache: dict[str, str] = {}
+class _TTLCache:
+    """Simple TTL + max-size cache to avoid unbounded growth in long-running HTTP servers."""
+
+    def __init__(self, ttl_seconds: float = 300.0, max_size: int = 256) -> None:
+        self._ttl = ttl_seconds
+        self._max_size = max_size
+        self._store: dict[str, tuple[float, Any]] = {}
+
+    def get(self, key: str) -> Any | None:
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if time.monotonic() - ts > self._ttl:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        if len(self._store) >= self._max_size and key not in self._store:
+            oldest_key = min(self._store, key=lambda k: self._store[k][0])
+            del self._store[oldest_key]
+        self._store[key] = (time.monotonic(), value)
+
+
+_user_email_cache = _TTLCache(ttl_seconds=3600, max_size=256)
 
 
 async def _get_user_email(token: str | None = None) -> str:
@@ -415,21 +441,22 @@ async def _get_user_email(token: str | None = None) -> str:
 
     Uses the PAPI ``/api/v3/users/whoami`` endpoint (preferred), falling back
     to ``/api/v3/users/{id}/`` if whoami is unavailable.  Results are cached
-    for the process lifetime.
+    with a 1-hour TTL.
 
     Note: the whoami endpoint requires NO trailing slash on this PAPI instance.
     """
     token = token or _get_token()
 
-    if token in _user_email_cache:
-        return _user_email_cache[token]
+    cached = _user_email_cache.get(token)
+    if cached is not None:
+        return cached
 
     payload = _decode_jwt_payload(token)
 
     for claim in ("email", "primary_email"):
         val = payload.get(claim)
         if val and isinstance(val, str) and "@" in val:
-            _user_email_cache[token] = val
+            _user_email_cache.set(token, val)
             return val
 
     # Preferred: whoami endpoint returns the current user from the JWT
@@ -438,11 +465,11 @@ async def _get_user_email(token: str | None = None) -> str:
             data = await _papi_get(path)
             email = data.get("primaryEmail") or data.get("primary_email")
             if email:
-                _user_email_cache[token] = email
+                _user_email_cache.set(token, email)
                 return email
             username = data.get("username", "")
             if username and "@" in username:
-                _user_email_cache[token] = username
+                _user_email_cache.set(token, username)
                 return username
         except Exception:
             continue
@@ -454,17 +481,17 @@ async def _get_user_email(token: str | None = None) -> str:
             data = await _papi_get(f"/api/v3/users/{user_id}")
             email = data.get("primaryEmail") or data.get("primary_email")
             if email:
-                _user_email_cache[token] = email
+                _user_email_cache.set(token, email)
                 return email
         except Exception:
             pass
 
     fallback = str(user_id) if user_id else "cursor@runwhen.com"
-    _user_email_cache[token] = fallback
+    _user_email_cache.set(token, fallback)
     return fallback
 
 
-_workspace_cache: dict[str, list[dict[str, str]]] = {}
+_workspace_cache = _TTLCache(ttl_seconds=300, max_size=128)
 
 
 async def _fetch_workspace_list() -> list[dict[str, str]]:
@@ -472,12 +499,13 @@ async def _fetch_workspace_list() -> list[dict[str, str]]:
 
     Returns a list of {"name": short_name, "displayName": display_name} dicts.
     Cache is keyed by a SHA-256 of the token so concurrent HTTP users cannot
-    collide (unlike a short token suffix).
+    collide. Entries expire after 5 minutes.
     """
     token = _get_token()
     cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    if cache_key in _workspace_cache:
-        return _workspace_cache[cache_key]
+    cached = _workspace_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     data = await _papi_get("/api/v3/workspaces")
     workspaces = data if isinstance(data, list) else data.get("results", data)
@@ -486,7 +514,7 @@ async def _fetch_workspace_list() -> list[dict[str, str]]:
         name = ws.get("name") or ws.get("shortName") or ws.get("short_name", "")
         display = ws.get("displayName") or ws.get("display_name") or name
         result.append({"name": name, "displayName": display})
-    _workspace_cache[cache_key] = result
+    _workspace_cache.set(cache_key, result)
     return result
 
 
@@ -3272,6 +3300,7 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
 
     from runwhen_platform_mcp.authorization import (
         WorkspaceRole,
+        get_user_workspace_role,
         minimum_role_for_tool,
     )
 
@@ -3289,7 +3318,17 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
         if required_role == WorkspaceRole.READ_ONLY:
             return True
 
-        return True
+        workspace = None
+        if hasattr(ctx, "arguments") and isinstance(ctx.arguments, dict):
+            workspace = ctx.arguments.get("workspace_name")
+
+        if not workspace:
+            return True
+
+        user_role = await get_user_workspace_role(PAPI_URL, token_str, workspace)
+        if user_role is None:
+            return False
+        return user_role >= required_role
 
     return check
 
