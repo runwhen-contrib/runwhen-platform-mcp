@@ -79,6 +79,7 @@ Map environment variable names to workspace secret keys:
 ```python
 commit_slx(
     slx_name="my-check",
+    workspace_name="my-workspace",
     secret_vars={
         "kubeconfig": "kubeconfig",          # env var name → workspace secret key
         "USER_TOKEN": "BETA-USER_TOKEN",     # can differ if naming conventions vary

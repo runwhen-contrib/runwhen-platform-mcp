@@ -83,6 +83,7 @@ Pass `hierarchy` when calling `commit_slx`:
 ```python
 commit_slx(
     slx_name="my-check",
+    workspace_name="my-workspace",
     resource_path="kubernetes/cluster-01/prod-ns/my-app",
     hierarchy=["cluster", "namespace", "resource_name"],
     tags=[

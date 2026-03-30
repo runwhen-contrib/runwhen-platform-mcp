@@ -76,6 +76,7 @@ deploy_registry_codebundle(
     repo_url="https://github.com/runwhen-contrib/rw-cli-codecollection",
     codebundle_path="codebundles/k8s-namespace-healthcheck",
     location="location-01-us-west1",
+    workspace_name="my-workspace",
     config_vars={
         "NAMESPACE": "production",
         "CONTEXT": "prod-cluster",
@@ -133,7 +134,7 @@ Always summarize:
 3. `get_registry_codebundle(collection_slug="rw-cli-codecollection",
    codebundle_slug="k8s-namespace-healthcheck")`
 4. Reviews `user_variables`: needs NAMESPACE, CONTEXT, KUBERNETES_DISTRIBUTION_BINARY
-5. `get_workspace_locations()` + `get_workspace_secrets()`
+5. `get_workspace_locations(workspace_name="my-workspace")` + `get_workspace_secrets(workspace_name="my-workspace")`
 6. Tells user: "I found a production-ready codebundle with 9 tasks and 4 SLIs.
    It needs NAMESPACE, CONTEXT, and a kubeconfig secret. Shall I deploy it?"
 7. On confirmation: `deploy_registry_codebundle(...)` with all the config

@@ -41,26 +41,26 @@ not actually trigger it. You MUST use `run_slx` for execution.
 ### Run all tasks in an SLX
 
 ```
-run_slx(slx_name="k8s-pod-health")
+run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 ```
 
 ### Run specific tasks within a runbook
 
 ```
-run_slx(slx_name="k8s-namespace-check", task_titles="Check Pod Status||Check Pod Restarts")
+run_slx(slx_name="k8s-namespace-check", workspace_name="my-workspace", task_titles="Check Pod Status||Check Pod Restarts")
 ```
 
 ### Full discovery-to-execution flow
 
 ```
 # 1. Find the SLX
-search_workspace(query="pod health")
+search_workspace(query="pod health", workspace_name="my-workspace")
 
 # 2. See what it does
-get_slx_runbook(slx_name="k8s-pod-health")
+get_slx_runbook(slx_name="k8s-pod-health", workspace_name="my-workspace")
 
 # 3. Run it
-run_slx(slx_name="k8s-pod-health")
+run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 ```
 
 ## Parameters
@@ -68,7 +68,7 @@ run_slx(slx_name="k8s-pod-health")
 | Parameter | Required | Default | Description |
 |-----------|----------|---------|-------------|
 | `slx_name` | Yes | — | SLX short name (e.g. "k8s-pod-health") |
-| `workspace_name` | No | DEFAULT_WORKSPACE | Target workspace |
+| `workspace_name` | Yes | — | Target workspace (e.g. "t-oncall") |
 | `task_titles` | No | `"*"` (all) | Which tasks to run. `"*"` for all, or `"||"`-separated titles |
 
 ## How it works

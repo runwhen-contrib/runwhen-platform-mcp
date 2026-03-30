@@ -63,7 +63,7 @@ Only use locations with a healthy status. If a location shows degraded or unknow
 ### Single-cluster workspace
 Most workspaces have one primary location. Use it for all scripts:
 ```python
-run_script_and_wait(script=my_script, location="location-01-us-west1", ...)
+run_script_and_wait(workspace_name="my-workspace", script=my_script, location="location-01-us-west1", ...)
 ```
 
 ### Multi-cluster workspace
@@ -74,7 +74,7 @@ Match the location to the cluster your script targets. The location name often h
 ### Location in commit_slx
 The location is baked into the SLX config. The script always runs on that location:
 ```python
-commit_slx(slx_name="my-check", location="location-01-us-west1", ...)
+commit_slx(slx_name="my-check", workspace_name="my-workspace", location="location-01-us-west1", ...)
 ```
 
 ## Troubleshooting

@@ -41,6 +41,7 @@ Pass `resource_path` when calling `commit_slx`:
 ```python
 commit_slx(
     slx_name="my-check",
+    workspace_name="my-workspace",
     resource_path="kubernetes/cluster-01/prod-ns/my-app",
     # ... other params
 )

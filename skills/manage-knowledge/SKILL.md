@@ -75,6 +75,7 @@ Common gaps that surface during investigations:
 
 ```
 create_knowledge_base_article(
+    workspace_name="my-workspace",
     content="Team Platform owns all infrastructure in the shared-services namespace including ingress controllers, cert-manager, and external-dns. Team Backend owns all application services in the backend-services namespace. Escalation path: Platform issues go to #platform-oncall, application issues go to #backend-oncall.",
     resource_paths=[],
     abstract_entities=["ownership", "escalation", "platform-team", "backend-team"]
@@ -85,6 +86,7 @@ create_knowledge_base_article(
 
 ```
 create_knowledge_base_article(
+    workspace_name="my-workspace",
     content="The payments service connects to payments-db (Cloud SQL) and uses Redis for session caching. During high-traffic periods (Black Friday, month-end), connection pool exhaustion is the most common failure mode. Check connection counts before investigating application errors.",
     resource_paths=["kubernetes/prod-cluster/payments"],
     abstract_entities=["payments", "connection-pool", "cloud-sql", "redis", "high-traffic"]
@@ -95,6 +97,7 @@ create_knowledge_base_article(
 
 ```
 create_knowledge_base_article(
+    workspace_name="my-workspace",
     content="TEMPORARY (valid through March 28): The payments service is being migrated to a new database. Connection errors and increased latency are expected. Do not escalate payments-db errors during this window unless error rate exceeds 5% sustained for 15+ minutes.",
     resource_paths=["kubernetes/prod-cluster/payments"],
     abstract_entities=["payments", "migration", "database", "maintenance-window"]
@@ -103,9 +106,9 @@ create_knowledge_base_article(
 
 ### 4. Maintain over time
 
-- **Deprecate stale articles** — `update_knowledge_base_article(note_id=..., status="deprecated")`
-- **Delete temporary notes** after events pass — `delete_knowledge_base_article(note_id=...)`
-- **Mark verified** after review — `update_knowledge_base_article(note_id=..., verified=True)`
+- **Deprecate stale articles** — `update_knowledge_base_article(note_id=..., workspace_name="my-workspace", status="deprecated")`
+- **Delete temporary notes** after events pass — `delete_knowledge_base_article(note_id=..., workspace_name="my-workspace")`
+- **Mark verified** after review — `update_knowledge_base_article(note_id=..., workspace_name="my-workspace", verified=True)`
 
 ## Knowledge categories and examples
 

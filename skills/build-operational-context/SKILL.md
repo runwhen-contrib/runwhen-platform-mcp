@@ -24,7 +24,7 @@ Reference: https://docs.runwhen.com/guides/building-operational-context/
 Run a prompt your team asks often through `workspace_chat`:
 
 ```
-workspace_chat(message="What's unhealthy in my-namespace?")
+workspace_chat(workspace_name="my-workspace", message="What's unhealthy in my-namespace?")
 ```
 
 Note the quality: Is it focused? Are expected issues over-emphasized?
@@ -70,6 +70,7 @@ Add 3-5 durable facts that investigations keep missing:
 
 ```
 create_knowledge_base_article(
+    workspace_name="my-workspace",
     content="Team Platform owns shared-services namespace. Team Backend owns backend-services. Escalation: #platform-oncall for infra, #backend-oncall for apps.",
     abstract_entities=["ownership", "escalation", "teams"]
 )
@@ -80,7 +81,7 @@ create_knowledge_base_article(
 Re-run the exact baseline prompt from Step 1:
 
 ```
-workspace_chat(message="What's unhealthy in my-namespace?")
+workspace_chat(workspace_name="my-workspace", message="What's unhealthy in my-namespace?")
 ```
 
 Compare: less noise, cleaner grouping, clearer remediation paths.

@@ -24,12 +24,12 @@ if the registry has no suitable match.
 ## Workflow
 
 1. **Load context** — `get_workspace_context` (ALWAYS first — loads RUNWHEN.md rules)
-2. **Discover config** — `get_workspace_secrets` + `get_workspace_locations`
+2. **Discover config** — `get_workspace_secrets(workspace_name="my-workspace")` + `get_workspace_locations(workspace_name="my-workspace")`
 3. **Write script** — Use the reference templates below as starting points
 4. **Validate** — `validate_script` checks contract compliance
-5. **Test** — `run_script_and_wait` with location, env_vars, secret_vars
+5. **Test** — `run_script_and_wait(workspace_name="my-workspace", ...)` with location, env_vars, secret_vars
 6. **Iterate** — Fix based on output, re-test until issues/severity/next-steps are correct
-7. **Commit** — `commit_slx` with metadata (see reference examples)
+7. **Commit** — `commit_slx(workspace_name="my-workspace", ...)` with metadata (see reference examples)
 8. **Wait** — Allow 1-3 minutes for reconciliation before querying the SLX
 
 ## Reference templates

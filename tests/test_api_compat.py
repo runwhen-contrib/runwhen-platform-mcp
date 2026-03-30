@@ -80,6 +80,12 @@ class TestToolParameterTypes:
         props = tool.parameters.get("properties", {})
         assert "query" in props
 
+    def test_get_workspace_issues_has_since(self, tools) -> None:
+        tool = _find_tool(tools, "get_workspace_issues")
+        assert tool is not None
+        props = tool.parameters.get("properties", {})
+        assert "since" in props
+
     def test_commit_slx_has_all_required_params(self, tools) -> None:
         tool = _find_tool(tools, "commit_slx")
         assert tool is not None
@@ -159,6 +165,68 @@ class TestKnowledgeBaseSchema:
         tool = _find_tool(tools, "delete_knowledge_base_article")
         props = tool.parameters.get("properties", {})
         assert "note_id" in props
+
+
+TOOLS_WITH_WORKSPACE_NAME = [
+    "workspace_chat",
+    "get_workspace_chat_config",
+    "get_workspace_issues",
+    "get_workspace_slxs",
+    "get_run_sessions",
+    "get_workspace_config_index",
+    "get_issue_details",
+    "get_slx_runbook",
+    "search_workspace",
+    "list_knowledge_base_articles",
+    "get_knowledge_base_article",
+    "create_knowledge_base_article",
+    "update_knowledge_base_article",
+    "delete_knowledge_base_article",
+    "get_workspace_secrets",
+    "get_workspace_locations",
+    "run_script",
+    "get_run_status",
+    "get_run_output",
+    "run_script_and_wait",
+    "run_slx",
+    "commit_slx",
+    "delete_slx",
+    "deploy_registry_codebundle",
+]
+
+
+class TestWorkspaceNameRequired:
+    """workspace_name must be in the required array for all workspace tools."""
+
+    @pytest.mark.parametrize("tool_name", TOOLS_WITH_WORKSPACE_NAME)
+    def test_workspace_name_is_required(self, tools, tool_name) -> None:
+        tool = _find_tool(tools, tool_name)
+        assert tool is not None, f"{tool_name} not found"
+        required = tool.parameters.get("required", [])
+        assert "workspace_name" in required, (
+            f"{tool_name}: workspace_name must be in 'required' array"
+        )
+
+    @pytest.mark.parametrize("tool_name", TOOLS_WITH_WORKSPACE_NAME)
+    def test_workspace_name_has_description(self, tools, tool_name) -> None:
+        tool = _find_tool(tools, tool_name)
+        assert tool is not None
+        props = tool.parameters.get("properties", {})
+        ws_prop = props.get("workspace_name", {})
+        assert "description" in ws_prop, f"{tool_name}: workspace_name must have a description"
+
+
+class TestAllParametersHaveDescriptions:
+    """Every parameter across all tools must have a description in the schema."""
+
+    def test_all_params_have_description(self, tools) -> None:
+        missing: list[str] = []
+        for tool in tools:
+            props = tool.parameters.get("properties", {})
+            for param_name, param_schema in props.items():
+                if "description" not in param_schema:
+                    missing.append(f"{tool.name}.{param_name}")
+        assert not missing, f"Parameters missing 'description' in schema: {missing}"
 
 
 class TestRegistrySchema:

@@ -80,7 +80,7 @@ If the namespace is healthy, confirm it explicitly and note any recent recoverie
 
 ### 4. Test it
 
-Use `workspace_chat` with the command name to verify it produces the expected investigation flow.
+Use `workspace_chat(workspace_name="my-workspace", message="...")` with the command name to verify it produces the expected investigation flow.
 
 ## Command categories and examples
 

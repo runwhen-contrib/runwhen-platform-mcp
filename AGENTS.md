@@ -7,6 +7,12 @@ platform. Three agent personas interact with the platform through MCP tools:
 - **`runwhen-task-builder`** — Builds workspace-specific health checks and automation tasks by analyzing code and infrastructure, then testing and committing SLXs.
 - **`runwhen-codecollection-author`** — Builds reusable, parameterized codebundles that work across any environment. Tests them as SLXs in a workspace and cleans up after validation.
 
+## Important: `workspace_name` is required
+
+Most tools require a `workspace_name` parameter. **Always provide it explicitly** —
+do not omit it or rely on defaults. If you don't know the workspace name, call
+`list_workspaces` first to discover available workspaces.
+
 ## MCP Tools
 
 The RunWhen MCP server exposes the following tools. Agents should use these

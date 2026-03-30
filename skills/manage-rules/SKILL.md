@@ -56,7 +56,7 @@ list_chat_rules(scope_type="workspace", scope_id="my-workspace")
 
 ### 2. Identify noise patterns
 
-Use `workspace_chat` to run a baseline prompt your team asks often. Note which findings
+Use `workspace_chat(workspace_name="my-workspace", message="...")` to run a baseline prompt your team asks often. Note which findings
 are repeated noise vs actual issues. Common noise sources:
 
 - Node preemptions / spot instance recycling
@@ -78,7 +78,7 @@ create_chat_rule(
 
 ### 4. Re-test with the same baseline prompt
 
-Run the same `workspace_chat` prompt and compare. Focus on:
+Run the same `workspace_chat(workspace_name="my-workspace", message="...")` prompt and compare. Focus on:
 - Is known noise still dominating?
 - Are real issues surfaced earlier?
 - Are next steps more actionable?
