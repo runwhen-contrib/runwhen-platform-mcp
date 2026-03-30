@@ -674,6 +674,25 @@ async def _papi_patch(path: str, body: dict[str, Any]) -> tuple[int, Any]:
         return resp.status_code, _safe_json_parse(resp, f"PAPI PATCH {path}")
 
 
+async def _papi_put(path: str, body: dict[str, Any]) -> tuple[int, Any]:
+    """Make an authenticated PUT request to PAPI. Returns (status_code, json)."""
+    path = _normalize_path(path)
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        resp = await client.put(
+            f"{PAPI_URL}{path}",
+            headers=_headers(),
+            json=body,
+        )
+        if _is_slash_redirect(resp):
+            resp = await client.put(
+                f"{PAPI_URL}{path}/",
+                headers=_headers(),
+                json=body,
+            )
+        _raise_for_papi_status(resp, path)
+        return resp.status_code, _safe_json_parse(resp, f"PAPI PUT {path}")
+
+
 def _safe_json_parse(resp: httpx.Response, label: str) -> Any:
     """Parse JSON from an HTTP response, raising ValueError with context on failure."""
     try:
@@ -1452,41 +1471,6 @@ async def _fetch_chat_export_url(workspace: str, user_id: str, session_id: str) 
         return None
 
 
-def _agentfarm_headers() -> dict[str, str]:
-    """Common headers for AgentFarm requests (Bearer token)."""
-    token = _get_token()
-    return {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-
-async def _agentfarm_request(
-    method: str,
-    path: str,
-    *,
-    params: dict[str, Any] | None = None,
-    json_body: dict[str, Any] | None = None,
-) -> dict[str, Any] | list[Any]:
-    """Send a request to AgentFarm. Path is relative to AGENTFARM_URL (no leading slash).
-    Returns parsed JSON or raises ValueError on error.
-    """
-    url = f"{AGENTFARM_URL.rstrip('/')}/{path.lstrip('/')}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(
-            method,
-            url,
-            params=params,
-            json=json_body,
-            headers=_agentfarm_headers(),
-        )
-        if resp.status_code >= 400:
-            raise ValueError(f"AgentFarm {method} {path}: {resp.status_code} {resp.text[:500]}")
-        if resp.status_code == 204:
-            return {}
-        return _safe_json_parse(resp, f"AgentFarm {method} {path}")
-
-
 # ---------------------------------------------------------------------------
 # MCP Tools
 # ---------------------------------------------------------------------------
@@ -1578,42 +1562,22 @@ async def get_workspace_chat_config(
     is not included in this endpoint.
     """
     ws = await _resolve_workspace(workspace_name)
-    user_id = await _get_user_email()
-    params: dict[str, Any] = {"user_id": user_id}
+    params: dict[str, Any] = {}
     if persona_name:
         params["persona_name"] = persona_name
     try:
-        data = await _agentfarm_request(
-            "GET",
-            f"api/v1/workspaces/{ws}/config",
-            params=params,
+        data = await _papi_get(
+            f"/api/v3/workspaces/{ws}/chat-config/resolved",
+            params=params or None,
         )
-    except ValueError as e:
+    except (ValueError, httpx.HTTPStatusError) as e:
         return _json_response({"error": str(e)})
     return _json_response(data)
 
 
-async def _chat_config_internal(
-    path: str,
-    method: str = "GET",
-    json_body: dict[str, Any] | None = None,
-    params: dict[str, Any] | None = None,
-) -> str:
-    """Call AgentFarm internal chat-config API; returns JSON string or error."""
-    try:
-        data = await _agentfarm_request(
-            method,
-            f"internal/api/v1/chat-config/{path.lstrip('/')}",
-            params=params,
-            json_body=json_body,
-        )
-        return _json_response(data)
-    except ValueError as e:
-        return _json_response({"error": str(e)})
-
-
 @mcp.tool()
 async def list_chat_rules(
+    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
     scope_type: Annotated[
         str | None, Field(description="Filter by scope (platform, org, workspace, persona, user).")
     ] = None,
@@ -1629,6 +1593,7 @@ async def list_chat_rules(
 
     Uses AgentFarm internal API; may require network access.
     """
+    ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if scope_type is not None:
         params["scope_type"] = scope_type
@@ -1636,15 +1601,25 @@ async def list_chat_rules(
         params["scope_id"] = scope_id
     if is_active is not None:
         params["is_active"] = is_active
-    return await _chat_config_internal("rules", params=params)
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{ws}/chat-config/rules", params=params)
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
 async def get_chat_rule(
     rule_id: int = Field(description="The rule ID to retrieve."),
+    workspace_name: str = Field(description="The workspace the rule belongs to (e.g. 't-oncall')."),
 ) -> str:
-    """Get a single chat rule by ID (full content). Uses AgentFarm internal API."""
-    return await _chat_config_internal(f"rules/{rule_id}")
+    """Get a single chat rule by ID (full content)."""
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{ws}/chat-config/rules/{rule_id}")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
@@ -1652,51 +1627,63 @@ async def create_chat_rule(
     name: str = Field(description="Human-readable name for the rule."),
     rule_content: str = Field(description="Markdown content of the rule."),
     scope_type: str = Field(description="One of platform, org, workspace, persona, user."),
+    workspace_name: str = Field(
+        description="The workspace to create the rule in (e.g. 't-oncall')."
+    ),
     scope_id: Annotated[
         str | None, Field(description="Scope ID (null for platform; workspace name for workspace).")
     ] = None,
     is_active: bool = Field(default=True, description="Whether the rule is active."),
 ) -> str:
     """Create a chat rule. Uses AgentFarm internal API."""
-    user_id = await _get_user_email()
+    ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {
-        "userId": user_id,
         "name": name,
-        "ruleContent": rule_content,
-        "scopeType": scope_type,
-        "scopeId": scope_id,
-        "isActive": is_active,
+        "rule_content": rule_content,
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "is_active": is_active,
     }
-    return await _chat_config_internal("rules", method="POST", json_body=body)
+    try:
+        status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/chat-config/rules", body)
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
 async def update_chat_rule(
     rule_id: int = Field(description="The rule ID to update."),
+    workspace_name: str = Field(description="The workspace the rule belongs to (e.g. 't-oncall')."),
     name: Annotated[str | None, Field(description="New rule name.")] = None,
     rule_content: Annotated[str | None, Field(description="New markdown content.")] = None,
     scope_type: Annotated[str | None, Field(description="New scope type.")] = None,
     scope_id: Annotated[str | None, Field(description="New scope ID.")] = None,
     is_active: Annotated[bool | None, Field(description="Set active/inactive.")] = None,
 ) -> str:
-    """Update an existing chat rule by ID. Uses AgentFarm internal API."""
-    user_id = await _get_user_email()
-    body: dict[str, Any] = {"userId": user_id}
+    """Update an existing chat rule by ID."""
+    ws = await _resolve_workspace(workspace_name)
+    body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
     if rule_content is not None:
-        body["ruleContent"] = rule_content
+        body["rule_content"] = rule_content
     if scope_type is not None:
-        body["scopeType"] = scope_type
+        body["scope_type"] = scope_type
     if scope_id is not None:
-        body["scopeId"] = scope_id
+        body["scope_id"] = scope_id
     if is_active is not None:
-        body["isActive"] = is_active
-    return await _chat_config_internal(f"rules/{rule_id}", method="PUT", json_body=body)
+        body["is_active"] = is_active
+    try:
+        _, data = await _papi_put(f"/api/v3/workspaces/{ws}/chat-config/rules/{rule_id}", body)
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
 async def list_chat_commands(
+    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
     scope_type: Annotated[
         str | None, Field(description="Filter by scope (platform, org, workspace, persona, user).")
     ] = None,
@@ -1705,7 +1692,8 @@ async def list_chat_commands(
     page: int = Field(default=1, description="Page number (1-based)."),
     page_size: int = Field(default=50, description="Items per page (1-200)."),
 ) -> str:
-    """List chat commands (slash-command instructions). Uses AgentFarm internal API."""
+    """List chat commands (slash-command instructions)."""
+    ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"page": page, "page_size": page_size}
     if scope_type is not None:
         params["scope_type"] = scope_type
@@ -1713,15 +1701,27 @@ async def list_chat_commands(
         params["scope_id"] = scope_id
     if is_active is not None:
         params["is_active"] = is_active
-    return await _chat_config_internal("commands", params=params)
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{ws}/chat-config/commands", params=params)
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
 async def get_chat_command(
     command_id: int = Field(description="The command ID to retrieve."),
+    workspace_name: str = Field(
+        description="The workspace the command belongs to (e.g. 't-oncall')."
+    ),
 ) -> str:
-    """Get a single chat command by ID (full content). Uses AgentFarm internal API."""
-    return await _chat_config_internal(f"commands/{command_id}")
+    """Get a single chat command by ID (full content)."""
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
@@ -1729,6 +1729,9 @@ async def create_chat_command(
     name: str = Field(description="Command name (alphanumeric, underscore, or hyphen only)."),
     command_content: str = Field(description="Markdown content of the command."),
     scope_type: str = Field(description="One of platform, org, workspace, persona, user."),
+    workspace_name: str = Field(
+        description="The workspace to create the command in (e.g. 't-oncall')."
+    ),
     scope_id: Annotated[
         str | None, Field(description="Scope ID (null for platform; workspace name for workspace).")
     ] = None,
@@ -1739,25 +1742,31 @@ async def create_chat_command(
 ) -> str:
     """Create a chat command (slash-command). Name must be alphanumeric, underscore, or hyphen only.
 
-    Uses AgentFarm internal API. Commands are invoked in chat as [/label](cmd://name).
+    Commands are invoked in chat as [/label](cmd://name).
     """
-    user_id = await _get_user_email()
+    ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {
-        "userId": user_id,
         "name": name,
-        "commandContent": command_content,
-        "scopeType": scope_type,
-        "scopeId": scope_id,
-        "isActive": is_active,
+        "command_content": command_content,
+        "scope_type": scope_type,
+        "scope_id": scope_id,
+        "is_active": is_active,
     }
     if description is not None:
         body["description"] = description
-    return await _chat_config_internal("commands", method="POST", json_body=body)
+    try:
+        status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/chat-config/commands", body)
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
 async def update_chat_command(
     command_id: int = Field(description="The command ID to update."),
+    workspace_name: str = Field(
+        description="The workspace the command belongs to (e.g. 't-oncall')."
+    ),
     name: Annotated[str | None, Field(description="New command name.")] = None,
     command_content: Annotated[str | None, Field(description="New markdown content.")] = None,
     description: Annotated[str | None, Field(description="New description.")] = None,
@@ -1765,22 +1774,28 @@ async def update_chat_command(
     scope_id: Annotated[str | None, Field(description="New scope ID.")] = None,
     is_active: Annotated[bool | None, Field(description="Set active/inactive.")] = None,
 ) -> str:
-    """Update an existing chat command by ID. Uses AgentFarm internal API."""
-    user_id = await _get_user_email()
-    body: dict[str, Any] = {"userId": user_id}
+    """Update an existing chat command by ID."""
+    ws = await _resolve_workspace(workspace_name)
+    body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
     if command_content is not None:
-        body["commandContent"] = command_content
+        body["command_content"] = command_content
     if description is not None:
         body["description"] = description
     if scope_type is not None:
-        body["scopeType"] = scope_type
+        body["scope_type"] = scope_type
     if scope_id is not None:
-        body["scopeId"] = scope_id
+        body["scope_id"] = scope_id
     if is_active is not None:
-        body["isActive"] = is_active
-    return await _chat_config_internal(f"commands/{command_id}", method="PUT", json_body=body)
+        body["is_active"] = is_active
+    try:
+        _, data = await _papi_put(
+            f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}", body
+        )
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
