@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -470,10 +471,11 @@ async def _fetch_workspace_list() -> list[dict[str, str]]:
     """Fetch and cache the list of accessible workspaces.
 
     Returns a list of {"name": short_name, "displayName": display_name} dicts.
-    Cache is keyed by token so it stays valid across requests in HTTP mode.
+    Cache is keyed by a SHA-256 of the token so concurrent HTTP users cannot
+    collide (unlike a short token suffix).
     """
     token = _get_token()
-    cache_key = token[-12:] if len(token) > 12 else token
+    cache_key = hashlib.sha256(token.encode("utf-8")).hexdigest()
     if cache_key in _workspace_cache:
         return _workspace_cache[cache_key]
 
@@ -2813,7 +2815,7 @@ async def commit_slx(
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    if sli_script_path:
+    if sli_script_path or sli_script is not None:
         try:
             sli_script = _resolve_script(sli_script, sli_script_path)
         except (ValueError, FileNotFoundError) as exc:
