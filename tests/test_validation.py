@@ -1,10 +1,38 @@
 """Unit tests for script validation and helper functions."""
 
+import base64
+
 from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
+    _resolve_script,
     _validate_script,
 )
+
+
+class TestResolveScript:
+    """Tests for _resolve_script (inline, file path, base64)."""
+
+    def test_base64_roundtrip(self) -> None:
+        src = "def main():\n    return []\n"
+        b64 = base64.b64encode(src.encode("utf-8")).decode("ascii")
+        assert _resolve_script(None, None, b64) == src
+
+    def test_inline_exclusive_with_base64(self) -> None:
+        try:
+            _resolve_script("x", None, "eA==")
+        except ValueError as e:
+            assert "exactly one" in str(e).lower()
+        else:
+            raise AssertionError("expected ValueError")
+
+    def test_neither_source_raises(self) -> None:
+        try:
+            _resolve_script(None, None, None)
+        except ValueError as e:
+            assert "exactly one" in str(e).lower()
+        else:
+            raise AssertionError("expected ValueError")
 
 
 class TestValidateScript:

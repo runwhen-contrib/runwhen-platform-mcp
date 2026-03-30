@@ -2333,30 +2333,55 @@ async def get_workspace_locations(
     return _json_response(locations)
 
 
-def _resolve_script(script: str | None, script_path: str | None) -> str:
-    """Return script content from either an inline string or a local file path.
+def _resolve_script(
+    script: str | None,
+    script_path: str | None,
+    script_base64: str | None = None,
+) -> str:
+    """Return script content from inline text, base64, or a local file path.
 
-    Exactly one of *script* or *script_path* must be provided.  When
-    *script_path* is used, the file is read in its entirety and returned
-    as-is.  This avoids passing very large scripts through the MCP JSON-RPC
-    message payload.
+    Exactly one of *script*, *script_path*, or *script_base64* must be provided.
+    *script_base64* is standard base64 of UTF-8 text — use when MCP clients
+    struggle to JSON-escape multiline scripts (e.g. ``def main():``).
+    *script_path* reads the file on the MCP server host (Tool Builder / stdio).
     """
-    if script and script_path:
-        raise ValueError("Provide either 'script' (inline) or 'script_path' (file), not both.")
+    has_script = script is not None and script != ""
+    has_path = bool(script_path)
+    has_b64 = bool(script_base64 and script_base64.strip())
+    chosen = sum(1 for x in (has_script, has_path, has_b64) if x)
+    if chosen != 1:
+        raise ValueError("Provide exactly one of 'script', 'script_path', or 'script_base64'.")
+    if script_base64:
+        try:
+            raw = base64.b64decode(script_base64.strip().encode("ascii"), validate=True)
+            return raw.decode("utf-8")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ValueError(
+                "Invalid script_base64: must be valid base64 encoding UTF-8 text."
+            ) from exc
     if script_path:
         path = os.path.expanduser(script_path)
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Script file not found: {path}")
         with open(path) as f:
             return f.read()
-    if script:
-        return script
-    raise ValueError("One of 'script' or 'script_path' must be provided.")
+    return script or ""
 
 
 @mcp.tool()
 async def validate_script(
-    script: str = Field(description="The full script source code."),
+    script: Annotated[
+        str | None,
+        Field(default=None, description="The full script source code (raw text)."),
+    ] = None,
+    script_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as standard base64. Prefer when JSON-escaping "
+            "multiline scripts is error-prone. Mutually exclusive with 'script'.",
+        ),
+    ] = None,
     interpreter: str = Field(default="bash", description="'bash' or 'python'."),
     task_type: str = Field(
         default="task", description="'task' (returns issues) or 'sli' (returns 0-1 metric)."
@@ -2371,8 +2396,12 @@ async def validate_script(
     'issue description', 'issue severity' (1-4), 'issue next steps',
     and optionally 'issue observed at'.
     """
-    warnings = _validate_script(script, interpreter, task_type)
-    env_vars = _extract_env_vars(script, interpreter)
+    try:
+        script_resolved = _resolve_script(script, None, script_base64)
+    except ValueError as exc:
+        return _json_response({"valid": False, "error": str(exc), "warnings": []})
+    warnings = _validate_script(script_resolved, interpreter, task_type)
+    env_vars = _extract_env_vars(script_resolved, interpreter)
 
     result: dict[str, Any] = {
         "valid": len(warnings) == 0,
@@ -2413,7 +2442,16 @@ async def run_script(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path to read the script from. Mutually exclusive with 'script'."
+            description="Local file path to read the script from. Mutually exclusive with "
+            "'script' and 'script_base64'."
+        ),
+    ] = None,
+    script_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as standard base64. Prefer when JSON-escaping multiline "
+            "scripts is error-prone.",
         ),
     ] = None,
 ) -> str:
@@ -2433,7 +2471,7 @@ async def run_script(
     Use validate_script first to check compliance.
     """
     try:
-        script = _resolve_script(script, script_path)
+        script = _resolve_script(script, script_path, script_base64)
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
@@ -2528,7 +2566,16 @@ async def run_script_and_wait(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path to read the script from. Mutually exclusive with 'script'."
+            description="Local file path to read the script from. Mutually exclusive with "
+            "'script' and 'script_base64'."
+        ),
+    ] = None,
+    script_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as standard base64. Prefer when JSON-escaping multiline "
+            "scripts is error-prone.",
         ),
     ] = None,
 ) -> str:
@@ -2549,7 +2596,7 @@ async def run_script_and_wait(
     For kubeconfig: set KUBECONFIG = os.environ["kubeconfig"].
     """
     try:
-        script = _resolve_script(script, script_path)
+        script = _resolve_script(script, script_path, script_base64)
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
@@ -2786,11 +2833,33 @@ async def commit_slx(
     ] = None,
     script_path: Annotated[
         str | None,
-        Field(description="Local file path for main script. Mutually exclusive with 'script'."),
+        Field(
+            description="Local file path for main script. Mutually exclusive with 'script' "
+            "and 'script_base64'."
+        ),
+    ] = None,
+    script_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 main script as standard base64. Mutually exclusive with "
+            "'script' and 'script_path'.",
+        ),
     ] = None,
     sli_script_path: Annotated[
         str | None,
-        Field(description="Local file path for SLI script. Mutually exclusive with 'sli_script'."),
+        Field(
+            description="Local file path for SLI script. Mutually exclusive with "
+            "'sli_script' and 'sli_script_base64'."
+        ),
+    ] = None,
+    sli_script_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 SLI script as standard base64. Mutually exclusive with "
+            "'sli_script' and 'sli_script_path'.",
+        ),
     ] = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
@@ -2811,13 +2880,13 @@ async def commit_slx(
        runbook on that schedule.
     """
     try:
-        script = _resolve_script(script, script_path)
+        script = _resolve_script(script, script_path, script_base64)
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    if sli_script_path or sli_script is not None:
+    if sli_script_path or sli_script is not None or sli_script_base64:
         try:
-            sli_script = _resolve_script(sli_script, sli_script_path)
+            sli_script = _resolve_script(sli_script, sli_script_path, sli_script_base64)
         except (ValueError, FileNotFoundError) as exc:
             return _json_response({"error": f"SLI script: {exc}"})
 
