@@ -18,15 +18,15 @@ class TestResolveScript:
         assert "main()" in result
 
     def test_both_raises(self) -> None:
-        with pytest.raises(ValueError, match="not both"):
+        with pytest.raises(ValueError, match="exactly one"):
             _resolve_script("inline", "/some/path")
 
     def test_neither_raises(self) -> None:
-        with pytest.raises(ValueError, match="must be provided"):
+        with pytest.raises(ValueError, match="exactly one"):
             _resolve_script(None, None)
 
     def test_empty_string_script_raises(self) -> None:
-        with pytest.raises(ValueError, match="must be provided"):
+        with pytest.raises(ValueError, match="exactly one"):
             _resolve_script("", None)
 
     def test_missing_file_raises(self) -> None:
