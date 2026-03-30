@@ -397,11 +397,80 @@ async def _get_user_email(token: str | None = None) -> str:
     return fallback
 
 
-def _resolve_workspace(workspace_name: str | None) -> str:
+_workspace_cache: dict[str, list[dict[str, str]]] = {}
+
+
+async def _fetch_workspace_list() -> list[dict[str, str]]:
+    """Fetch and cache the list of accessible workspaces.
+
+    Returns a list of {"name": short_name, "displayName": display_name} dicts.
+    Cache is keyed by token so it stays valid across requests in HTTP mode.
+    """
+    token = _get_token()
+    cache_key = token[-12:] if len(token) > 12 else token
+    if cache_key in _workspace_cache:
+        return _workspace_cache[cache_key]
+
+    data = await _papi_get("/api/v3/workspaces")
+    workspaces = data if isinstance(data, list) else data.get("results", data)
+    result = []
+    for ws in workspaces:
+        name = ws.get("name") or ws.get("shortName") or ws.get("short_name", "")
+        display = ws.get("displayName") or ws.get("display_name") or name
+        result.append({"name": name, "displayName": display})
+    _workspace_cache[cache_key] = result
+    return result
+
+
+def _match_workspace(query: str, workspaces: list[dict[str, str]]) -> str | None:
+    """Resolve a workspace query to its short name.
+
+    Matches (in order): exact short name, case-insensitive short name,
+    case-insensitive display name.
+    """
+    q = query.strip()
+    for ws in workspaces:
+        if ws["name"] == q:
+            return ws["name"]
+    q_lower = q.lower()
+    for ws in workspaces:
+        if ws["name"].lower() == q_lower:
+            return ws["name"]
+    for ws in workspaces:
+        if ws["displayName"].lower() == q_lower:
+            return ws["name"]
+    return None
+
+
+async def _resolve_workspace(workspace_name: str | None) -> str:
+    """Resolve a workspace name (short name or display name) to the PAPI short name.
+
+    When workspace_name is omitted and DEFAULT_WORKSPACE is unset, or when the
+    provided name doesn't match any accessible workspace, returns a structured
+    error with the list of available workspaces so the agent can ask the user.
+    """
     ws = workspace_name or DEFAULT_WORKSPACE
     if not ws:
-        raise ValueError("workspace_name is required (or set DEFAULT_WORKSPACE in .env)")
-    return ws
+        workspaces = await _fetch_workspace_list()
+        names = [f"  - {w['name']} ({w['displayName']})" for w in workspaces]
+        raise ValueError(
+            "workspace_name is required. Available workspaces:\n"
+            + "\n".join(names)
+            + "\n\nAsk the user which workspace to use."
+        )
+
+    workspaces = await _fetch_workspace_list()
+    resolved = _match_workspace(ws, workspaces)
+    if resolved:
+        return resolved
+
+    names = [f"  - {w['name']} ({w['displayName']})" for w in workspaces]
+    raise ValueError(
+        f"Workspace '{ws}' not found. Available workspaces:\n"
+        + "\n".join(names)
+        + "\n\nThe user may have used a display name or alias. "
+        "Ask them to clarify which workspace they mean."
+    )
 
 
 def _normalize_path(path: str) -> str:
@@ -438,7 +507,7 @@ async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
             params=params,
         )
         _raise_for_papi_status(resp, path)
-        return resp.json()
+        return _safe_json_parse(resp, f"PAPI GET {path}")
 
 
 async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
@@ -461,7 +530,7 @@ async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
                 json=body,
             )
         _raise_for_papi_status(resp, path)
-        return resp.status_code, resp.json()
+        return resp.status_code, _safe_json_parse(resp, f"PAPI POST {path}")
 
 
 async def _papi_delete(
@@ -485,8 +554,8 @@ async def _papi_delete(
         if resp.status_code == 204:
             return resp.status_code, {}
         try:
-            return resp.status_code, resp.json()
-        except Exception:
+            return resp.status_code, _safe_json_parse(resp, f"PAPI DELETE {path}")
+        except ValueError:
             return resp.status_code, {"message": resp.text[:500]}
 
 
@@ -506,7 +575,29 @@ async def _papi_patch(path: str, body: dict[str, Any]) -> tuple[int, Any]:
                 json=body,
             )
         _raise_for_papi_status(resp, path)
-        return resp.status_code, resp.json()
+        return resp.status_code, _safe_json_parse(resp, f"PAPI PATCH {path}")
+
+
+def _safe_json_parse(resp: httpx.Response, label: str) -> Any:
+    """Parse JSON from an HTTP response, raising ValueError with context on failure."""
+    try:
+        return resp.json()
+    except (json.JSONDecodeError, ValueError):
+        raise ValueError(
+            f"{label} returned non-JSON response "
+            f"(status {resp.status_code}): {resp.text[:300]}"
+        )
+
+
+def _json_response(data: Any) -> str:
+    """Serialize data to a strict-JSON string safe for MCP transport.
+
+    Uses allow_nan=False so NaN/Infinity raise immediately rather than
+    producing non-standard JSON that breaks downstream JS parsers.
+    Uses default=str so datetime and other non-serializable types
+    degrade to strings instead of crashing.
+    """
+    return json.dumps(data, indent=2, allow_nan=False, default=str)
 
 
 def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
@@ -1144,7 +1235,7 @@ async def _agentfarm_request(
             raise ValueError(f"AgentFarm {method} {path}: {resp.status_code} {resp.text[:500]}")
         if resp.status_code == 204:
             return {}
-        return resp.json()
+        return _safe_json_parse(resp, f"AgentFarm {method} {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -1183,7 +1274,7 @@ async def workspace_chat(
         path for this session, when available). Prepend your RunWhen app base URL to
         chatExportLink to open the export in a browser.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     user_id = await _get_user_email()
 
     url = f"{AGENTFARM_URL}/api/v1/workspaces/{ws}/chat-pro-sse"
@@ -1200,7 +1291,7 @@ async def workspace_chat(
         link = await _fetch_chat_export_url(ws, user_id, result["sessionId"])
         if link:
             result["chatExportLink"] = link
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 @mcp.tool()
@@ -1209,14 +1300,8 @@ async def list_workspaces() -> str:
 
     Returns workspace names, display names, and basic metadata.
     """
-    data = await _papi_get("/api/v3/workspaces")
-    workspaces = data if isinstance(data, list) else data.get("results", data)
-    summary = []
-    for ws in workspaces:
-        name = ws.get("name") or ws.get("shortName") or ws.get("short_name", "")
-        display = ws.get("displayName") or ws.get("display_name") or name
-        summary.append({"name": name, "displayName": display})
-    return json.dumps(summary, indent=2)
+    summary = await _fetch_workspace_list()
+    return _json_response(summary)
 
 
 @mcp.tool()
@@ -1235,7 +1320,7 @@ async def get_workspace_chat_config(
         workspace_name: The workspace. Uses DEFAULT_WORKSPACE if not provided.
         persona_name: Optional persona for persona-scoped rules/commands.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     user_id = await _get_user_email()
     params: dict[str, Any] = {"user_id": user_id}
     if persona_name:
@@ -1247,8 +1332,8 @@ async def get_workspace_chat_config(
             params=params,
         )
     except ValueError as e:
-        return json.dumps({"error": str(e)}, indent=2)
-    return json.dumps(data, indent=2)
+        return _json_response({"error": str(e)})
+    return _json_response(data)
 
 
 async def _chat_config_internal(
@@ -1265,9 +1350,9 @@ async def _chat_config_internal(
             params=params,
             json_body=json_body,
         )
-        return json.dumps(data, indent=2)
+        return _json_response(data)
     except ValueError as e:
-        return json.dumps({"error": str(e)}, indent=2)
+        return _json_response({"error": str(e)})
 
 
 @mcp.tool()
@@ -1463,12 +1548,12 @@ async def get_workspace_issues(
         severity: Filter by severity (1=critical, 2=high, 3=medium, 4=low).
         limit: Maximum number of issues to return (default 20).
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"limit": limit}
     if severity is not None:
         params["severity"] = severity
     data = await _papi_get(f"/api/v3/workspaces/{ws}/issues", params=params)
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1483,9 +1568,9 @@ async def get_workspace_slxs(
     Args:
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1502,10 +1587,10 @@ async def get_run_sessions(
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
         limit: Maximum number of run sessions to return (default 20).
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"page": 1, "page-size": limit}
     data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions", params=params)
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1521,9 +1606,9 @@ async def get_workspace_config_index(
     Args:
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/workspace-configuration-index")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1537,9 +1622,9 @@ async def get_issue_details(
         issue_id: The issue ID to look up.
         workspace_name: The workspace the issue belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/{issue_id}")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1556,9 +1641,9 @@ async def get_slx_runbook(
         slx_name: The SLX short name.
         workspace_name: The workspace the SLX belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1574,12 +1659,12 @@ async def search_workspace(
         query: Search query string.
         workspace_name: The workspace to search. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     _, data = await _papi_post(
         f"/api/v3/workspaces/{ws}/autocomplete",
         {"query": query},
     )
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 # ---------------------------------------------------------------------------
@@ -1608,14 +1693,14 @@ async def list_knowledge_base_articles(
         search: Search within article content.
         limit: Maximum number of articles to return (default 50, max 200).
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"limit": min(limit, 200), "offset": 0}
     if status:
         params["status"] = status
     if search:
         params["search"] = search
     data = await _papi_get(f"/api/v3/workspaces/{ws}/notes", params=params)
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1629,9 +1714,9 @@ async def get_knowledge_base_article(
         note_id: The UUID of the KB article to retrieve.
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/notes/{note_id}")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1659,7 +1744,7 @@ async def create_knowledge_base_article(
             (e.g. ["pod-crashloopbackoff", "oom-killed", "memory-limits"]).
             Improves discoverability when searching for related concepts.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {
         "content": content,
         "resourcePaths": resource_paths or [],
@@ -1672,7 +1757,7 @@ async def create_knowledge_base_article(
         "workspace": ws,
         "article": data,
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 @mcp.tool()
@@ -1699,12 +1784,11 @@ async def update_knowledge_base_article(
         verified: Mark as human-verified (true/false).
     """
     if status and status not in VALID_KB_STATUSES:
-        return json.dumps(
-            {"error": f"Invalid status '{status}'. Must be one of: {', '.join(VALID_KB_STATUSES)}"},
-            indent=2,
+        return _json_response(
+            {"error": f"Invalid status '{status}'. Must be one of: {', '.join(VALID_KB_STATUSES)}"}
         )
 
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {}
     if content is not None:
         body["content"] = content
@@ -1718,10 +1802,10 @@ async def update_knowledge_base_article(
         body["verified"] = verified
 
     if not body:
-        return json.dumps({"error": "No fields to update. Provide at least one field."}, indent=2)
+        return _json_response({"error": "No fields to update. Provide at least one field."})
 
     _, data = await _papi_patch(f"/api/v3/workspaces/{ws}/notes/{note_id}", body)
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -1737,14 +1821,14 @@ async def delete_knowledge_base_article(
         note_id: The UUID of the KB article to delete.
         workspace_name: The workspace. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     status_code, data = await _papi_delete(f"/api/v3/workspaces/{ws}/notes/{note_id}")
     result = {
         "status": "deleted" if status_code in (200, 204) else f"status_{status_code}",
         "note_id": note_id,
         "workspace": ws,
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 # ---------------------------------------------------------------------------
@@ -1787,11 +1871,11 @@ async def search_registry(
 
     resp = await _registry_get("/api/v1/codebundles", params=params)
     if resp.status_code != 200:
-        return json.dumps(
+        return _json_response(
             {"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]}
         )
 
-    data = resp.json()
+    data = _safe_json_parse(resp, "Registry GET /api/v1/codebundles")
     bundles = data.get("codebundles", data if isinstance(data, list) else [])
 
     results = []
@@ -1818,12 +1902,11 @@ async def search_registry(
             entry["resource_types"] = ct.get("resource_types", [])
         results.append(entry)
 
-    return json.dumps(
+    return _json_response(
         {
             "total_count": data.get("total_count", len(results)),
             "results": results,
-        },
-        indent=2,
+        }
     )
 
 
@@ -1845,7 +1928,7 @@ async def get_registry_codebundle(
         f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
     )
     if resp.status_code == 404:
-        return json.dumps(
+        return _json_response(
             {
                 "error": (
                     f"Codebundle '{codebundle_slug}' not found in collection '{collection_slug}'."
@@ -1853,7 +1936,7 @@ async def get_registry_codebundle(
             }
         )
     if resp.status_code != 200:
-        return json.dumps(
+        return _json_response(
             {"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]}
         )
 
@@ -1928,10 +2011,10 @@ async def deploy_registry_codebundle(
         commit_message: Custom commit message.
     """
     if not deploy_runbook and not deploy_sli:
-        return json.dumps({"error": "At least one of deploy_runbook or deploy_sli must be True."})
+        return _json_response({"error": "At least one of deploy_runbook or deploy_sli must be True."})
 
     if access not in VALID_ACCESS_TAGS:
-        return json.dumps(
+        return _json_response(
             {
                 "error": (
                     f"Invalid access tag '{access}'. Must be one of: {', '.join(VALID_ACCESS_TAGS)}"
@@ -1939,11 +2022,11 @@ async def deploy_registry_codebundle(
             }
         )
     if data not in VALID_DATA_TAGS:
-        return json.dumps(
+        return _json_response(
             {"error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}"}
         )
 
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
 
     # Ensure .git suffix on repo URL
     git_url = repo_url if repo_url.endswith(".git") else f"{repo_url}.git"
@@ -2034,7 +2117,7 @@ async def deploy_registry_codebundle(
         "config_vars": config_vars or {},
         "response": resp_data,
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 # ---------------------------------------------------------------------------
@@ -2121,7 +2204,7 @@ async def get_workspace_context(
     ctx = _load_workspace_context(force=reload)
 
     if not ctx["found"]:
-        return json.dumps(
+        return _json_response(
             {
                 "status": "no_context",
                 "message": (
@@ -2133,7 +2216,7 @@ async def get_workspace_context(
             }
         )
 
-    return json.dumps(
+    return _json_response(
         {
             "status": "ok",
             "source": ctx["path"],
@@ -2160,9 +2243,9 @@ async def get_workspace_secrets(
     Args:
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -2177,7 +2260,7 @@ async def get_workspace_locations(
     Args:
         workspace_name: The workspace to query. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _get_debugslx(ws)
     runner_locations = data.get("status", {}).get("runnerLocations", [])
     locations = [
@@ -2190,7 +2273,7 @@ async def get_workspace_locations(
         for rl in runner_locations
         if "location" in rl
     ]
-    return json.dumps(locations, indent=2)
+    return _json_response(locations)
 
 
 def _resolve_script(script: str | None, script_path: str | None) -> str:
@@ -2253,7 +2336,7 @@ async def validate_script(
             "Fix these before running or committing."
         )
 
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 @mcp.tool()
@@ -2300,19 +2383,18 @@ async def run_script(
     try:
         script = _resolve_script(script, script_path)
     except (ValueError, FileNotFoundError) as exc:
-        return json.dumps({"error": str(exc)}, indent=2)
+        return _json_response({"error": str(exc)})
 
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
     if warnings:
-        return json.dumps(
+        return _json_response(
             {
                 "error": "Script validation failed",
                 "warnings": warnings,
                 "message": "Fix the warnings and try again. Use validate_script for details.",
-            },
-            indent=2,
+            }
         )
 
     body: dict[str, Any] = {
@@ -2325,7 +2407,7 @@ async def run_script(
     }
 
     status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -2342,9 +2424,9 @@ async def get_run_status(
         run_id: The run ID returned by run_script.
         workspace_name: The workspace the run belongs to. Uses DEFAULT_WORKSPACE if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
-    return json.dumps(data, indent=2)
+    return _json_response(data)
 
 
 @mcp.tool()
@@ -2366,11 +2448,11 @@ async def get_run_output(
         workspace_name: The workspace the run belongs to. Uses DEFAULT_WORKSPACE if not provided.
         fetch_logs: If True, download and parse artifact contents (default: True).
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/output")
 
     if not fetch_logs or not isinstance(data, dict):
-        return json.dumps(data, indent=2)
+        return _json_response(data)
 
     parsed = await _fetch_and_parse_artifacts(data)
     result = {
@@ -2381,7 +2463,7 @@ async def get_run_output(
         "stderr": parsed["stderr"],
         "report": parsed["report"],
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 @mcp.tool()
@@ -2425,18 +2507,17 @@ async def run_script_and_wait(
     try:
         script = _resolve_script(script, script_path)
     except (ValueError, FileNotFoundError) as exc:
-        return json.dumps({"error": str(exc)}, indent=2)
+        return _json_response({"error": str(exc)})
 
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
     if warnings:
-        return json.dumps(
+        return _json_response(
             {
                 "error": "Script validation failed",
                 "warnings": warnings,
-            },
-            indent=2,
+            }
         )
 
     body: dict[str, Any] = {
@@ -2452,7 +2533,7 @@ async def run_script_and_wait(
 
     run_id = run_data.get("runId")
     if not run_id:
-        return json.dumps({"error": "No runId in response", "response": run_data}, indent=2)
+        return _json_response({"error": "No runId in response", "response": run_data})
 
     elapsed = 0
     status = "RUNNING"
@@ -2484,7 +2565,7 @@ async def run_script_and_wait(
         "stderr": parsed["stderr"],
         "report": parsed["report"],
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 # ---------------------------------------------------------------------------
@@ -2525,7 +2606,7 @@ async def run_slx(
             to run all tasks, or "||"-separated titles for specific ones
             (e.g. "Check Pod Status||Check Pod Restarts").
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
 
     # Step 1: Create a staged RunRequest
     create_body: dict[str, Any] = {
@@ -2538,13 +2619,12 @@ async def run_slx(
             create_body,
         )
     except ValueError as exc:
-        return json.dumps({"error": f"Failed to create RunRequest: {exc}"}, indent=2)
+        return _json_response({"error": f"Failed to create RunRequest: {exc}"})
 
     run_request_id = create_data.get("id")
     if not run_request_id:
-        return json.dumps(
-            {"error": "No RunRequest ID in response", "response": create_data},
-            indent=2,
+        return _json_response(
+            {"error": "No RunRequest ID in response", "response": create_data}
         )
 
     # Step 2: Start the RunRequest (submits to runner)
@@ -2554,9 +2634,8 @@ async def run_slx(
             {},
         )
     except ValueError as exc:
-        return json.dumps(
-            {"error": f"Failed to start RunRequest: {exc}", "run_request_id": run_request_id},
-            indent=2,
+        return _json_response(
+            {"error": f"Failed to start RunRequest: {exc}", "run_request_id": run_request_id}
         )
 
     # Step 3: Poll until completion
@@ -2578,7 +2657,7 @@ async def run_slx(
             pass
 
     if run_status != "completed":
-        return json.dumps(
+        return _json_response(
             {
                 "status": "timeout",
                 "run_request_id": run_request_id,
@@ -2586,8 +2665,7 @@ async def run_slx(
                 "message": f"RunRequest did not complete within {SLX_RUN_MAX_POLL_S}s. "
                 "It may still be running — check back later with get_run_sessions.",
                 "last_state": run_data,
-            },
-            indent=2,
+            }
         )
 
     # Step 4: Fetch output
@@ -2609,7 +2687,7 @@ async def run_slx(
         "skipped_titles": run_data.get("skippedTitles") or run_data.get("skipped_titles", ""),
         "output": output_data,
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 @mcp.tool()
@@ -2714,38 +2792,35 @@ async def commit_slx(
     try:
         script = _resolve_script(script, script_path)
     except (ValueError, FileNotFoundError) as exc:
-        return json.dumps({"error": str(exc)}, indent=2)
+        return _json_response({"error": str(exc)})
 
     if sli_script_path:
         try:
             sli_script = _resolve_script(sli_script, sli_script_path)
         except (ValueError, FileNotFoundError) as exc:
-            return json.dumps({"error": f"SLI script: {exc}"}, indent=2)
+            return _json_response({"error": f"SLI script: {exc}"})
 
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
     script_b64 = base64.b64encode(script.encode()).decode()
 
     if sli_script and cron_schedule:
-        return json.dumps(
+        return _json_response(
             {
                 "error": "Cannot specify both sli_script and cron_schedule. "
                 "Use sli_script for a custom SLI metric, or cron_schedule "
                 "to trigger the runbook on a schedule.",
-            },
-            indent=2,
+            }
         )
 
     if access not in VALID_ACCESS_TAGS:
         valid = ", ".join(VALID_ACCESS_TAGS)
-        return json.dumps(
-            {"error": f"Invalid access tag '{access}'. Must be one of: {valid}"},
-            indent=2,
+        return _json_response(
+            {"error": f"Invalid access tag '{access}'. Must be one of: {valid}"}
         )
     if data not in VALID_DATA_TAGS:
         valid = ", ".join(VALID_DATA_TAGS)
-        return json.dumps(
-            {"error": f"Invalid data tag '{data}'. Must be one of: {valid}"},
-            indent=2,
+        return _json_response(
+            {"error": f"Invalid data tag '{data}'. Must be one of: {valid}"}
         )
 
     if owners is None:
@@ -2858,7 +2933,7 @@ async def commit_slx(
         "committed_types": type_label,
         "response": data,
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 @mcp.tool()
@@ -2879,7 +2954,7 @@ async def delete_slx(
         branch: Git branch to delete from (default: "main").
         commit_message: Custom commit message. Auto-generated if not provided.
     """
-    ws = _resolve_workspace(workspace_name)
+    ws = await _resolve_workspace(workspace_name)
 
     if not commit_message:
         commit_message = f"Remove SLX: {slx_name}"
@@ -2896,7 +2971,7 @@ async def delete_slx(
         "branch": branch,
         "response": data,
     }
-    return json.dumps(result, indent=2)
+    return _json_response(result)
 
 
 _TOOL_FUNCTIONS = [
