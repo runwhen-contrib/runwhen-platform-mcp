@@ -5,8 +5,9 @@ description: "Validate a RunWhen MCP server installation is working end-to-end. 
 
 # Verify MCP Setup
 
-Run a structured checklist to confirm the RunWhen MCP server is connected,
-authenticated, and fully operational. Report results as a pass/fail checklist.
+Quick smoke test to confirm the RunWhen MCP server is connected,
+authenticated, and functional. Each step only checks for a valid response —
+it does NOT need to enumerate or display the returned data.
 
 ## When to use
 
@@ -16,137 +17,97 @@ authenticated, and fully operational. Report results as a pass/fail checklist.
 - User asks to "verify", "validate", "test", or "check" the MCP connection
 - Troubleshooting "tool not found" or timeout issues
 
-## Checklist procedure
+## Procedure
 
-Run each step below in order. Track results using a todo list. If a step
-fails, record the error and continue — don't stop early. At the end,
-present a summary table to the user.
+Run each step. Record PASS/FAIL/WARN. **Do not stop on failure** — finish
+all steps and present the summary at the end.
 
-### Phase 1: Core connectivity
+### Step 1 — List workspaces (auth + connectivity)
 
-**Step 1 — List workspaces**
-Call `list_workspaces()`. This validates PAPI connectivity and token auth.
-- PASS: Returns a JSON list with at least one workspace
+Call `list_workspaces()`.
+- PASS: Returns a list with at least one workspace
 - FAIL: Connection error → check `RW_API_URL`; 401/403 → check `RUNWHEN_TOKEN`
 
-**Step 2 — Pick a workspace**
-If the user provided a workspace name, use it. Otherwise pick the first
-workspace from Step 1. All subsequent steps use this workspace.
+Pick a workspace for subsequent steps (use user-provided name, or the first
+returned).
 
-### Phase 2: Read operations
+### Steps 2-5 — Read operations (batch in parallel)
 
-**Step 3 — Workspace issues**
-Call `get_workspace_issues(workspace_name=WS, limit=3)`.
-- PASS: Returns valid JSON (even if empty list — that means no issues)
-- FAIL: 403 → user lacks access to this workspace; 404 → workspace name wrong
+Call all four in parallel with `limit=1` where supported:
+- `get_workspace_issues(workspace_name=WS, limit=1)`
+- `get_workspace_slxs(workspace_name=WS)`
+- `get_run_sessions(workspace_name=WS, limit=1)`
+- `get_workspace_config_index(workspace_name=WS)`
 
-**Step 4 — Workspace SLXs**
-Call `get_workspace_slxs(workspace_name=WS)`.
-- PASS: Returns valid JSON
-- FAIL: Same diagnostics as Step 3
+For each: PASS if valid JSON returned (empty results are fine). FAIL on
+403/404/error.
 
-**Step 5 — Run sessions**
-Call `get_run_sessions(workspace_name=WS, limit=3)`.
-- PASS: Returns valid JSON
+### Steps 6-7 — Runner infrastructure (batch in parallel)
 
-**Step 6 — Workspace config index**
-Call `get_workspace_config_index(workspace_name=WS)`.
-- PASS: Returns valid JSON
+- `get_workspace_locations(workspace_name=WS)` — PASS if at least one
+  location returned; WARN if empty
+- `get_workspace_secrets(workspace_name=WS)` — PASS if valid JSON; WARN
+  if empty list
 
-### Phase 3: Runner infrastructure
+### Steps 8-9 — Registry & validation (batch in parallel)
 
-**Step 7 — Runner locations**
-Call `get_workspace_locations(workspace_name=WS)`.
-- PASS: Returns at least one location (workspace or public)
-- WARN: Returns locations but none are `online`
-- FAIL: Empty list → no runners configured
+- `search_registry(search="kubernetes", max_results=1)` — PASS if results
+  returned
+- `validate_script(script="def main():\n    return []\n", interpreter="python", task_type="task")`
+  — PASS if `valid: true`
 
-**Step 8 — Workspace secrets**
-Call `get_workspace_secrets(workspace_name=WS)`.
-- PASS: Returns valid JSON with at least one secret key
-- WARN: Empty list — scripts may not have credentials available
+### Steps 10-11 — Chat config (batch in parallel)
 
-### Phase 4: Registry & validation
+- `get_workspace_chat_config(workspace_name=WS)` — PASS if valid JSON
+  with `rules` and `commands` keys
+- `list_knowledge_base_articles(workspace_name=WS, limit=1)` — PASS if
+  valid JSON returned
 
-**Step 9 — Registry search**
-Call `search_registry(search="kubernetes", max_results=2)`.
-- PASS: Returns results from the codebundle registry
-- FAIL: Registry unreachable
+### Step 12 — Workspace chat
 
-**Step 10 — Script validation**
-Call `validate_script(script="def main():\n    return []\n", interpreter="python", task_type="task")`.
-- PASS: Returns `{"valid": true, ...}`
-- FAIL: Validation engine broken
+Call `workspace_chat(message="Briefly list the top 3 open issues", workspace_name=WS)`.
+- PASS: Returns a response with `chatUrl`
+- FAIL: Chat backend unreachable
 
-### Phase 5: Live execution (optional but recommended)
+### Step 13 — Live execution (only if user requests "full check")
 
-**Step 11 — Execute a no-op script**
-Call `run_script_and_wait` with a trivial script that reports zero issues.
-This proves the full pipeline: MCP → PAPI → runner → results.
+Skip by default. Only run if the user explicitly asks for a full check.
 
-For **bash**:
-```bash
-main() {
-  echo '[]' >&3
-}
-```
-
-For **python**:
+Call `run_script_and_wait` with:
 ```python
 def main():
     return []
 ```
-
-Use `workspace_name=WS` and let the location auto-resolve.
-- PASS: Status is `SUCCEEDED` and issues list is empty
-- FAIL: Timeout → runner may be offline; error → check runner logs
-
-**Step 12 — Workspace chat**
-Call `workspace_chat(message="What workspaces and SLXs are configured?", workspace_name=WS)`.
-- PASS: Returns a response with `chatUrl`
-- FAIL: Chat backend unreachable
-
-### Phase 6: Chat configuration (quick check)
-
-**Step 13 — Chat rules**
-Call `list_chat_rules(scope_type="workspace", scope_id=WS)`.
-- PASS: Returns valid JSON
-
-**Step 14 — Chat commands**
-Call `list_chat_commands(scope_type="workspace", scope_id=WS)`.
-- PASS: Returns valid JSON
+- PASS: `finalStatus` is `SUCCEEDED`
+- FAIL: Timeout or error → runner may be offline
 
 ## Presenting results
 
-After all steps, present a summary table:
+Present a compact summary table:
 
 ```
-| #  | Check                | Status | Notes                  |
-|----|----------------------|--------|------------------------|
-| 1  | List workspaces      | PASS   |                        |
-| 2  | Workspace selected   | PASS   | t-oncall               |
-| 3  | Issues               | PASS   |                        |
-| ...| ...                  | ...    | ...                    |
-| 14 | Chat commands        | PASS   |                        |
+| #     | Check              | Status | Notes           |
+|-------|--------------------|--------|-----------------|
+| 1     | Auth + workspaces  | PASS   | 5 workspaces    |
+| 2-5   | Read operations    | PASS   | issues/slxs/... |
+| 6-7   | Runner infra       | PASS   | 1 location      |
+| 8-9   | Registry + validate| PASS   |                 |
+| 10-11 | Chat config + KB   | PASS   |                 |
+| 12    | Workspace chat     | PASS   | chatUrl ok      |
+| 13    | Live execution     | SKIP   | (quick mode)    |
 ```
 
-Then:
-- If all PASS: "MCP server is fully operational."
-- If any WARN: List warnings with recommendations.
-- If any FAIL: List failures with specific diagnostics and next steps.
+Then: all PASS → "MCP server is fully operational."
+Any WARN → list with recommendation. Any FAIL → list with diagnostics.
 
 ## Diagnostic reference
 
-| Symptom | Likely cause | Next step |
-|---------|-------------|-----------|
-| Step 1 fails with connection error | Wrong `RW_API_URL` or server not reachable | Verify the URL and network access |
-| Step 1 fails with 401/403 | Bad or expired `RUNWHEN_TOKEN` | Regenerate the token |
-| Steps 3-6 return 403 | User lacks workspace access | Check workspace membership in RunWhen UI |
-| Step 7 returns empty | No runners registered | Install a runner in the workspace |
-| Step 11 times out | Runner is offline or overloaded | Check runner pod health; try `get_workspace_locations` for health status |
-| Step 12 fails | Chat backend service issue | Check if `RUNWHEN_APP_URL` is set correctly (needed when `RW_API_URL` is internal) |
-
-## Quick-run variant
-
-For a fast connectivity check (skip live execution), run only Steps 1-10.
-The user can request "quick check" or "skip execution" to use this variant.
+| Symptom | Likely cause | Fix |
+|---------|-------------|-----|
+| Step 1 connection error | Wrong `RW_API_URL` | Verify URL and network access |
+| Step 1 returns 401/403 | Bad `RUNWHEN_TOKEN` | Regenerate the token |
+| Steps 2-5 return 403 | No workspace access | Check membership in RunWhen UI |
+| Step 6 empty locations | No runners registered | Install a runner |
+| Step 10 chat config error | PAPI chat-config proxy issue | Check PAPI version supports `/api/v3/workspaces/{ws}/chat-config/` |
+| Step 12 fails | Chat backend down | Check `RUNWHEN_APP_URL` setting |
+| Step 13 timeout | Runner offline or overloaded | Check runner pod health |

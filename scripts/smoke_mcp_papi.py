@@ -53,11 +53,11 @@ async def _run_all() -> None:
         ("get_workspace_chat_config", srv.get_workspace_chat_config(ws)),
         (
             "list_chat_rules",
-            srv.list_chat_rules(scope_type="workspace", scope_id=ws),
+            srv.list_chat_rules(workspace_name=ws),
         ),
         (
             "list_chat_commands",
-            srv.list_chat_commands(scope_type="workspace", scope_id=ws),
+            srv.list_chat_commands(workspace_name=ws),
         ),
         ("search_workspace", srv.search_workspace("pod", ws)),
         ("list_knowledge_base_articles", srv.list_knowledge_base_articles(ws, limit=5)),
