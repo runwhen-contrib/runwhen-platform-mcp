@@ -6,19 +6,28 @@ Provides auth strategies that integrate with the RunWhen platform:
    /api/v3/users/whoami endpoint. Works with HS256 tokens without needing
    the signing secret.
 
-2. RunWhenAuth0Provider -- FastMCP Auth0Provider configured for RunWhen's
-   Auth0 tenant, for interactive MCP clients (Cursor, Claude.ai).
+2. Auth0 OAuth via FastMCP's Auth0Provider for interactive clients
+   (Cursor, Claude.ai). After OAuth, the Auth0 access token is exchanged
+   for a PAPI JWT via PAPI's /api/v3/token/exchange/ endpoint.
 
 3. build_auth_provider() -- factory that wires up MultiAuth combining both
    strategies: OAuth for interactive clients, PAT for programmatic use.
+
+4. exchange_auth0_for_papi() -- called after OAuth to convert the Auth0
+   access token into a PAPI JWT that tools can use for API calls.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 
 import httpx
 from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier
+
+logger = logging.getLogger(__name__)
+
+_papi_token_cache: dict[str, str] = {}
 
 
 class PAPITokenVerifier(TokenVerifier):
@@ -78,6 +87,48 @@ class PAPITokenVerifier(TokenVerifier):
             return None
 
 
+async def exchange_auth0_for_papi(auth0_token: str, papi_url: str) -> str | None:
+    """Exchange an Auth0 access token for a PAPI JWT.
+
+    Calls PAPI's /api/v3/token/exchange/ endpoint which validates the
+    Auth0 token against Auth0's /userinfo and issues a PAPI JWT.
+
+    Returns the PAPI access token on success, None on failure.
+    Results are cached by auth0_token to avoid repeated exchanges.
+    """
+    if auth0_token in _papi_token_cache:
+        return _papi_token_cache[auth0_token]
+
+    url = f"{papi_url.rstrip('/')}/api/v3/token/exchange/"
+    payload = {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token": auth0_token,
+        "subject_token_type": "auth0",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(url, json=payload)
+
+            if resp.status_code != 200:
+                logger.warning(
+                    "Token exchange failed: %d %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return None
+
+            data = resp.json()
+            papi_token = data.get("access_token")
+            if papi_token:
+                _papi_token_cache[auth0_token] = papi_token
+            return papi_token
+
+    except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException) as exc:
+        logger.warning("Token exchange request failed: %s", exc)
+        return None
+
+
 def build_auth_provider(
     papi_url: str | None = None,
     auth0_config_url: str | None = None,
@@ -95,7 +146,7 @@ def build_auth_provider(
 
     Configuration is read from parameters or environment variables:
       - RW_API_URL: PAPI base URL (required)
-      - MCP_AUTH0_CONFIG_URL: Auth0 OIDC config URL (optional, for Phase 2)
+      - MCP_AUTH0_CONFIG_URL: Auth0 OIDC config URL (optional)
       - MCP_AUTH0_CLIENT_ID: Auth0 OAuth app client ID (optional)
       - MCP_AUTH0_CLIENT_SECRET: Auth0 OAuth app client secret (optional)
       - MCP_AUTH0_AUDIENCE: Auth0 API audience identifier (optional)

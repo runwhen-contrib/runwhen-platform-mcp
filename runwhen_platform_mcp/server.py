@@ -3391,6 +3391,15 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
             return False
 
         token_str = ctx.token.token
+
+        if ctx.token.client_id != "runwhen-pat" and PAPI_URL:
+            from runwhen_platform_mcp.auth import exchange_auth0_for_papi
+
+            papi_token = await exchange_auth0_for_papi(token_str, PAPI_URL)
+            if papi_token is None:
+                return False
+            token_str = papi_token
+
         _request_token.set(token_str)
 
         if not PAPI_URL:
