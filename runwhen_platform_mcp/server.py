@@ -42,6 +42,7 @@ import os
 import re
 from contextvars import ContextVar
 from typing import Annotated, Any
+from urllib.parse import quote, urlencode
 
 import httpx
 import yaml
@@ -57,6 +58,10 @@ DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
 MCP_SERVER_LABEL = os.environ.get("MCP_SERVER_LABEL", "")
 REGISTRY_URL = os.environ.get("RUNWHEN_REGISTRY_URL", "https://registry.runwhen.com").rstrip("/")
+# Browser UI base (e.g. https://app.test.runwhen.com). If unset, derived from RW_API_URL
+# by swapping ``papi`` → ``app`` (same pattern as AgentFarm). Required for correct
+# ``chatUrl`` when RW_API_URL is an internal cluster URL.
+RUNWHEN_APP_URL = os.environ.get("RUNWHEN_APP_URL", "").strip().rstrip("/")
 
 # Per-request token for HTTP mode. Set by auth middleware; falls back to
 # RUNWHEN_TOKEN in stdio mode.
@@ -66,6 +71,26 @@ _request_token: ContextVar[str | None] = ContextVar("_request_token", default=No
 def _derive_agentfarm_url(api_url: str) -> str:
     """Derive the AgentFarm URL by swapping the ``papi`` subdomain for ``agentfarm``."""
     return re.sub(r"://papi\.", "://agentfarm.", api_url) if api_url else ""
+
+
+def _derive_runwhen_app_url_from_papi(api_url: str) -> str:
+    """Derive the RunWhen web app base URL (``papi`` → ``app``), e.g. hosted test/prod."""
+    return re.sub(r"://papi\.", "://app.", api_url).rstrip("/") if api_url else ""
+
+
+def _runwhen_app_base_url() -> str:
+    """Public browser base for workspace chat links (trailing slash stripped)."""
+    if RUNWHEN_APP_URL:
+        return RUNWHEN_APP_URL
+    return _derive_runwhen_app_url_from_papi(PAPI_URL)
+
+
+def _format_workspace_chat_browser_url(app_base: str, workspace: str, session_id: str) -> str:
+    """Build ``/workspace/{ws}/workspace-chat?session=...`` under the app origin."""
+    base = app_base.rstrip("/")
+    wseg = quote(workspace, safe="")
+    q = urlencode({"session": session_id})
+    return f"{base}/workspace/{wseg}/workspace-chat?{q}"
 
 
 AGENTFARM_URL = _derive_agentfarm_url(PAPI_URL)
@@ -136,13 +161,48 @@ def _build_server_instructions() -> str:
         "IMPORTANT: Most tools require a `workspace_name` parameter. "
         "ALWAYS provide it — do NOT omit it or pass null. "
         "Use `list_workspaces` first if you don't know the workspace name.\n\n"
-        "PRIMARY TOOL: `workspace_chat` — ask the RunWhen AI assistant about "
-        "infrastructure (issues, tasks, run sessions, resources, knowledge base). "
-        "NOTE: workspace_chat can SEARCH and DESCRIBE tasks but CANNOT EXECUTE them.\n\n"
-        "RUN EXISTING TASKS: `run_slx` — execute a committed SLX runbook. "
-        "Use this (not workspace_chat) when the user asks to run/trigger a task.\n\n"
-        "REGISTRY (search before build): `search_registry` — find reusable automation; "
-        "`get_registry_codebundle` — full details; "
+        #
+        # ── Tool routing ──
+        #
+        "TOOL ROUTING — when to use `workspace_chat` vs direct tools:\n\n"
+        "  PREFER `workspace_chat` for:\n"
+        "  - Questions about specific topics (e.g. 'issues related to neo4j')\n"
+        "  - Investigations that need keyword/semantic search across issues, "
+        "resources, SLXs, or run sessions\n"
+        "  - Multi-step analysis or correlation "
+        "(e.g. 'what's wrong in the watcher namespace?')\n"
+        "  - Any question where a knowledgeable human would need to search, "
+        "filter, and interpret results\n"
+        "  `workspace_chat` has internal tools (semantic search, keyword grep, "
+        "resource graph traversal) that produce materially better answers "
+        "than combining multiple direct API calls.\n"
+        "  Responses include a `chatUrl` for the user to continue in the "
+        "RunWhen UI.\n\n"
+        "  PREFER direct tools for:\n"
+        "  - `run_slx` — EXECUTE a task (workspace_chat CANNOT run tasks)\n"
+        "  - Task authoring — `validate_script`, `run_script_and_wait`, "
+        "`commit_slx`, `delete_slx`\n"
+        "  - Registry — `search_registry`, `get_registry_codebundle`, "
+        "`deploy_registry_codebundle`\n"
+        "  - Chat configuration — `list_chat_rules`, `create_chat_rule`, etc.\n"
+        "  - KB mutations — `create_knowledge_base_article`, "
+        "`update_knowledge_base_article`, `delete_knowledge_base_article`\n"
+        "  - Workspace discovery — `list_workspaces`\n"
+        "  - Runner config — `get_workspace_secrets`, `get_workspace_locations`\n"
+        "  - Local context — `get_workspace_context` (reads RUNWHEN.md)\n\n"
+        "  The remaining read/query tools (`get_workspace_issues`, "
+        "`get_workspace_slxs`, `get_run_sessions`, `get_issue_details`, "
+        "`get_slx_runbook`, `get_workspace_config_index`, `search_workspace`, "
+        "`list_knowledge_base_articles`) overlap with what `workspace_chat` "
+        "can do internally. Use them ONLY when you need raw structured JSON "
+        "for programmatic processing (e.g. counting, filtering by field, "
+        "feeding into code). For user-facing answers, prefer `workspace_chat`."
+        "\n\n"
+        #
+        # ── Registry / authoring ──
+        #
+        "REGISTRY (search before build): `search_registry` — find reusable "
+        "automation; `get_registry_codebundle` — full details; "
         "`deploy_registry_codebundle` — deploy a registry codebundle as an SLX "
         "(different from `commit_slx` which embeds inline scripts).\n\n"
         "TASK AUTHORING WORKFLOW:\n"
@@ -154,11 +214,13 @@ def _build_server_instructions() -> str:
         "5. `commit_slx` — save as SLX (supports task + SLI together)\n\n"
         "SCRIPT CONTRACT:\n"
         "- Python task: `main()` returns List[Dict] with keys: "
-        "'issue title', 'issue description', 'issue severity' (1-4), 'issue next steps'\n"
+        "'issue title', 'issue description', 'issue severity' (1-4), "
+        "'issue next steps'\n"
         "- Bash task: `main()` writes issue JSON array to FD 3 (>&3)\n"
         "- Python/Bash SLI: `main()` returns/writes float 0-1\n\n"
         "REQUIRED TAGS for `commit_slx`: "
-        "access='read-write'|'read-only', data='logs-bulk'|'config'|'logs-stacktrace'"
+        "access='read-write'|'read-only', "
+        "data='logs-bulk'|'config'|'logs-stacktrace'"
     )
 
 
@@ -1261,21 +1323,26 @@ async def workspace_chat(
 ) -> str:
     """Ask the RunWhen AI assistant about your infrastructure.
 
-    This is the primary tool — it sends your message to the RunWhen workspace
-    AI agent which has access to ~25+ internal tools including:
-    - Issue search and analysis
-    - Task/SLX search
-    - Run session search
-    - Resource discovery and relationship mapping
-    - Knowledge base search
-    - Data analysis and graphing
-    - Mermaid diagram generation
-    - Task output analysis
+    This is the PRIMARY tool for investigating infrastructure. It sends your
+    message to the RunWhen workspace AI agent which has ~25+ internal tools
+    including semantic search, keyword grep, resource graph traversal, issue
+    correlation, knowledge base lookup, and data analysis.
+
+    PREFER THIS TOOL over direct read/query tools (get_workspace_issues,
+    get_workspace_slxs, search_workspace, etc.) for any question that
+    involves searching by topic, keyword, or context — e.g. "issues related
+    to neo4j", "what's failing in namespace X?", "health of the watcher
+    cluster". workspace_chat produces materially better answers because it
+    can search, filter, and correlate across all workspace data internally.
+
+    Use direct tools instead ONLY for: executing tasks (`run_slx`), task
+    authoring, registry operations, chat config CRUD, KB mutations, or when
+    you specifically need raw structured JSON for programmatic processing.
 
     Returns:
-        JSON with message, sessionId, widgets, and chatExportLink (shareable chat-export
-        path for this session, when available). Prepend your RunWhen app base URL to
-        chatExportLink to open the export in a browser.
+        JSON with message, sessionId, widgets, chatUrl (full browser URL to
+        continue this session in the RunWhen UI — run tasks, review history),
+        and chatExportLink (shareable chat-export path when available).
     """
     ws = await _resolve_workspace(workspace_name)
     user_id = await _get_user_email()
@@ -1290,8 +1357,13 @@ async def workspace_chat(
     }
 
     result = await _consume_agentfarm_sse(url, body)
-    if result.get("sessionId") and "chatExportLink" not in result:
-        link = await _fetch_chat_export_url(ws, user_id, result["sessionId"])
+    sid = result.get("sessionId")
+    if sid:
+        app_base = _runwhen_app_base_url()
+        if app_base:
+            result["chatUrl"] = _format_workspace_chat_browser_url(app_base, ws, sid)
+    if sid and "chatExportLink" not in result:
+        link = await _fetch_chat_export_url(ws, user_id, sid)
         if link:
             result["chatExportLink"] = link
     return _json_response(result)
@@ -1541,10 +1613,15 @@ async def get_workspace_issues(
         ),
     ] = None,
 ) -> str:
-    """Get current issues for a workspace.
+    """Get current issues for a workspace (structured JSON).
 
     Issues represent detected problems in your infrastructure that
     RunWhen has identified through automated health checks.
+
+    NOTE: For questions like "issues related to neo4j" or "what's failing
+    in namespace X", prefer `workspace_chat` — it has semantic search and
+    keyword filtering that produce materially better results. Use this tool
+    only when you need raw JSON for programmatic processing.
     """
     ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"limit": limit}
@@ -1560,10 +1637,15 @@ async def get_workspace_issues(
 async def get_workspace_slxs(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List SLXs (Service Level eXperiences) in a workspace.
+    """List SLXs (Service Level eXperiences) in a workspace (structured JSON).
 
     SLXs are the fundamental unit of work in RunWhen — each represents a
     health check, task, or automation runbook for a piece of infrastructure.
+
+    NOTE: For questions like "which SLXs monitor neo4j?" or "find health
+    checks for namespace X", prefer `workspace_chat` — it can search and
+    correlate SLXs with resources semantically. Use this tool only when you
+    need raw JSON for programmatic processing.
     """
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
@@ -1575,10 +1657,15 @@ async def get_run_sessions(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
     limit: int = Field(default=20, description="Max run sessions to return."),
 ) -> str:
-    """Get recent run sessions for a workspace.
+    """Get recent run sessions for a workspace (structured JSON).
 
     Run sessions are executions of SLX runbooks — they contain the output
     of health checks, troubleshooting tasks, and automation runs.
+
+    NOTE: For investigative questions like "what ran recently for service X?"
+    or "show me recent failures", prefer `workspace_chat` — it can search,
+    filter, and correlate run sessions with issues and resources. Use this
+    tool only when you need raw JSON for programmatic processing.
     """
     ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"page": 1, "page-size": limit}
@@ -1590,11 +1677,16 @@ async def get_run_sessions(
 async def get_workspace_config_index(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """Get the workspace configuration index.
+    """Get the workspace configuration index (structured JSON).
 
     Returns an overview of all configured resources, SLXs, and their
     relationships in the workspace. Useful for understanding what's
     monitored and how things are connected.
+
+    NOTE: For questions like "what's monitored in namespace X?" or "how are
+    resources connected?", prefer `workspace_chat` — it can traverse the
+    resource graph and provide contextual answers. Use this tool only when
+    you need the raw configuration index for programmatic processing.
     """
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/workspace-configuration-index")
@@ -1608,7 +1700,12 @@ async def get_issue_details(
         description="The workspace the issue belongs to (e.g. 't-oncall')."
     ),
 ) -> str:
-    """Get detailed information about a specific issue."""
+    """Get detailed information about a specific issue (structured JSON).
+
+    NOTE: Prefer `workspace_chat` for investigative questions about an issue
+    (e.g. root cause, related resources, next steps). Use this tool only
+    when you already have an issue ID and need raw JSON.
+    """
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/issues/{issue_id}")
     return _json_response(data)
@@ -1619,10 +1716,15 @@ async def get_slx_runbook(
     slx_name: str = Field(description="The SLX short name."),
     workspace_name: str = Field(description="The workspace the SLX belongs to (e.g. 't-oncall')."),
 ) -> str:
-    """Get the runbook for a specific SLX.
+    """Get the runbook for a specific SLX (structured JSON).
 
     Returns the runbook definition including what tasks it runs,
     how they're configured, and what they check.
+
+    NOTE: For questions like "what does this SLX do?" or "what tasks does it
+    run?", prefer `workspace_chat` — it provides contextual explanations.
+    Use this tool when you need the raw runbook YAML/JSON (e.g. for task
+    authoring or programmatic inspection).
     """
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook")
@@ -1637,6 +1739,11 @@ async def search_workspace(
     """Search for tasks, resources, and configuration in a workspace.
 
     Uses the workspace's task search / autocomplete to find matching items.
+
+    NOTE: Prefer `workspace_chat` for most search queries — it uses
+    semantic search and keyword grep across issues, resources, SLXs, and
+    run sessions with much richer results. Use this tool only as a
+    lightweight autocomplete fallback.
     """
     ws = await _resolve_workspace(workspace_name)
     _, data = await _papi_post(
@@ -1663,11 +1770,15 @@ async def list_knowledge_base_articles(
     search: Annotated[str | None, Field(description="Search within article content.")] = None,
     limit: int = Field(default=50, description="Max articles to return (max 200)."),
 ) -> str:
-    """List Knowledge Base articles (notes) in a workspace.
+    """List Knowledge Base articles (notes) in a workspace (structured JSON).
 
     Returns KB articles that feed the workspace's Knowledge Overlay Graph.
     Articles can contain operational knowledge, runbook context, architecture
     notes, or any information useful for troubleshooting.
+
+    NOTE: For questions like "what do we know about service X?", prefer
+    `workspace_chat` — it searches KB articles semantically. Use this tool
+    for programmatic KB management (listing, filtering by status).
     """
     ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"limit": min(limit, 200), "offset": 0}
