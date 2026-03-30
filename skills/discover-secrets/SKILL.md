@@ -66,11 +66,7 @@ For example, if you're building a Kubernetes task:
 
 ### Step 4: Match secrets to runner locations
 
-Different runner locations may have different secrets provisioned. When choosing a location via `get_workspace_locations`, consider which secrets the target location is likely to have. Private runners in a specific cloud environment typically have:
-- The cloud provider's credentials (kubeconfig, SA keys, SP creds)
-- Any API tokens needed for that environment's services
-
-If a secret exists in the workspace list but the script gets empty/missing values at runtime, the secret likely isn't provisioned on that particular runner location.
+Different runner locations may have different secrets provisioned. Location auto-resolves (workspace runners are preferred over public), but if a secret exists in the workspace list and the script gets empty/missing values at runtime, the secret likely isn't provisioned on that particular runner. Use `get_workspace_locations` to see available runners and try a different one if needed.
 
 ## Configuring secrets in commit_slx
 

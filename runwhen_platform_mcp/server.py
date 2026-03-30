@@ -881,21 +881,107 @@ async def _get_authorized_locations(workspace: str) -> list[dict[str, Any]]:
     ]
 
 
+async def _infer_location_from_slxs(workspace: str) -> str | None:
+    """Inspect existing SLX runbook configs to find the most-used location.
+
+    Checks the debugslx first (cheap), then samples a handful of other SLX
+    runbooks and returns the location that appears most often.
+    """
+    location_counts: dict[str, int] = {}
+
+    # 1. Check debugslx spec.location (already cached in many flows)
+    dbg = await _get_debugslx(workspace)
+    loc = dbg.get("spec", {}).get("location")
+    if loc:
+        location_counts[loc] = location_counts.get(loc, 0) + 1
+
+    # 2. Sample a few SLX runbooks for their spec.location
+    try:
+        slxs_data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs")
+        slxs_list = (
+            slxs_data.get("results", slxs_data) if isinstance(slxs_data, dict) else slxs_data
+        )
+        if isinstance(slxs_list, list):
+            sampled = 0
+            for slx_item in slxs_list:
+                name = slx_item.get("shortName") or slx_item.get("name", "")
+                if not name or name == "debugslx":
+                    continue
+                try:
+                    rb = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/{name}/runbook")
+                    rb_loc = rb.get("spec", {}).get("location") if isinstance(rb, dict) else None
+                    if rb_loc:
+                        location_counts[rb_loc] = location_counts.get(rb_loc, 0) + 1
+                except Exception:
+                    pass
+                sampled += 1
+                if sampled >= 5:
+                    break
+    except Exception:
+        pass
+
+    if not location_counts:
+        return None
+    return max(location_counts, key=location_counts.get)  # type: ignore[arg-type]
+
+
+def _loc_name(loc: dict[str, Any]) -> str:
+    """Extract the usable name/value from an authorized-location dict."""
+    return loc.get("value") or loc.get("location") or loc.get("name") or ""
+
+
 async def _resolve_location(workspace: str, location: str) -> str:
     """Return *location* if non-empty, otherwise auto-resolve from the workspace.
 
-    Queries the workspace's authorized locations endpoint (with fallbacks)
-    and picks the first available location.  Raises with a clear message
-    when no runners are found so callers never silently send an empty
-    location to PAPI.
+    Resolution strategy (private locations first, public as last resort):
+
+    1. If exactly one private (non-public) location exists, use it.
+    2. If multiple private locations exist, inspect existing SLX runbook
+       configs to pick the one that's most commonly used.  If still
+       ambiguous, raise an error listing the options so the caller can
+       ask the user to choose.
+    3. If no private locations exist, fall back to the public runner.
     """
     if location:
         return location
+
     all_locations = await _get_authorized_locations(workspace)
-    for loc in all_locations:
-        name = loc.get("value") or loc.get("location") or loc.get("name")
+    if not all_locations:
+        raise ValueError(
+            f"No runner locations found for workspace '{workspace}'. "
+            "Ensure at least one runner is registered. "
+            "Check the workspace configuration or contact your admin."
+        )
+
+    private = [loc for loc in all_locations if loc.get("type") != "public"]
+    public = [loc for loc in all_locations if loc.get("type") == "public"]
+
+    # --- Private locations (preferred) ---
+    if len(private) == 1:
+        name = _loc_name(private[0])
         if name:
             return name
+
+    if len(private) > 1:
+        # Disambiguate by inspecting existing SLX runbook configurations.
+        inferred = await _infer_location_from_slxs(workspace)
+        private_names = {_loc_name(loc) for loc in private if _loc_name(loc)}
+        if inferred and inferred in private_names:
+            return inferred
+        # Still ambiguous — list the options for the agent to present.
+        opts = ", ".join(sorted(private_names))
+        raise ValueError(
+            f"Multiple runner locations available for workspace '{workspace}': "
+            f"{opts}. Please specify which location to use via the 'location' "
+            "parameter."
+        )
+
+    # --- No private locations; fall back to public ---
+    for loc in public:
+        name = _loc_name(loc)
+        if name:
+            return name
+
     raise ValueError(
         f"No runner locations found for workspace '{workspace}'. "
         "Ensure at least one runner is registered. "

@@ -73,6 +73,11 @@ Key fields to examine:
 
 ### 4. Deploy with deploy_registry_codebundle
 
+> **Location auto-resolves.** You do NOT need to call
+> `get_workspace_locations` first. If you omit `location`, the server
+> automatically picks the best runner (workspace locations preferred
+> over public). Only specify it when targeting a specific runner.
+
 ```
 deploy_registry_codebundle(
     slx_name="k8s-ns-health-prod",
@@ -80,7 +85,6 @@ deploy_registry_codebundle(
     statement="All pods in the production namespace should be healthy",
     repo_url="https://github.com/runwhen-contrib/rw-cli-codecollection",
     codebundle_path="codebundles/k8s-namespace-healthcheck",
-    location="location-01-us-west1",
     workspace_name="my-workspace",
     config_vars={
         "NAMESPACE": "production",
@@ -107,6 +111,7 @@ How to fill in the parameters:
 - **access** → from `access_level` in registry response
 - **secret_vars** → usually `{"kubeconfig": "kubeconfig"}` for Kubernetes
   codebundles; check the template for other secrets
+- **location** → optional; auto-resolved from workspace config if omitted
 
 ### 5. Tell the user what you found
 
@@ -139,7 +144,7 @@ Always summarize:
 3. `get_registry_codebundle(collection_slug="rw-cli-codecollection",
    codebundle_slug="k8s-namespace-healthcheck")`
 4. Reviews `user_variables`: needs NAMESPACE, CONTEXT, KUBERNETES_DISTRIBUTION_BINARY
-5. `get_workspace_locations(workspace_name="my-workspace")` + `get_workspace_secrets(workspace_name="my-workspace")`
+5. `get_workspace_secrets(workspace_name="my-workspace")` to confirm available secrets
 6. Tells user: "I found a production-ready codebundle with 9 tasks and 4 SLIs.
    It needs NAMESPACE, CONTEXT, and a kubeconfig secret. Shall I deploy it?"
-7. On confirmation: `deploy_registry_codebundle(...)` with all the config
+7. On confirmation: `deploy_registry_codebundle(...)` with config (location auto-resolves)

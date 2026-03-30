@@ -1,5 +1,10 @@
 # commit_slx Examples
 
+> **Location auto-resolves.** You can omit `location` — the server picks the
+> best runner automatically (workspace runners preferred over public). Only
+> specify `location` when the workspace has multiple workspace-type runners
+> and you need to target a specific one.
+
 ## Basic task (read-only monitoring)
 
 ```python
@@ -9,7 +14,6 @@ commit_slx(
     statement="All pods should be in Running state",
     script=my_script,
     task_title="Check Pod Health in Namespace",
-    location="location-01-us-west1",
     interpreter="bash",
     access="read-only",
     data="logs-bulk",
@@ -35,7 +39,6 @@ commit_slx(
     statement="Replication lag should be under 30 seconds",
     script=task_script,
     task_title="Check Database Replication Lag",
-    location="location-01-us-west1",
     interpreter="python",
     access="read-only",
     data="logs-bulk",
@@ -54,7 +57,6 @@ commit_slx(
     statement="All TLS certificates should have >30 days until expiry",
     script=task_script,
     task_title="Check TLS Certificate Expiry",
-    location="location-01-us-west1",
     interpreter="bash",
     access="read-only",
     data="config",
@@ -72,9 +74,27 @@ commit_slx(
     statement="No pods should be in CrashLoopBackOff for more than 10 minutes",
     script=remediation_script,
     task_title="Restart CrashLoopBackOff Pods",
-    location="location-01-us-west1",
     interpreter="bash",
     access="read-write",            # modifies resources
+    data="logs-bulk",
+    secret_vars={"kubeconfig": "kubeconfig"},
+)
+```
+
+## Explicit location override
+
+Only use when the workspace has multiple workspace-type runners:
+
+```python
+commit_slx(
+    slx_name="k8s-pod-health",
+    alias="Pod Health Check",
+    statement="All pods should be in Running state",
+    script=my_script,
+    task_title="Check Pod Health in Namespace",
+    location="watcher-controlplane",  # explicit override
+    interpreter="bash",
+    access="read-only",
     data="logs-bulk",
     secret_vars={"kubeconfig": "kubeconfig"},
 )

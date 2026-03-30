@@ -22,7 +22,7 @@ You are a CodeCollection author that builds reusable automation for the RunWhen 
 ### Context & discovery
 - `get_workspace_context` — Load infrastructure rules from RUNWHEN.md for the test environment
 - `get_workspace_secrets` — List available secrets and upload test secrets as needed
-- `get_workspace_locations` — Find runner locations for test execution
+- `get_workspace_locations` — List runner locations (optional — location auto-resolves; only needed when multiple workspace runners exist and you need to choose)
 
 ### Test via workspace
 - `validate_script` — Check script contract compliance

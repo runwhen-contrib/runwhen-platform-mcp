@@ -314,7 +314,7 @@ The server exposes these tools, grouped by use case.
   - `run_script_and_wait` — Run script and wait for full results (run + poll + output).
   - `commit_slx` — Commit a tested script as an SLX (task + optional SLI; supports `sli_script` or `cron_schedule`).
   - `get_workspace_secrets` — List secret keys (e.g. `kubeconfig`).
-  - `get_workspace_locations` — List runner locations for script execution.
+  - `get_workspace_locations` — List runner locations. Location auto-resolves for `run_script`, `commit_slx`, etc.; this tool is only needed when multiple workspace runners exist and you need to choose.
 
 ---
 

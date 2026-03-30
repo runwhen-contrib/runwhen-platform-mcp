@@ -41,7 +41,7 @@ RunWhen UI (e.g. to run tasks from the chat).
 | Chat config CRUD | `list/get/create/update_chat_rule`, `list/get/create/update_chat_command` |
 | KB mutations | `create/update/delete_knowledge_base_article` |
 | Workspace discovery | `list_workspaces` |
-| Runner config | `get_workspace_secrets`, `get_workspace_locations` |
+| Runner config | `get_workspace_secrets`, `get_workspace_locations` (location auto-resolves; only needed for multi-runner disambiguation) |
 | Local context | `get_workspace_context` (reads RUNWHEN.md) |
 
 ### Overlapping read/query tools (use sparingly)
@@ -98,7 +98,7 @@ Always follow this sequence when building a new task:
 1. **Load context** — `get_workspace_context` reads the RUNWHEN.md file
 2. **Write script** — Follow the contract and RUNWHEN.md rules
 3. **Validate** — `validate_script` checks compliance
-4. **Discover config** — `get_workspace_secrets` + `get_workspace_locations`
+4. **Discover secrets** — `get_workspace_secrets` (location auto-resolves — only call `get_workspace_locations` when multiple locations exist and you need to choose)
 5. **Test** — `run_script_and_wait` executes against live infrastructure
 6. **Iterate** — Fix based on output, re-test
 7. **Commit** — `commit_slx` writes the SLX to the workspace repo
