@@ -376,11 +376,13 @@ Put a `RUNWHEN.md` in your project root with infrastructure rules (DBs, naming, 
 | **MCP server** | `runwhen_platform_mcp/` | Python package; run via `runwhen-platform-mcp` or `python -m runwhen_platform_mcp.server`. |
 | **Docs** | `runwhen_platform_mcp/docs/` | Tool Builder flow, RUNWHEN.md template/example. |
 | **Tests** | `tests/` | Pytest tests; run with `pytest tests/ -v` (see `requirements-dev.txt`). |
-| **Rules, skills, agents** | `rules/`, `skills/`, `agents/` | Optional Cursor rules, skills, and agent personas. |
+| **Skills** | `skills/` | Reusable AI workflow skills (SKILL.md) — discovered by Cursor, Copilot, and Claude. Symlinked at `.github/skills/` for Copilot auto-discovery. |
+| **Rules & agents** | `rules/`, `agents/` | Optional Cursor rules and agent personas. |
 | **Docker** | `Dockerfile` | Container image for remote HTTP deployment. Published to `ghcr.io/runwhen-contrib/runwhen-platform-mcp`. |
 | **Cursor plugin** | `.cursor-plugin/`, `mcp.json` | Plugin metadata and example MCP config. |
+| **Copilot instructions** | `.github/copilot-instructions.md` | Always-on instructions for GitHub Copilot. |
 
-The MCP server is client-agnostic; Cursor-specific pieces are optional.
+The MCP server is client-agnostic; client-specific pieces (`.cursor-plugin/`, `.github/copilot-instructions.md`) are optional.
 
 ---
 

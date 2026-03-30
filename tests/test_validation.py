@@ -3,12 +3,15 @@
 import base64
 from unittest import mock
 
+import pytest
+
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
     _resolve_script,
     _validate_script,
+    _validate_slx_name,
 )
 
 
@@ -176,6 +179,53 @@ class TestEnsureRequiredTags:
         assert len(repo_tags) == 3
         repo_values = sorted(t["value"] for t in repo_tags)
         assert repo_values == ["468-platform", "agentfarm", "usearch"]
+
+
+class TestValidateSlxName:
+    """Test SLX name validation."""
+
+    def test_valid_names(self) -> None:
+        for name in ["k8s-pod-health", "my-slx", "a", "abc123", "a-b-c"]:
+            _validate_slx_name(name)
+
+    def test_empty_name(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_slx_name("")
+
+    def test_too_long(self) -> None:
+        with pytest.raises(ValueError, match="max allowed is 63"):
+            _validate_slx_name("a" * 64)
+
+    def test_exactly_63_chars(self) -> None:
+        _validate_slx_name("a" * 63)
+
+    def test_uppercase_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_slx_name("My-Slx")
+
+    def test_spaces_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_slx_name("my slx")
+
+    def test_leading_hyphen_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_slx_name("-my-slx")
+
+    def test_trailing_hyphen_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_slx_name("my-slx-")
+
+    def test_consecutive_hyphens_rejected(self) -> None:
+        with pytest.raises(ValueError, match="Consecutive hyphens"):
+            _validate_slx_name("my--slx")
+
+    def test_underscores_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_slx_name("my_slx")
+
+    def test_dots_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_slx_name("my.slx")
 
 
 class TestWriteToolsCompleteness:
