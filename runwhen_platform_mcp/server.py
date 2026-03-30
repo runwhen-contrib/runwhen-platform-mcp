@@ -383,7 +383,7 @@ def _get_token() -> str:
             "RUNWHEN_TOKEN is not set. Provide a PAPI JWT token via environment variable. "
             "Get one from: POST /api/v3/token/ (email+password), "
             "GET /api/v3/users/get-token (browser session), "
-            "or create a Personal Access Token in the RunWhen UI."
+            "or create a Personal Access Token under Profile → Personal Tokens in the RunWhen UI."
         )
     return RUNWHEN_TOKEN
 

@@ -12,6 +12,26 @@ permissions:
   id-token: write
 
 jobs:
+  # Push/merge to main (this workflow) is not gated by GitHub "Releases"; it runs on every
+  # main branch update. Same path set as docker.yaml PR builds — skips Docker publish when
+  # the merge only touches files outside the image (e.g. README.md). PyPI uses pypi.yaml separately.
+  docker-relevant-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      any: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            docker:
+              - 'runwhen_platform_mcp/**'
+              - 'requirements.txt'
+              - 'pyproject.toml'
+              - 'Dockerfile'
+              - '.github/workflows/docker.yaml'
+
   release:
     runs-on: ubuntu-latest
     outputs:
@@ -30,8 +50,11 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
   docker:
-    needs: [release]
-    if: needs.release.result == 'success' && needs.release.outputs.release_tag != ''
+    needs: [release, docker-relevant-changes]
+    if: >
+      needs.release.result == 'success' &&
+      needs.release.outputs.release_tag != '' &&
+      (needs.docker-relevant-changes.outputs.any == 'true' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/docker.yaml
     with:
       release_tag: ${{ needs.release.outputs.release_tag }}

@@ -156,17 +156,23 @@ See your client’s docs for where to add MCP servers (e.g. Continue, Codex, Gem
 
 ### Remote (HTTP) access
 
-The MCP server supports a remote HTTP transport mode for shared deployments — no local install required. This is ideal for teams running a centralized MCP server (e.g. deployed to Kubernetes).
+The MCP server supports **streamable HTTP** so your editor can connect over HTTPS without a local Python install.
 
-**Connecting to a remote MCP server:**
+#### RunWhen-hosted MCP (beta)
 
-Configure your MCP client to use the remote URL instead of a local command. The exact config depends on your client:
+RunWhen operates a shared endpoint for the **beta** environment:
+
+**`https://mcp.beta.runwhen.com/mcp`**
+
+Use your RunWhen beta **JWT or Personal Access Token** (same as local mode) in the `Authorization` header. Official docs: [RunWhen MCP Server — Remote server (HTTP)](https://docs.runwhen.com/docs/use/mcp-server/installation/#remote-server-http).
+
+**Example `mcpServers` block (all remote clients below use this shape):**
 
 ```json
 {
   "mcpServers": {
     "runwhen": {
-      "url": "https://mcp.your-domain.com/mcp",
+      "url": "https://mcp.beta.runwhen.com/mcp",
       "headers": {
         "Authorization": "Bearer your-runwhen-token"
       }
@@ -175,11 +181,41 @@ Configure your MCP client to use the remote URL instead of a local command. The 
 }
 ```
 
-Replace `mcp.your-domain.com` with your deployment's hostname and `your-runwhen-token` with a RunWhen JWT or Personal Access Token.
+> **Important**: Use `/mcp` with **no trailing slash**. The server redirects `/mcp/` → `/mcp`, which can break some MCP clients.
 
-> **Important**: Use `/mcp` (no trailing slash). The server redirects `/mcp/` → `/mcp` which can break some MCP clients.
+> **Workspace**: Pass `workspace_name` on tools that support it when you need a specific workspace. RunWhen’s hosted service is configured for the beta API; self-hosted deployments often set `DEFAULT_WORKSPACE` in server environment variables.
 
-> **Note**: Not all MCP clients support remote/HTTP servers yet. Cursor, Claude Desktop (via MCP config), and the MCP Inspector all support remote URLs. Check your client's docs.
+#### Self-hosted remote MCP
+
+To run the server yourself (Docker, Kubernetes, etc.), set `url` to your own hostname (for example `https://mcp.your-domain.com/mcp`) and the same Bearer token pattern. See **Running the server in HTTP mode yourself** below.
+
+#### Cursor (remote)
+
+1. Open **Cursor Settings** → **MCP** → **New MCP Server**, or edit **`.cursor/mcp.json`** in your project (or user config, depending on how you scope MCP).
+2. Add the `mcpServers.runwhen` block above (`https://mcp.beta.runwhen.com/mcp` for hosted beta, or your self-hosted URL) and Bearer token.
+3. Reload MCP / restart Cursor if the client does not pick up changes immediately.
+
+Remote MCP support depends on your Cursor version; if `url` + `headers` are not accepted, use the local `command` install instead.
+
+#### VS Code (GitHub Copilot) (remote)
+
+1. Add the same `mcpServers` entry to **`.vscode/mcp.json`** (workspace) or to user **`settings.json`** under the key your VS Code build uses for MCP servers (for example `mcp.servers` — check [VS Code MCP documentation](https://code.visualstudio.com/) for the current schema).
+2. Use `url` and `headers` as in the JSON block above.
+
+Availability of remote MCP in VS Code evolves with Copilot; confirm in release notes if `url`-based servers are enabled for your version.
+
+#### Claude Desktop (remote)
+
+1. Edit the Claude Desktop config file:
+   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+   - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+   - **Linux**: `~/.config/claude/claude_desktop_config.json`
+2. Merge the `mcpServers.runwhen` object from the JSON block above (hosted or self-hosted URL) into the top-level `mcpServers` map (alongside any other servers you already have).
+3. Fully quit and restart Claude Desktop.
+
+#### Other MCP clients
+
+Any client that supports **remote** or **HTTP** MCP (streamable HTTP) can use the same `url` + `headers` pattern. For a local-only client, use the stdio `command` + `env` setup in [Getting started](#getting-started).
 
 **Running the server in HTTP mode yourself:**
 
@@ -335,7 +371,7 @@ See `.env.example` in the repo.
 
 ### Getting a token
 
-- **Personal Access Token** (recommended, up to 180 days): RunWhen UI → **Settings** → **Access Tokens** → **Create Token**.
+- **Personal Access Token** (recommended, up to 180 days): RunWhen UI → **Profile** → **Personal Tokens**.
 - **Email/password** (short-lived): `POST {RW_API_URL}/api/v3/token/` with `{"email": "...", "password": "..."}`.
 - **Browser**: Dev Tools → Network → copy `Authorization: Bearer ...` from any API request.
 
@@ -408,9 +444,11 @@ Optional repository secrets **`RUNWHEN_MCP_URL`** (full streamable HTTP MCP URL,
 
 ---
 
-## PyPI release
+## PyPI and container images
 
-Releases are published to PyPI via GitHub Actions on `release:published`, using [runwhen-contrib/github-actions/publish-pypi](https://github.com/runwhen-contrib/github-actions) with date-based versioning (`YYYY.MM.DD.N`). Docker images are pushed to `ghcr.io/runwhen-contrib/runwhen-platform-mcp` on every PR (tagged `pr-{branch}-{sha}`) and on release (tagged with the release version + `latest`). Configure `PYPI_TOKEN` (and optionally `SLACK_BOT_TOKEN` / `slack_channel`) in repo secrets.
+**PyPI** — On every **push to `main`** (including merges), `.github/workflows/pypi.yaml` publishes to PyPI via [runwhen-contrib/github-actions/publish-pypi](https://github.com/runwhen-contrib/github-actions) with date-based versioning (`YYYY.MM.DD.N`). Configure `PYPI_TOKEN` (and optionally `SLACK_BOT_TOKEN` / `slack_channel`) in repo secrets.
+
+**Docker (GHCR and GCP)** — Pull requests that touch image-related paths (see `.github/workflows/docker.yaml`) build and push a preview image (`pr-{branch}-{sha}`). Pushes to **`main`** use `.github/workflows/release.yml`: the workflow runs on each merge to `main`, and a **new image is built and pushed only if that merge changes the same image-related paths** (package code, `Dockerfile`, `pyproject.toml`, `requirements.txt`, or `docker.yaml`). **README-only (or other non-image) merges skip the Docker job** so `latest` and version tags are not republished for doc-only changes. Run **Actions → Release → Run workflow** to force a full run including Docker regardless of paths.
 
 ---
 
