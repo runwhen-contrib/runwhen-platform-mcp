@@ -1,6 +1,6 @@
 ---
 name: discover-secrets
-description: Discover and configure secrets for RunWhen SLX scripts. Use when choosing which secrets to map for a task, when the user asks about secret configuration, authentication, or credentials, or when building a task that needs API tokens, kubeconfigs, or service account keys.
+description: "Discover and configure secrets for RunWhen SLX scripts. Use when: (1) Choosing which secrets to map for a task via secret_vars, (2) The user asks about secret configuration, authentication, or credentials, (3) Building a task that needs API tokens, kubeconfigs, or service account keys, or (4) Understanding how secrets are injected as file paths on runners."
 ---
 
 # Discover Secrets
@@ -66,11 +66,7 @@ For example, if you're building a Kubernetes task:
 
 ### Step 4: Match secrets to runner locations
 
-Different runner locations may have different secrets provisioned. When choosing a location via `get_workspace_locations`, consider which secrets the target location is likely to have. Private runners in a specific cloud environment typically have:
-- The cloud provider's credentials (kubeconfig, SA keys, SP creds)
-- Any API tokens needed for that environment's services
-
-If a secret exists in the workspace list but the script gets empty/missing values at runtime, the secret likely isn't provisioned on that particular runner location.
+Different runner locations may have different secrets provisioned. Location auto-resolves (workspace runners are preferred over public), but if a secret exists in the workspace list and the script gets empty/missing values at runtime, the secret likely isn't provisioned on that particular runner. Use `get_workspace_locations` to see available runners and try a different one if needed.
 
 ## Configuring secrets in commit_slx
 
@@ -79,6 +75,7 @@ Map environment variable names to workspace secret keys:
 ```python
 commit_slx(
     slx_name="my-check",
+    workspace_name="my-workspace",
     secret_vars={
         "kubeconfig": "kubeconfig",          # env var name → workspace secret key
         "USER_TOKEN": "BETA-USER_TOKEN",     # can differ if naming conventions vary

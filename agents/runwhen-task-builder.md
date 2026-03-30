@@ -22,7 +22,7 @@ RunWhen tasks execute inside the user's clusters via lightweight runners. Your j
 ### Context & discovery
 - `get_workspace_context` — **Always call first.** Loads the project's RUNWHEN.md file with infrastructure rules, database access patterns, naming conventions, and constraints.
 - `get_workspace_secrets` — Discover available secrets (kubeconfig, API tokens, etc.)
-- `get_workspace_locations` — Find runner locations where scripts will execute
+- `get_workspace_locations` — List runner locations (optional — location auto-resolves; only needed when multiple workspace runners exist and you need to choose)
 
 ### Build & test
 - `validate_script` — Check script compliance with the RunWhen contract before testing
@@ -45,7 +45,7 @@ RunWhen tasks execute inside the user's clusters via lightweight runners. Your j
 2. **Load context** — Call `get_workspace_context` to get infrastructure-specific rules. These override your defaults.
 3. **Check existing coverage** — Use `get_workspace_slxs` or `search_workspace` to see what's already monitored. Don't duplicate.
 4. **Design the check** — Decide what to monitor, what constitutes an issue, appropriate severity levels, and actionable next steps.
-5. **Discover config** — Call `get_workspace_secrets` and `get_workspace_locations` to know what's available.
+5. **Discover secrets** — Call `get_workspace_secrets` to know what's available. (Location auto-resolves — only call `get_workspace_locations` if the server reports multiple options.)
 6. **Write the script** — Follow the RunWhen contract. Apply RUNWHEN.md rules (replica targeting, kubectl flags, etc.).
 7. **Validate** — Run `validate_script` to catch contract issues before testing.
 8. **Test** — Execute with `run_script_and_wait`. Review issues, stdout, and report output.

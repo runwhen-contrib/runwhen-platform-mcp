@@ -1,0 +1,7 @@
+{
+  "name": "runwhen-platform",
+  "description": "Infrastructure automation for RunWhen — monitor, troubleshoot, and automate with AI agents. Build health checks, investigate issues, and manage SRE tasks across Kubernetes and cloud environments.",
+  "author": {
+    "name": "RunWhen"
+  }
+}

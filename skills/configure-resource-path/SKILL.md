@@ -1,6 +1,6 @@
 ---
 name: configure-resource-path
-description: Set the resourcePath on an SLX for workspace-chat indexing and search. Use when committing an SLX, configuring SLX metadata, or when the user asks about resourcePath, additionalContext, or SLX search/indexing.
+description: "Set the resourcePath on an SLX for workspace-chat indexing and search. Use when: (1) Committing an SLX and need to set its resource_path parameter, (2) Configuring SLX metadata for search and indexing, (3) The user asks about resourcePath, additionalContext, or how SLXs are found by workspace chat, or (4) Improving SLX discoverability in search results."
 ---
 
 # Configure Resource Path
@@ -41,6 +41,7 @@ Pass `resource_path` when calling `commit_slx`:
 ```python
 commit_slx(
     slx_name="my-check",
+    workspace_name="my-workspace",
     resource_path="kubernetes/cluster-01/prod-ns/my-app",
     # ... other params
 )

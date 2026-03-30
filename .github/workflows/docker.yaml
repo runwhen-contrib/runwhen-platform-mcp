@@ -1,0 +1,163 @@
+name: Docker
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'runwhen_platform_mcp/**'
+      - 'requirements.txt'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - '.github/workflows/docker.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: runwhen-platform-mcp
+  SHARED_ARTIFACT_REPOSITORY_PATH: us-docker.pkg.dev/runwhen-nonprod-shared/public-images
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # --- GCP auth (for PR and release pushes to Artifact Registry) ---
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.RUNWHEN_NONPROD_SHARED_WI_PROVIDER }}
+          service_account: ${{ secrets.RUNWHEN_NONPROD_SHARED_WI_SA }}
+
+      - name: Configure Docker for GCP Artifact Registry
+        run: gcloud --quiet auth configure-docker us-docker.pkg.dev
+
+      # --- GHCR auth (for release pushes to GitHub Container Registry) ---
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'release'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Compute tags ---
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH=$(echo "${{ github.head_ref }}" | sed 's/[^a-zA-Z0-9]/-/g')
+            SHORT_SHA=${GITHUB_SHA::8}
+            echo "tag=${BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build tag list
+        id: tags
+        run: |
+          GCP="${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}"
+          GHCR="${{ env.GHCR_IMAGE }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR: push to GCP only
+            echo "tags=${GCP}:${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # Release: push to GCP + GHCR with version + latest
+            TAGS="${GCP}:${TAG},${GCP}:latest"
+            TAGS="${TAGS},${GHCR}:${TAG},${GHCR}:latest"
+            echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref }}
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [docker]
+    if: always()
+    steps:
+      - name: Notify Slack of release push
+        if: github.event_name == 'release' && needs.docker.result == 'success'
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "#notifications"
+            text: "Pushed runwhen-platform-mcp image"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: ":whale: *Pushed runwhen-platform-mcp* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+              - type: section
+                fields:
+                  - type: mrkdwn
+                    text: "*Release:*\n`${{ github.event.release.tag_name }}`"
+                  - type: mrkdwn
+                    text: "*GCP:*\n`${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}:${{ github.event.release.tag_name }}`"
+                  - type: mrkdwn
+                    text: "*GHCR:*\n`${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}`"
+
+      - name: Notify Slack of PR image
+        if: github.event_name == 'pull_request' && needs.docker.result == 'success'
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "#notifications"
+            text: "Pushed PR image for runwhen-platform-mcp"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: ":package: *PR image pushed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+              - type: section
+                fields:
+                  - type: mrkdwn
+                    text: "*Image:*\n`${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}:${{ needs.docker.outputs.image_tag }}`"
+
+      - name: Notify Slack of failure
+        if: needs.docker.result == 'failure'
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "#notifications"
+            text: "Docker build failed for runwhen-platform-mcp"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: ":x: *Docker build failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"

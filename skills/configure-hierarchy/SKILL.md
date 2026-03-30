@@ -1,6 +1,6 @@
 ---
 name: configure-hierarchy
-description: Set the hierarchy on an SLX to define UI grouping and path construction from tags. Use when committing an SLX, organizing SLXs into groups, or when the user asks about hierarchy, SLX grouping, additionalContext, or the map view.
+description: "Set the hierarchy on an SLX to define UI grouping and path construction from tags. Use when: (1) Committing an SLX and need to set its hierarchy parameter, (2) Organizing SLXs into groups for the map view, (3) The user asks about hierarchy, SLX grouping, additionalContext, or map view organization, or (4) Configuring how SLXs appear in the workspace UI tree."
 ---
 
 # Configure Hierarchy
@@ -83,6 +83,7 @@ Pass `hierarchy` when calling `commit_slx`:
 ```python
 commit_slx(
     slx_name="my-check",
+    workspace_name="my-workspace",
     resource_path="kubernetes/cluster-01/prod-ns/my-app",
     hierarchy=["cluster", "namespace", "resource_name"],
     tags=[

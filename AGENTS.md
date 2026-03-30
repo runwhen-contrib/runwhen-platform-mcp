@@ -7,6 +7,54 @@ platform. Three agent personas interact with the platform through MCP tools:
 - **`runwhen-task-builder`** — Builds workspace-specific health checks and automation tasks by analyzing code and infrastructure, then testing and committing SLXs.
 - **`runwhen-codecollection-author`** — Builds reusable, parameterized codebundles that work across any environment. Tests them as SLXs in a workspace and cleans up after validation.
 
+## Important: `workspace_name` is required
+
+Most tools require a `workspace_name` parameter. **Always provide it explicitly** —
+do not omit it or rely on defaults. If you don't know the workspace name, call
+`list_workspaces` first to discover available workspaces.
+
+## Tool Routing — `workspace_chat` vs direct tools
+
+`workspace_chat` is the **primary investigation tool**. It has internal access
+to ~25+ tools including semantic search, keyword grep, resource graph traversal,
+knowledge base lookup, and data analysis. It produces **materially better
+answers** than combining multiple direct API calls for investigative questions.
+
+### ALWAYS prefer `workspace_chat` for:
+
+- Questions about specific topics — *"issues related to neo4j"*
+- Investigations across domains — *"what's failing in the watcher namespace?"*
+- Searching by keyword or context — *"find health checks for postgres"*
+- Multi-step analysis — *"correlate recent failures with deployment changes"*
+- Any question a knowledgeable human would answer by searching and interpreting
+
+Responses include a `chatUrl` the user can open to continue the session in the
+RunWhen UI (e.g. to run tasks from the chat).
+
+### ALWAYS use direct tools for:
+
+| Need | Tool(s) |
+|------|---------|
+| **Execute** a task | `run_slx` (workspace_chat CANNOT run tasks) |
+| Task authoring | `validate_script`, `run_script_and_wait`, `commit_slx`, `delete_slx` |
+| Registry | `search_registry`, `get_registry_codebundle`, `deploy_registry_codebundle` |
+| Chat config CRUD | `list/get/create/update_chat_rule`, `list/get/create/update_chat_command` |
+| KB mutations | `create/update/delete_knowledge_base_article` |
+| Workspace discovery | `list_workspaces` |
+| Runner config | `get_workspace_secrets`, `get_workspace_locations` (location auto-resolves; only needed for multi-runner disambiguation) |
+| Local context | `get_workspace_context` (reads RUNWHEN.md) |
+
+### Overlapping read/query tools (use sparingly)
+
+The following tools return **raw structured JSON** from PAPI. `workspace_chat`
+can answer the same questions internally with richer context. Use these **only**
+when you need raw JSON for programmatic processing (counting, field filtering,
+feeding into code) — **not** for user-facing answers:
+
+`get_workspace_issues`, `get_workspace_slxs`, `get_run_sessions`,
+`get_workspace_config_index`, `get_issue_details`, `get_slx_runbook`,
+`search_workspace`, `list_knowledge_base_articles`, `get_knowledge_base_article`
+
 ## MCP Tools
 
 The RunWhen MCP server exposes the following tools. Agents should use these
@@ -16,18 +64,18 @@ to interact with the platform — do not attempt to call APIs directly.
 
 | Tool | Description |
 |------|-------------|
-| `workspace_chat` | Ask the RunWhen AI assistant about your infrastructure (issues, tasks, resources, knowledge base) |
+| `workspace_chat` | **Primary investigation tool.** Ask the RunWhen AI assistant about your infrastructure (issues, tasks, resources, knowledge base). Responses include `chatUrl` (open this session in the RunWhen UI to run tasks). Set `RUNWHEN_APP_URL` when `RW_API_URL` is an internal/cluster URL. |
 | `list_workspaces` | List all workspaces you have access to |
 | `get_workspace_chat_config` | Get resolved chat rules and commands for a workspace (metadata only) |
 | `list_chat_rules`, `get_chat_rule`, `create_chat_rule`, `update_chat_rule` | List, get, create, update workspace chat rules |
 | `list_chat_commands`, `get_chat_command`, `create_chat_command`, `update_chat_command` | List, get, create, update workspace chat commands (slash-commands) |
-| `get_workspace_issues` | Get current issues for a workspace (filter by severity) |
-| `get_workspace_slxs` | List SLXs (health checks / tasks) in a workspace |
-| `get_run_sessions` | Get recent run session results |
-| `get_workspace_config_index` | Get workspace configuration overview and resource relationships |
-| `get_issue_details` | Get detailed information about a specific issue |
-| `get_slx_runbook` | Get a specific SLX's runbook definition |
-| `search_workspace` | Search tasks, resources, and config by keyword |
+| `get_workspace_issues` | Raw JSON: current issues (prefer `workspace_chat` for search/investigation) |
+| `get_workspace_slxs` | Raw JSON: list SLXs (prefer `workspace_chat` for search/investigation) |
+| `get_run_sessions` | Raw JSON: recent run sessions (prefer `workspace_chat` for search/investigation) |
+| `get_workspace_config_index` | Raw JSON: workspace config overview (prefer `workspace_chat` for questions) |
+| `get_issue_details` | Raw JSON: issue by ID (prefer `workspace_chat` for investigation) |
+| `get_slx_runbook` | Raw JSON: SLX runbook (prefer `workspace_chat` for "what does this do?") |
+| `search_workspace` | Autocomplete search (prefer `workspace_chat` for richer results) |
 
 ### Task Authoring (Tool Builder)
 
@@ -50,7 +98,7 @@ Always follow this sequence when building a new task:
 1. **Load context** — `get_workspace_context` reads the RUNWHEN.md file
 2. **Write script** — Follow the contract and RUNWHEN.md rules
 3. **Validate** — `validate_script` checks compliance
-4. **Discover config** — `get_workspace_secrets` + `get_workspace_locations`
+4. **Discover secrets** — `get_workspace_secrets` (location auto-resolves — only call `get_workspace_locations` when multiple locations exist and you need to choose)
 5. **Test** — `run_script_and_wait` executes against live infrastructure
 6. **Iterate** — Fix based on output, re-test
 7. **Commit** — `commit_slx` writes the SLX to the workspace repo
