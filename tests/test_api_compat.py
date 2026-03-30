@@ -33,6 +33,26 @@ def _find_tool(tools, name):
     return next((t for t in tools if t.name == name), None)
 
 
+def _json_schema_has_description(schema: object) -> bool:
+    """True if *schema* or any nested combinator branch carries a description.
+
+    Pydantic 2 on Python 3.10 often nests ``description`` inside ``anyOf`` for
+    optional unions; on 3.11+ it is commonly hoisted to the property root. Both
+    are valid for MCP clients; this helper accepts either shape.
+    """
+    if not isinstance(schema, dict):
+        return False
+    if schema.get("description"):
+        return True
+    for key in ("anyOf", "oneOf", "allOf"):
+        if key not in schema:
+            continue
+        for sub in schema[key]:
+            if isinstance(sub, dict) and _json_schema_has_description(sub):
+                return True
+    return False
+
+
 class TestScriptPathSchema:
     """run_script, run_script_and_wait, commit_slx should accept script_path."""
 
@@ -224,7 +244,7 @@ class TestAllParametersHaveDescriptions:
         for tool in tools:
             props = tool.parameters.get("properties", {})
             for param_name, param_schema in props.items():
-                if "description" not in param_schema:
+                if not _json_schema_has_description(param_schema):
                     missing.append(f"{tool.name}.{param_name}")
         assert not missing, f"Parameters missing 'description' in schema: {missing}"
 
