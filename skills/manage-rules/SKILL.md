@@ -1,6 +1,6 @@
 ---
 name: manage-rules
-description: Create, update, and manage workspace chat rules that shape how AI assistants interpret infrastructure findings. Use when the user wants to suppress noise, adjust investigation priorities, add operational context, or tune assistant behavior.
+description: "Create, update, and manage workspace chat rules that shape how AI assistants interpret infrastructure findings. Use when: (1) The user wants to suppress noise or adjust investigation priorities, (2) Adding operational context or tuning assistant behavior, (3) Creating or editing chat rules via create_chat_rule or update_chat_rule, or (4) The user asks about rules, assistant behavior, or investigation tuning."
 ---
 
 # Manage Rules

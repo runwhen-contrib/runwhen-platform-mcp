@@ -1,6 +1,6 @@
 ---
 name: run-existing-slx
-description: Run an existing SLX (health check, task, or automation) that is already committed to a workspace. Use when the user asks to execute, trigger, or run a task that already exists.
+description: "Run an existing SLX (health check, task, or automation) that is already committed to a workspace. Use when: (1) The user asks to execute, trigger, or run an existing task, (2) Running a health check or diagnostic on demand, (3) Calling run_slx to execute a previously committed SLX, or (4) The user references a specific SLX name to run."
 ---
 
 # Run an Existing SLX

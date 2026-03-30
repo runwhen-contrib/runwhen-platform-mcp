@@ -1,6 +1,6 @@
 ---
 name: manage-commands
-description: Create, update, and manage workspace chat commands (slash-commands) that package reusable investigation procedures. Use when the user wants to create repeatable diagnostic workflows, onboarding flows, or standardized investigation patterns.
+description: "Create, update, and manage workspace chat commands (slash-commands) that package reusable investigation procedures. Use when: (1) The user wants to create repeatable diagnostic workflows or slash-commands, (2) Building onboarding flows or standardized investigation patterns, (3) Creating or editing commands via create_chat_command or update_chat_command, or (4) The user asks about chat commands, slash-commands, or /commands."
 ---
 
 # Manage Commands

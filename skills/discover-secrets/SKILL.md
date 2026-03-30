@@ -1,6 +1,6 @@
 ---
 name: discover-secrets
-description: Discover and configure secrets for RunWhen SLX scripts. Use when choosing which secrets to map for a task, when the user asks about secret configuration, authentication, or credentials, or when building a task that needs API tokens, kubeconfigs, or service account keys.
+description: "Discover and configure secrets for RunWhen SLX scripts. Use when: (1) Choosing which secrets to map for a task via secret_vars, (2) The user asks about secret configuration, authentication, or credentials, (3) Building a task that needs API tokens, kubeconfigs, or service account keys, or (4) Understanding how secrets are injected as file paths on runners."
 ---
 
 # Discover Secrets

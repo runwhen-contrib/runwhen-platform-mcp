@@ -1,0 +1,9 @@
+{
+  "name": "runwhen-platform-mcp",
+  "version": "1.0.0",
+  "mcpServers": {
+    "runwhen-platform-mcp": {
+      "url": "https://mcp.{domain}.runwhen.com/mcp"
+    }
+  }
+}

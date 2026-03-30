@@ -1,6 +1,6 @@
 ---
 name: build-runwhen-task
-description: Build, test, and commit a RunWhen automation task (SLX). Use when creating health checks, troubleshooting scripts, or scheduled monitoring for infrastructure.
+description: "Build, test, and commit a RunWhen automation task (SLX). Use when: (1) Creating a new health check or monitoring task, (2) Building a troubleshooting runbook or diagnostic script, (3) Writing and testing a bash or python script for RunWhen runners, (4) Committing an SLX with commit_slx, (5) Running run_script_and_wait or run_script to test automation, or (6) The user asks to create, build, write, or test any RunWhen task or SLX."
 ---
 
 # Build RunWhen Task

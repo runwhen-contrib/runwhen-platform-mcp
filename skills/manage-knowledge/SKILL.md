@@ -1,6 +1,6 @@
 ---
 name: manage-knowledge
-description: Create, update, and manage Knowledge Base articles that provide operational context to AI assistants. Use when the user wants to add institutional knowledge, architecture notes, ownership details, or operational context that improves investigation quality.
+description: "Create, update, and manage Knowledge Base articles that provide operational context to AI assistants. Use when: (1) The user wants to add institutional knowledge, architecture notes, or ownership details, (2) Creating or updating KB articles via create_knowledge_base_article or update_knowledge_base_article, (3) Adding operational context that improves investigation quality, or (4) The user asks about knowledge base, KB articles, or documentation for the workspace."
 ---
 
 # Manage Knowledge

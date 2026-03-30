@@ -18,5 +18,7 @@
     "health-checks",
     "incident-response"
   ],
-  "logo": "assets/logo.svg"
+  "logo": "assets/logo.svg",
+  "skills": "../skills/",
+  "mcp": "../mcp.json"
 }

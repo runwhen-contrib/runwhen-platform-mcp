@@ -1,3 +1,8 @@
+---
+name: find-and-deploy-codebundle
+description: "Search the RunWhen CodeBundle Registry for production-ready automation and deploy it as an SLX. Use when: (1) Adding monitoring or health checks for Kubernetes, databases, or cloud services, (2) The user asks to create a health check and a registry codebundle may already exist, (3) Deploying pre-built automation instead of writing custom scripts, or (4) Searching for existing codebundles by keyword or platform."
+---
+
 # Find and Deploy a CodeBundle from the Registry
 
 Search the RunWhen CodeBundle Registry for production-ready automation

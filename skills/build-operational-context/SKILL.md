@@ -1,6 +1,6 @@
 ---
 name: build-operational-context
-description: Build operational context in a RunWhen workspace by adding Rules, Commands, and Knowledge. Use when the user wants to improve assistant investigation quality, tune workspace behavior, onboard engineers, or follow the operational context maturity model.
+description: "Build operational context in a RunWhen workspace by adding Rules, Commands, and Knowledge Base articles. Use when: (1) The user wants to improve assistant investigation quality or tune workspace behavior, (2) Onboarding engineers or teams to a workspace, (3) Adding institutional knowledge, architecture docs, or ownership details, (4) Following the operational context maturity model, or (5) The user asks about improving workspace chat quality or adding context."
 ---
 
 # Build Operational Context

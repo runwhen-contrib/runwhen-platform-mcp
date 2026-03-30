@@ -1,6 +1,6 @@
 ---
 name: discover-locations
-description: Discover and select runner locations for RunWhen scripts. Use when choosing where to execute a task, when the user asks about locations or runners, or when building a task that needs a specific execution environment.
+description: "Discover and select runner locations for RunWhen scripts. Use when: (1) Choosing where to execute a task or script, (2) The user asks about runner locations or execution environments, (3) get_workspace_locations returns an empty list and you need guidance, or (4) Building a task that needs a specific cluster or region for execution."
 ---
 
 # Discover Locations
