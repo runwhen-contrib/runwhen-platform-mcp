@@ -1,0 +1,52 @@
+---
+description: How to create and manage AI workflow skills in this MCP server project
+globs: skills/**/SKILL.md
+alwaysApply: false
+---
+
+# Skill Management
+
+Skills are reusable AI workflow definitions stored as `SKILL.md` files. They are
+a core capability of the RunWhen MCP server — not just documentation.
+
+## Canonical location
+
+All skills live in `skills/` at the repo root. Each skill is a directory
+containing a `SKILL.md` and optional reference files (templates, examples).
+
+## Multi-client discovery
+
+Three symlinks/references ensure every supported client finds the skills:
+
+| Client | Discovery path | Mechanism |
+|--------|---------------|-----------|
+| Cursor | `skills/` | `.cursor-plugin/plugin.json` → `"skills": "../skills/"` |
+| Copilot | `.github/skills/` | Symlink → `../skills` |
+| Claude | `.claude/skills/` | Symlink → `../skills` |
+
+When adding a new skill, place it in `skills/<skill-name>/SKILL.md`. The
+symlinks handle the rest — never duplicate skill files into `.github/` or
+`.claude/` directly.
+
+## SKILL.md structure
+
+Every `SKILL.md` must have YAML frontmatter with `name` and `description`:
+
+```markdown
+---
+name: my-skill-name
+description: >-
+  One-sentence description of when this skill should be used.
+---
+
+# Skill Title
+
+Step-by-step instructions...
+```
+
+## Checklist for new skills
+
+- [ ] Created `skills/<name>/SKILL.md` with valid frontmatter
+- [ ] Symlinks resolve: `ls .github/skills/<name>` and `ls .claude/skills/<name>`
+- [ ] Listed in `.github/copilot-instructions.md` skills table
+- [ ] Tested: skill triggers correctly when relevant prompt is given

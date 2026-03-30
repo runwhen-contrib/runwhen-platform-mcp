@@ -292,9 +292,11 @@ class TestBuildCronSliYaml:
         doc = self._parse()
         assert doc["spec"]["codeBundle"]["ref"] == "main"
 
-    def test_code_bundle_custom_ref(self) -> None:
-        doc = self._parse(codebundle_ref="develop")
-        assert doc["spec"]["codeBundle"]["ref"] == "develop"
+    def test_code_bundle_always_uses_main(self) -> None:
+        """Cron-SLI uses rw-workspace-utils, not the auto-detected ref."""
+        doc = self._parse()
+        assert doc["spec"]["codeBundle"]["ref"] == "main"
+        assert "workspace-utils" in doc["spec"]["codeBundle"]["repoUrl"]
 
     def test_cron_schedule_in_config(self) -> None:
         doc = self._parse(cron_schedule="0 8 * * 1-5")

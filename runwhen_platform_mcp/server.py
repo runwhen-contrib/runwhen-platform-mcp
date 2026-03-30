@@ -1037,6 +1037,42 @@ async def _resolve_location(workspace: str, location: str) -> str:
     )
 
 
+_SLX_NAME_MAX_LEN = 63
+_SLX_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+
+def _validate_slx_name(slx_name: str) -> None:
+    """Validate an SLX short name.
+
+    Raises ``ValueError`` with a user-friendly message when the name is
+    invalid.  Rules enforced:
+      - non-empty
+      - max 63 characters (K8s label-value limit)
+      - lowercase kebab-case: ``[a-z0-9]`` with interior hyphens
+      - no leading/trailing hyphens, no consecutive hyphens
+    """
+    if not slx_name:
+        raise ValueError("SLX name must not be empty.")
+    if len(slx_name) > _SLX_NAME_MAX_LEN:
+        raise ValueError(
+            f"SLX name is {len(slx_name)} characters — "
+            f"max allowed is {_SLX_NAME_MAX_LEN}. "
+            "Shorten the name and try again."
+        )
+    if not _SLX_NAME_RE.match(slx_name):
+        raise ValueError(
+            f"Invalid SLX name: {slx_name!r}. "
+            "Names must be lowercase kebab-case (a-z, 0-9, hyphens), "
+            "start and end with an alphanumeric character, "
+            "and contain no consecutive hyphens."
+        )
+    if "--" in slx_name:
+        raise ValueError(
+            f"Invalid SLX name: {slx_name!r}. "
+            "Consecutive hyphens ('--') are reserved for internal naming."
+        )
+
+
 async def _get_codebundle_ref(workspace: str) -> str:
     """Resolve the codebundle branch used by this workspace's tool-builder runtime.
 
@@ -1183,13 +1219,16 @@ def _build_cron_sli_yaml(
     interval_seconds: int = 60,
     target_slx: str | None = None,
     dry_run: bool = False,
-    codebundle_ref: str | None = None,
 ) -> str:
     """Generate sli.yaml for the cron-scheduler-sli codebundle.
 
     This creates an SLI that triggers the parent SLX's runbook on a cron
     schedule. If target_slx is empty, the scheduler triggers the runbook
     of the SLX it's attached to (self-scheduling pattern).
+
+    Note: the cron-SLI always uses ``rw-workspace-utils`` on ``main``.
+    The auto-detected ``codebundle_ref`` from the debugslx applies to
+    ``rw-generic-codecollection`` only and must NOT be applied here.
     """
     config_provided = [
         {"name": "CRON_SCHEDULE", "value": cron_schedule},
@@ -1199,8 +1238,6 @@ def _build_cron_sli_yaml(
         config_provided.append({"name": "TARGET_SLX", "value": target_slx})
 
     bundle = dict(CRON_SLI_CODE_BUNDLE)
-    if codebundle_ref:
-        bundle["ref"] = codebundle_ref
 
     spec: dict[str, Any] = {
         "locations": [location],
@@ -2287,6 +2324,11 @@ async def deploy_registry_codebundle(
             {"error": f"Invalid data tag '{data}'. Must be one of: {', '.join(VALID_DATA_TAGS)}"}
         )
 
+    try:
+        _validate_slx_name(slx_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
     ws = await _resolve_workspace(workspace_name)
 
     try:
@@ -3094,6 +3136,11 @@ async def commit_slx(
        runbook on that schedule.
     """
     try:
+        _validate_slx_name(slx_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
+    try:
         script = _resolve_script(script, script_path, script_base64)
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
@@ -3196,7 +3243,6 @@ async def commit_slx(
                 location=location,
                 cron_schedule=cron_schedule,
                 interval_seconds=sli_interval_seconds,
-                codebundle_ref=codebundle_ref,
             )
             committed_types.append("sli (cron-scheduler)")
 
@@ -3254,15 +3300,22 @@ async def delete_slx(
     Removes the SLX directory (slx.yaml, runbook.yaml, sli.yaml) from the
     workspace configuration repository.
     """
+    try:
+        _validate_slx_name(slx_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
     ws = await _resolve_workspace(workspace_name)
 
     if not commit_message:
         commit_message = f"Remove SLX: {slx_name}"
 
-    status_code, data = await _papi_delete(
-        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
-        body={"commit_msg": commit_message},
-    )
+    try:
+        status_code, data = await _papi_delete(
+            f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
+        )
+    except (ValueError, httpx.HTTPStatusError) as exc:
+        return _json_response({"error": f"Failed to delete SLX: {exc}"})
 
     result = {
         "status": "deleted" if status_code in (200, 204) else f"status_{status_code}",
