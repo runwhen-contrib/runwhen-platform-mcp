@@ -18,12 +18,14 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE: runwhen-platform-mcp
+  SHARED_ARTIFACT_REPOSITORY_PATH: us-docker.pkg.dev/runwhen-nonprod-shared/public-images
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
 
 permissions:
   contents: read
   packages: write
+  id-token: write
 
 jobs:
   docker:
@@ -35,30 +37,53 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      # --- GCP auth (for PR and release pushes to Artifact Registry) ---
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.RUNWHEN_NONPROD_SHARED_WI_PROVIDER }}
+          service_account: ${{ secrets.RUNWHEN_NONPROD_SHARED_WI_SA }}
+
+      - name: Configure Docker for GCP Artifact Registry
+        run: gcloud --quiet auth configure-docker us-docker.pkg.dev
+
+      # --- GHCR auth (for release pushes to GitHub Container Registry) ---
       - name: Log in to GitHub Container Registry
+        if: github.event_name == 'release'
         uses: docker/login-action@v4
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate PR tag
-        if: github.event_name == 'pull_request'
-        id: pr-tag
+      # --- Compute tags ---
+      - name: Compute image tag
+        id: tag
         run: |
-          BRANCH=$(echo "${{ github.head_ref }}" | sed 's/[^a-zA-Z0-9]/-/g')
-          SHORT_SHA=${GITHUB_SHA::8}
-          echo "tag=pr-${BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH=$(echo "${{ github.head_ref }}" | sed 's/[^a-zA-Z0-9]/-/g')
+            SHORT_SHA=${GITHUB_SHA::8}
+            echo "tag=${BRANCH}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
-            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-            type=raw,value=${{ steps.pr-tag.outputs.tag }},enable=${{ github.event_name == 'pull_request' }}
+      - name: Build tag list
+        id: tags
+        run: |
+          GCP="${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}"
+          GHCR="${{ env.GHCR_IMAGE }}"
+          TAG="${{ steps.tag.outputs.tag }}"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR: push to GCP only
+            echo "tags=${GCP}:${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # Release: push to GCP + GHCR with version + latest
+            TAGS="${GCP}:${TAG},${GCP}:latest"
+            TAGS="${TAGS},${GHCR}:${TAG},${GHCR}:latest"
+            echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build and push
         uses: docker/build-push-action@v7
@@ -66,8 +91,7 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.tags.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
@@ -77,9 +101,10 @@ jobs:
   notify:
     runs-on: ubuntu-latest
     needs: [docker]
-    if: github.event_name == 'release'
+    if: always()
     steps:
-      - name: Notify Slack of container push
+      - name: Notify Slack of release push
+        if: github.event_name == 'release' && needs.docker.result == 'success'
         uses: slackapi/slack-github-action@v3.0.1
         with:
           method: chat.postMessage
@@ -97,4 +122,40 @@ jobs:
                   - type: mrkdwn
                     text: "*Release:*\n`${{ github.event.release.tag_name }}`"
                   - type: mrkdwn
-                    text: "*Image:*\n`ghcr.io/${{ github.repository }}:${{ github.event.release.tag_name }}`"
+                    text: "*GCP:*\n`${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}:${{ github.event.release.tag_name }}`"
+                  - type: mrkdwn
+                    text: "*GHCR:*\n`${{ env.GHCR_IMAGE }}:${{ github.event.release.tag_name }}`"
+
+      - name: Notify Slack of PR image
+        if: github.event_name == 'pull_request' && needs.docker.result == 'success'
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "#notifications"
+            text: "Pushed PR image for runwhen-platform-mcp"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: ":package: *PR image pushed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+              - type: section
+                fields:
+                  - type: mrkdwn
+                    text: "*Image:*\n`${{ env.SHARED_ARTIFACT_REPOSITORY_PATH }}/${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}`"
+
+      - name: Notify Slack of failure
+        if: needs.docker.result == 'failure'
+        uses: slackapi/slack-github-action@v3.0.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "#notifications"
+            text: "Docker build failed for runwhen-platform-mcp"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: ":x: *Docker build failed* — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"

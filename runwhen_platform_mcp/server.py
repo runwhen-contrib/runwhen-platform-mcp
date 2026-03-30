@@ -877,7 +877,8 @@ async def _get_authorized_locations(workspace: str) -> list[dict[str, Any]]:
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            return data.get("results", data.get("locations", []))
+            result = data.get("results") or data.get("locations") or []
+            return result if isinstance(result, list) else []
     except Exception:
         pass
 
