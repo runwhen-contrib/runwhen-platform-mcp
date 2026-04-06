@@ -3436,7 +3436,9 @@ def _build_http_server() -> FastMCP:
     functions with workspace-level authorization checks.
     """
     from runwhen_platform_mcp.auth import build_auth_provider
+    from runwhen_platform_mcp.consent_ui import patch_fastmcp_consent_ui
 
+    patch_fastmcp_consent_ui()
     auth = build_auth_provider()
 
     http_mcp = FastMCP(
