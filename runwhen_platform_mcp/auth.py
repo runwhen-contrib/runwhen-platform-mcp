@@ -285,9 +285,9 @@ def build_auth_provider(
     p_client_secret = papi_oauth_client_secret or os.environ.get("MCP_PAPI_OAUTH_CLIENT_SECRET", "")
 
     if p_client_id and p_client_secret and server_url:
-        from fastmcp.server.auth.providers.auth0 import Auth0Provider
+        from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
-        papi_oidc_provider = Auth0Provider(
+        papi_oidc_provider = OIDCProxy(
             config_url=f"{papi}/.well-known/openid-configuration",
             client_id=p_client_id,
             client_secret=p_client_secret,
