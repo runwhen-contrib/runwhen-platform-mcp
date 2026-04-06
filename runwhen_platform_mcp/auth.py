@@ -291,7 +291,6 @@ def build_auth_provider(
             config_url=f"{papi}/.well-known/openid-configuration",
             client_id=p_client_id,
             client_secret=p_client_secret,
-            audience=p_client_id,
             base_url=server_url,
             token_endpoint_auth_method="client_secret_post",
         )
