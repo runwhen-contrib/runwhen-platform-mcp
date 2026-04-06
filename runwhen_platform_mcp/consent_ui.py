@@ -326,7 +326,15 @@ def create_consent_html(
 
 
 def patch_fastmcp_consent_ui() -> None:
-    """Monkey-patch FastMCP's consent page with the RunWhen-styled version."""
+    """Monkey-patch FastMCP's consent page with the RunWhen-styled version.
+
+    Must patch both the ``ui`` module (where the function is defined) and
+    the ``consent`` module (which imports it into its own namespace at
+    load time).  Without patching the ``consent`` module, the consent
+    handler continues to call the original function via its local binding.
+    """
+    import fastmcp.server.auth.oauth_proxy.consent as consent_mod
     import fastmcp.server.auth.oauth_proxy.ui as proxy_ui
 
     proxy_ui.create_consent_html = create_consent_html
+    consent_mod.create_consent_html = create_consent_html
