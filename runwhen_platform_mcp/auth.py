@@ -293,6 +293,7 @@ def build_auth_provider(
             client_secret=p_client_secret,
             audience=p_client_id,
             base_url=server_url,
+            token_endpoint_auth_method="client_secret_post",
         )
         logger.info("Using PAPI as OAuth 2.1 AS for MCP auth (RW-454)")
         return MultiAuth(
