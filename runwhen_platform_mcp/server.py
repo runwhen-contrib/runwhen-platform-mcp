@@ -3396,8 +3396,19 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
         is_papi_oidc_token = papi_oauth_client and ctx.token.client_id == papi_oauth_client
         is_papi_jwt = ctx.token.client_id == "papi-jwt"
         is_pat = ctx.token.client_id == "runwhen-pat"
+        is_papi_upstream = bool(
+            ctx.token.claims
+            and ctx.token.claims.get("type") in ("access", "refresh")
+            and ctx.token.claims.get("iss")
+        )
 
-        if not is_pat and not is_papi_oidc_token and not is_papi_jwt and PAPI_URL:
+        if (
+            not is_pat
+            and not is_papi_oidc_token
+            and not is_papi_jwt
+            and not is_papi_upstream
+            and PAPI_URL
+        ):
             from runwhen_platform_mcp.auth import exchange_auth0_for_papi
 
             papi_token = await exchange_auth0_for_papi(token_str, PAPI_URL)
