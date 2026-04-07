@@ -58,7 +58,7 @@ async def _fetch_jwks(papi_url: str) -> dict | None:
             _jwks_cache[papi_url] = (now, jwks_data)
             logger.info("JWKS fetched from %s (%d keys)", url, len(jwks_data.get("keys", [])))
             return jwks_data
-    except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException) as exc:
+    except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException, ValueError) as exc:
         logger.warning("JWKS fetch failed from %s: %s", url, exc)
         if cached:
             return cached[1]
@@ -238,7 +238,7 @@ async def exchange_auth0_for_papi(auth0_token: str, papi_url: str) -> str | None
                 _papi_token_cache[auth0_token] = (time.monotonic(), papi_token)
             return papi_token
 
-    except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException) as exc:
+    except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException, ValueError) as exc:
         logger.warning("Token exchange request failed: %s", exc)
         return None
 

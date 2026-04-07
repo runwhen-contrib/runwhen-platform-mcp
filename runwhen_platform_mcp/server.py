@@ -3412,7 +3412,7 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
             from runwhen_platform_mcp.auth import exchange_auth0_for_papi
 
             papi_token = await exchange_auth0_for_papi(token_str, PAPI_URL)
-            if papi_token is None:
+            if not papi_token:
                 return False
             token_str = papi_token
 
