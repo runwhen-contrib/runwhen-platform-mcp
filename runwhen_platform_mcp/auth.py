@@ -36,7 +36,8 @@ from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier
 
 logger = logging.getLogger(__name__)
 
-_papi_token_cache: dict[str, str] = {}
+_papi_token_cache: dict[str, tuple[float, str]] = {}  # auth0_token -> (cached_at, papi_token)
+PAPI_TOKEN_CACHE_TTL = 1800  # 30 min — must be shorter than PAPI token lifetime
 _jwks_cache: dict[str, tuple[float, dict]] = {}  # papi_url -> (fetched_at, jwks_data)
 JWKS_CACHE_TTL = 3600  # re-fetch keys every hour
 
@@ -133,7 +134,8 @@ class JWKSTokenVerifier(TokenVerifier):
         )
 
     async def _force_refresh_jwks(self) -> dict | None:
-        _jwks_cache.pop(self._papi_url, None)
+        """Re-fetch JWKS, preserving stale cache as fallback on network failure."""
+        _jwks_cache[self._papi_url] = (0.0, _jwks_cache.get(self._papi_url, (0.0, {}))[1])
         return await _fetch_jwks(self._papi_url)
 
 
@@ -203,8 +205,12 @@ async def exchange_auth0_for_papi(auth0_token: str, papi_url: str) -> str | None
     Returns the PAPI access token on success, None on failure.
     Results are cached by auth0_token to avoid repeated exchanges.
     """
-    if auth0_token in _papi_token_cache:
-        return _papi_token_cache[auth0_token]
+    cached = _papi_token_cache.get(auth0_token)
+    if cached:
+        cached_at, papi_token = cached
+        if (time.monotonic() - cached_at) < PAPI_TOKEN_CACHE_TTL:
+            return papi_token
+        _papi_token_cache.pop(auth0_token, None)
 
     url = f"{papi_url.rstrip('/')}/api/v3/token/exchange/"
     payload = {
@@ -228,7 +234,7 @@ async def exchange_auth0_for_papi(auth0_token: str, papi_url: str) -> str | None
             data = resp.json()
             papi_token = data.get("access_token")
             if papi_token:
-                _papi_token_cache[auth0_token] = papi_token
+                _papi_token_cache[auth0_token] = (time.monotonic(), papi_token)
             return papi_token
 
     except (httpx.HTTPError, httpx.ConnectError, httpx.TimeoutException) as exc:

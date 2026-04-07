@@ -308,8 +308,8 @@ def create_consent_html(
     </details>
 
     <form id="consentForm" method="POST" action="">
-      <input type="hidden" name="txn_id" value="{txn_id}" />
-      <input type="hidden" name="csrf_token" value="{csrf_token}" />
+      <input type="hidden" name="txn_id" value="{html_module.escape(txn_id)}" />
+      <input type="hidden" name="csrf_token" value="{html_module.escape(csrf_token)}" />
       <input type="hidden" name="submit" value="true" />
       <div class="btn-group">
         <button type="submit" name="action" value="approve"
