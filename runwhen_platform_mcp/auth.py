@@ -135,7 +135,8 @@ class JWKSTokenVerifier(TokenVerifier):
 
     async def _force_refresh_jwks(self) -> dict | None:
         """Re-fetch JWKS, preserving stale cache as fallback on network failure."""
-        _jwks_cache[self._papi_url] = (0.0, _jwks_cache.get(self._papi_url, (0.0, {}))[1])
+        stale_data = _jwks_cache.get(self._papi_url, (0.0, {}))[1]
+        _jwks_cache[self._papi_url] = (float("-inf"), stale_data)
         return await _fetch_jwks(self._papi_url)
 
 
