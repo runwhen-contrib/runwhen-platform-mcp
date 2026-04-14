@@ -3391,6 +3391,31 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
             return False
 
         token_str = ctx.token.token
+
+        papi_oauth_client = os.environ.get("MCP_PAPI_OAUTH_CLIENT_ID", "")
+        is_papi_oidc_token = papi_oauth_client and ctx.token.client_id == papi_oauth_client
+        is_papi_jwt = ctx.token.client_id == "papi-jwt"
+        is_pat = ctx.token.client_id == "runwhen-pat"
+        is_papi_upstream = bool(
+            ctx.token.claims
+            and ctx.token.claims.get("type") in ("access", "refresh")
+            and ctx.token.claims.get("iss")
+        )
+
+        if (
+            not is_pat
+            and not is_papi_oidc_token
+            and not is_papi_jwt
+            and not is_papi_upstream
+            and PAPI_URL
+        ):
+            from runwhen_platform_mcp.auth import exchange_auth0_for_papi
+
+            papi_token = await exchange_auth0_for_papi(token_str, PAPI_URL)
+            if not papi_token:
+                return False
+            token_str = papi_token
+
         _request_token.set(token_str)
 
         if not PAPI_URL:
@@ -3422,7 +3447,9 @@ def _build_http_server() -> FastMCP:
     functions with workspace-level authorization checks.
     """
     from runwhen_platform_mcp.auth import build_auth_provider
+    from runwhen_platform_mcp.consent_ui import patch_fastmcp_consent_ui
 
+    patch_fastmcp_consent_ui()
     auth = build_auth_provider()
 
     http_mcp = FastMCP(
