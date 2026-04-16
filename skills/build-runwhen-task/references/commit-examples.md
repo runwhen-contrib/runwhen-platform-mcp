@@ -7,6 +7,10 @@
 
 ## Basic task (read-only monitoring)
 
+> **`resource_path` must start with `custom/`** — the server enforces this
+> automatically. Custom tasks must never share a resource path with
+> platform-managed resources.
+
 ```python
 commit_slx(
     slx_name="k8s-pod-health",
@@ -17,9 +21,10 @@ commit_slx(
     interpreter="bash",
     access="read-only",
     data="logs-bulk",
-    resource_path="kubernetes/cluster-01/prod-ns",
-    hierarchy=["cluster", "namespace", "resource_name"],
+    resource_path="custom/kubernetes/cluster-01/prod-ns",
+    hierarchy=["platform", "cluster", "namespace", "resource_name"],
     tags=[
+        {"name": "platform", "value": "custom"},
         {"name": "cluster", "value": "cluster-01"},
         {"name": "namespace", "value": "prod-ns"},
         {"name": "resource_name", "value": "pod-health"},

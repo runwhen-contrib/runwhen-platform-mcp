@@ -803,6 +803,27 @@ def _extract_env_vars(script: str, interpreter: str) -> list[str]:
 VALID_ACCESS_TAGS = ("read-write", "read-only")
 VALID_DATA_TAGS = ("logs-bulk", "config", "logs-stacktrace")
 
+CUSTOM_PLATFORM_PREFIX = "custom/"
+
+
+def _enforce_custom_resource_path(resource_path: str | None) -> str | None:
+    """Ensure MCP-authored resource paths use the ``custom/`` platform prefix.
+
+    Custom tasks built via the MCP server must live under ``custom/`` to avoid
+    colliding with resource paths of existing platform-managed resources
+    (e.g. ``kubernetes/...``, ``aws/...``).  If the caller already provides
+    ``custom/`` as the first segment the value is returned unchanged; otherwise
+    the prefix is prepended automatically.
+    """
+    if resource_path is None:
+        return None
+    resource_path = resource_path.strip().rstrip("/")
+    if not resource_path:
+        return None
+    if resource_path.lower().startswith(CUSTOM_PLATFORM_PREFIX):
+        return resource_path
+    return f"{CUSTOM_PLATFORM_PREFIX}{resource_path}"
+
 
 def _ensure_required_tags(
     tags: list[dict[str, str]] | None,
@@ -2345,6 +2366,8 @@ async def deploy_registry_codebundle(
     if owners is None:
         owners = [await _get_user_email()]
 
+    resource_path = _enforce_custom_resource_path(resource_path)
+
     additional_context: dict[str, Any] | None = None
     if resource_path or hierarchy:
         additional_context = {}
@@ -3181,6 +3204,8 @@ async def commit_slx(
 
     if not codebundle_ref:
         codebundle_ref = await _get_codebundle_ref(ws)
+
+    resource_path = _enforce_custom_resource_path(resource_path)
 
     additional_context: dict[str, Any] | None = None
     if resource_path or hierarchy:

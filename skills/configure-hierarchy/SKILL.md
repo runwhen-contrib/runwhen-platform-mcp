@@ -17,76 +17,88 @@ Example: hierarchy `["cluster", "namespace", "resource_name"]` with tags `cluste
 
 | Field | Purpose | Source |
 |-------|---------|--------|
-| `resourcePath` | Canonical search/indexing path (includes platform prefix) | Set directly as a string |
+| `resourcePath` | Canonical search/indexing path (includes `custom/` platform prefix for MCP tasks) | Set directly as a string |
 | `hierarchy` | UI grouping; legacy path construction (no platform prefix) | List of tag names, values resolved from tags |
 
 Both live under `spec.additionalContext`. Always set **both** for full functionality. The `resourcePath` is the primary identifier for search; `hierarchy` controls the UI grouping.
 
+**Important:** For MCP-authored tasks, `resourcePath` must always start with `custom/` (the server enforces this automatically). The `hierarchy` defines the grouping **within** the custom tree. Always include `"platform"` as the first hierarchy entry with a tag value of `"custom"` so that the UI groups these tasks under the custom namespace.
+
 ## Format
 
-A YAML list of tag names that exist in `spec.tags`:
+A YAML list of tag names that exist in `spec.tags`. For MCP-authored tasks, always start with `platform=custom`:
 
 ```yaml
 spec:
   tags:
+  - name: platform
+    value: custom
   - name: resource_type
     value: platform
   - name: resource_name
     value: papi-issues
   additionalContext:
-    resourcePath: runwhen/papi
+    resourcePath: custom/runwhen/papi
     hierarchy:
+    - platform
     - resource_type
     - resource_name
 ```
 
 ## Common hierarchy patterns
 
-### Kubernetes
+All MCP-authored tasks should start the hierarchy with `platform` → `custom`.
+
+### Custom Kubernetes task
 ```yaml
 hierarchy:
+- platform
 - cluster
 - namespace
 - resource_name
 ```
-Tags: `cluster=cluster-01`, `namespace=backend-services`, `resource_name=papi`
+Tags: `platform=custom`, `cluster=cluster-01`, `namespace=backend-services`, `resource_name=papi`
 
-### AWS
+### Custom AWS task
 ```yaml
 hierarchy:
+- platform
 - region
 - service
 - resource_name
 ```
-Tags: `region=us-east-1`, `service=lambda`, `resource_name=my-function`
+Tags: `platform=custom`, `region=us-east-1`, `service=lambda`, `resource_name=my-function`
 
-### Platform / internal tools
+### Custom platform / internal tools
 ```yaml
 hierarchy:
+- platform
 - resource_type
 - resource_name
 ```
-Tags: `resource_type=platform`, `resource_name=papi-issues`
+Tags: `platform=custom`, `resource_type=platform`, `resource_name=papi-issues`
 
-### GitHub
+### Custom GitHub task
 ```yaml
 hierarchy:
+- platform
 - resource_type
 - resource_name
 ```
-Tags: `resource_type=github`, `resource_name=infra-flux-nonprod`
+Tags: `platform=custom`, `resource_type=github`, `resource_name=infra-flux-nonprod`
 
 ## How to set it
 
-Pass `hierarchy` when calling `commit_slx`:
+Pass `hierarchy` when calling `commit_slx`. Always include `platform=custom` as the first level:
 
 ```python
 commit_slx(
     slx_name="my-check",
     workspace_name="my-workspace",
-    resource_path="kubernetes/cluster-01/prod-ns/my-app",
-    hierarchy=["cluster", "namespace", "resource_name"],
+    resource_path="custom/kubernetes/cluster-01/prod-ns/my-app",
+    hierarchy=["platform", "cluster", "namespace", "resource_name"],
     tags=[
+        {"name": "platform", "value": "custom"},
         {"name": "cluster", "value": "cluster-01"},
         {"name": "namespace", "value": "prod-ns"},
         {"name": "resource_name", "value": "my-app"},
@@ -97,10 +109,11 @@ commit_slx(
 
 ## Rules
 
-1. **Every entry in hierarchy must be a tag name** that exists in `spec.tags` — if a hierarchy key has no matching tag, that segment is skipped in path construction
-2. **Order matters** — list from broadest to most specific (e.g. cluster → namespace → resource)
-3. **Keep it short** — 2-4 levels is typical; deeply nested hierarchies add no value
-4. **Match existing patterns** — check other SLXs in the workspace via `get_workspace_config_index` to stay consistent
+1. **Always start with `platform=custom`** — every MCP-authored task hierarchy must begin with `["platform", ...]` and include a tag `{"name": "platform", "value": "custom"}`
+2. **Every entry in hierarchy must be a tag name** that exists in `spec.tags` — if a hierarchy key has no matching tag, that segment is skipped in path construction
+3. **Order matters** — list from broadest to most specific (platform → cluster → namespace → resource)
+4. **Keep it short** — 3-5 levels is typical; deeply nested hierarchies add no value
+5. **Do NOT reuse hierarchy paths of existing resources** — custom tasks must be grouped separately from platform-managed resources
 
 ## Important: commit reconciliation
 

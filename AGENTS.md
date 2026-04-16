@@ -126,6 +126,26 @@ Every SLX committed via `commit_slx` must include:
 - **`access`**: `read-write` (modifies resources) or `read-only` (inspection only)
 - **`data`**: `logs-bulk` (command output), `config` (configuration data), or `logs-stacktrace` (stack traces)
 
+## Custom Platform Rule for resourcePath and hierarchy
+
+**All tasks built via the MCP server must use `custom/` as the platform prefix
+in `resource_path`.** The server enforces this automatically — if a
+`resource_path` does not start with `custom/`, the prefix is prepended.
+
+This prevents MCP-authored tasks from colliding with platform-managed resources
+(e.g. those discovered by runwhen-local) in the UI and search index.
+
+| Parameter | Requirement |
+|-----------|-------------|
+| `resource_path` | Must start with `custom/` (auto-enforced). Example: `custom/kubernetes/cluster-01/prod-ns` |
+| `hierarchy` | Should start with `["platform", ...]` with a corresponding tag `{"name": "platform", "value": "custom"}` |
+| `tags` | Must include `{"name": "platform", "value": "custom"}` for hierarchy resolution |
+
+**Never place a custom task under the resource path of an existing
+platform-managed resource.** If an existing resource lives at
+`kubernetes/cluster-01/prod-ns`, the custom task must be at
+`custom/kubernetes/cluster-01/prod-ns` — not the bare path.
+
 ## RUNWHEN.md
 
 If a `RUNWHEN.md` file exists in the project, it contains domain-specific rules

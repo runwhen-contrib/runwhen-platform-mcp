@@ -58,7 +58,8 @@ Read these files for complete, contract-compliant script templates:
 - Severity: 1=critical (down), 2=high (degraded), 3=medium (warning), 4=low (info)
 - Set `access` tag: `read-only` for monitoring, `read-write` for remediation
 - Set `data` tag: `logs-bulk` | `config` | `logs-stacktrace`
-- Configure `resource_path` and `hierarchy` for search/UI grouping (see configure-resource-path and configure-hierarchy skills)
+- **`resource_path` MUST start with `custom/`** — the server enforces this automatically. Never place custom tasks under an existing platform resource path (see configure-resource-path skill)
+- **`hierarchy` MUST start with `platform=custom`** — always include `{"name": "platform", "value": "custom"}` as the first tag and `"platform"` as the first hierarchy entry (see configure-hierarchy skill)
 
 ## Running tasks after committing
 

@@ -16,6 +16,7 @@ from runwhen_platform_mcp.server import (
     _build_runbook_yaml,
     _build_sli_yaml,
     _build_slx_yaml,
+    _enforce_custom_resource_path,
 )
 
 WS = "test-ws"
@@ -449,3 +450,49 @@ class TestBuildRegistrySliYaml:
         assert config["NAMESPACE"] == "prod"
         secrets = doc["spec"]["secretsProvided"]
         assert secrets[0]["name"] == "kubeconfig"
+
+
+class TestEnforceCustomResourcePath:
+    """Tests for _enforce_custom_resource_path."""
+
+    def test_none_returns_none(self) -> None:
+        assert _enforce_custom_resource_path(None) is None
+
+    def test_empty_string_returns_none(self) -> None:
+        assert _enforce_custom_resource_path("") is None
+
+    def test_whitespace_only_returns_none(self) -> None:
+        assert _enforce_custom_resource_path("   ") is None
+
+    def test_already_prefixed_unchanged(self) -> None:
+        assert _enforce_custom_resource_path("custom/my-app") == "custom/my-app"
+
+    def test_already_prefixed_case_insensitive(self) -> None:
+        assert _enforce_custom_resource_path("Custom/my-app") == "Custom/my-app"
+
+    def test_prepends_custom_prefix(self) -> None:
+        assert (
+            _enforce_custom_resource_path("kubernetes/cluster-01/ns")
+            == "custom/kubernetes/cluster-01/ns"
+        )
+
+    def test_prepends_to_plain_path(self) -> None:
+        assert _enforce_custom_resource_path("my-app") == "custom/my-app"
+
+    def test_strips_trailing_slash(self) -> None:
+        assert _enforce_custom_resource_path("custom/my-app/") == "custom/my-app"
+
+    def test_strips_whitespace(self) -> None:
+        assert _enforce_custom_resource_path("  custom/my-app  ") == "custom/my-app"
+
+    def test_non_custom_platform_gets_prefix(self) -> None:
+        assert (
+            _enforce_custom_resource_path("aws/us-east-1/lambda/fn")
+            == "custom/aws/us-east-1/lambda/fn"
+        )
+
+    def test_deeply_nested_custom_path(self) -> None:
+        assert (
+            _enforce_custom_resource_path("custom/k8s/cluster/ns/app")
+            == "custom/k8s/cluster/ns/app"
+        )
