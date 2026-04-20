@@ -467,8 +467,11 @@ class TestEnforceCustomResourcePath:
     def test_already_prefixed_unchanged(self) -> None:
         assert _enforce_custom_resource_path("custom/my-app") == "custom/my-app"
 
-    def test_already_prefixed_case_insensitive(self) -> None:
-        assert _enforce_custom_resource_path("Custom/my-app") == "Custom/my-app"
+    def test_already_prefixed_case_normalised(self) -> None:
+        assert _enforce_custom_resource_path("Custom/my-app") == "custom/my-app"
+
+    def test_uppercase_prefix_normalised(self) -> None:
+        assert _enforce_custom_resource_path("CUSTOM/my-app") == "custom/my-app"
 
     def test_prepends_custom_prefix(self) -> None:
         assert (
@@ -496,3 +499,15 @@ class TestEnforceCustomResourcePath:
             _enforce_custom_resource_path("custom/k8s/cluster/ns/app")
             == "custom/k8s/cluster/ns/app"
         )
+
+    def test_bare_custom_slash_returns_none(self) -> None:
+        assert _enforce_custom_resource_path("custom/") is None
+
+    def test_bare_custom_multiple_slashes_returns_none(self) -> None:
+        assert _enforce_custom_resource_path("custom///") is None
+
+    def test_only_slashes_returns_none(self) -> None:
+        assert _enforce_custom_resource_path("///") is None
+
+    def test_non_prefixed_trailing_slash_stripped(self) -> None:
+        assert _enforce_custom_resource_path("kubernetes/ns/") == "custom/kubernetes/ns"

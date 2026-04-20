@@ -812,16 +812,22 @@ def _enforce_custom_resource_path(resource_path: str | None) -> str | None:
     Custom tasks built via the MCP server must live under ``custom/`` to avoid
     colliding with resource paths of existing platform-managed resources
     (e.g. ``kubernetes/...``, ``aws/...``).  If the caller already provides
-    ``custom/`` as the first segment the value is returned unchanged; otherwise
-    the prefix is prepended automatically.
+    ``custom/`` as the first segment the value is returned unchanged (with case
+    normalised to lowercase); otherwise the prefix is prepended automatically.
     """
     if resource_path is None:
         return None
-    resource_path = resource_path.strip().rstrip("/")
-    if not resource_path:
+    resource_path = resource_path.strip()
+    if not resource_path or resource_path.strip("/") == "":
         return None
     if resource_path.lower().startswith(CUSTOM_PLATFORM_PREFIX):
-        return resource_path
+        remainder = resource_path[len(CUSTOM_PLATFORM_PREFIX) :].strip("/")
+        if not remainder:
+            return None
+        return f"{CUSTOM_PLATFORM_PREFIX}{remainder}"
+    resource_path = resource_path.strip("/")
+    if not resource_path:
+        return None
     return f"{CUSTOM_PLATFORM_PREFIX}{resource_path}"
 
 
