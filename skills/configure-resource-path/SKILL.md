@@ -22,27 +22,38 @@ A forward-slash-separated path, **platform prefix first**, then narrowing to the
 <platform>/<level-1>/<level-2>/.../<resource>
 ```
 
+## CRITICAL: Custom tasks MUST use the `custom/` platform prefix
+
+Tasks built via the MCP server (`commit_slx` or `deploy_registry_codebundle`) are **custom tasks** — they must **never** share a `resourcePath` with existing platform-managed resources. The MCP server enforces this automatically:
+
+- **All resource paths are prefixed with `custom/`** — if you pass `kubernetes/cluster-01/ns`, the server rewrites it to `custom/kubernetes/cluster-01/ns`
+- **If you already include `custom/`**, the path is left unchanged
+- This prevents custom tasks from appearing under the same grouping as platform-discovered resources
+
+### Why this matters
+
+Platform-managed resources (discovered by runwhen-local, Crossplane, etc.) own their resource paths. If a custom task uses the same path, it pollutes the resource tree and creates confusing groupings in the UI and search results. The `custom/` prefix keeps MCP-authored tasks in their own namespace.
+
 ## Examples by platform
 
 | Platform | resourcePath | Description |
 |----------|-------------|-------------|
-| Kubernetes | `kubernetes/cluster-01/namespace-a/papi` | A deployment in a namespace |
-| Kubernetes | `kubernetes/cluster-01/kube-system` | A namespace |
-| AWS | `aws/us-east-1/lambda/my-function` | A Lambda function |
-| Azure | `azure/sub-123/rg-prod/vm-web-01` | A VM in a resource group |
-| GitHub | `github` | GitHub-scoped tasks (repos, actions) |
-| RunWhen | `runwhen/papi` | RunWhen platform API tasks |
-| GCP | `gcp/project-x/gke/cluster-01` | A GKE cluster |
+| **Custom (MCP-authored)** | `custom/kubernetes/cluster-01/namespace-a/papi` | Custom task targeting a K8s deployment |
+| **Custom (MCP-authored)** | `custom/aws/us-east-1/lambda/my-function` | Custom task targeting a Lambda function |
+| **Custom (MCP-authored)** | `custom/github` | Custom task for GitHub operations |
+| **Custom (MCP-authored)** | `custom/runwhen/papi` | Custom task for RunWhen platform |
+| **Custom (MCP-authored)** | `custom/gcp/project-x/gke/cluster-01` | Custom task targeting a GKE cluster |
+| Platform-managed | `kubernetes/cluster-01/kube-system` | Discovered by runwhen-local (NOT for custom tasks) |
 
 ## How to set it
 
-Pass `resource_path` when calling `commit_slx`:
+Pass `resource_path` when calling `commit_slx`. The `custom/` prefix is added automatically if omitted:
 
 ```python
 commit_slx(
     slx_name="my-check",
     workspace_name="my-workspace",
-    resource_path="kubernetes/cluster-01/prod-ns/my-app",
+    resource_path="custom/kubernetes/cluster-01/prod-ns/my-app",
     # ... other params
 )
 ```
@@ -52,15 +63,18 @@ This generates in `slx.yaml`:
 ```yaml
 spec:
   additionalContext:
-    resourcePath: kubernetes/cluster-01/prod-ns/my-app
+    resourcePath: custom/kubernetes/cluster-01/prod-ns/my-app
 ```
+
+> **Note:** Even if you pass `resource_path="kubernetes/cluster-01/prod-ns/my-app"` (without the prefix), the server will automatically rewrite it to `custom/kubernetes/cluster-01/prod-ns/my-app`.
 
 ## Rules
 
-1. **Always include a platform prefix** — `kubernetes/`, `aws/`, `github/`, `runwhen/`, etc.
-2. **Use tag values as path segments** where possible — if you have a `cluster` tag with value `cluster-01`, the path should include `cluster-01`
-3. **No trailing slashes** — the system normalizes them but keep paths clean
-4. **Match existing patterns** — call `get_workspace_config_index` to see how other SLXs in the workspace define their resourcePath, and follow the same convention
+1. **Always use the `custom/` platform prefix** — this is enforced by the server; all MCP-authored tasks live under `custom/`
+2. **After `custom/`, describe the target infrastructure** — e.g. `custom/kubernetes/cluster/namespace/resource`
+3. **Use tag values as path segments** where possible — if you have a `cluster` tag with value `cluster-01`, the path should include `cluster-01`
+4. **No trailing slashes** — the system normalizes them but keep paths clean
+5. **Do NOT reuse existing resource paths** — never place a custom task under a path owned by platform-managed resources
 
 ## Important: commit reconciliation
 
