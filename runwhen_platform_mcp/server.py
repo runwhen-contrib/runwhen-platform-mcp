@@ -1100,6 +1100,32 @@ def _validate_slx_name(slx_name: str) -> None:
         )
 
 
+def _validate_script_vars(script_vars: list[dict] | None) -> list[str]:
+    """Validate script_vars list. Returns list of error strings (empty = valid)."""
+    if not script_vars:
+        return []
+    errors: list[str] = []
+    for i, var in enumerate(script_vars):
+        prefix = f"script_vars[{i}]"
+        for field in ("name", "description", "default"):
+            if not var.get(field):
+                errors.append(f"{prefix}: '{field}' is required and must be non-empty")
+        validation = var.get("validation")
+        if not validation:
+            errors.append(f"{prefix}: 'validation' is required")
+        else:
+            vtype = validation.get("type")
+            if vtype not in ("regex", "enum"):
+                errors.append(f"{prefix}: validation.type must be 'regex' or 'enum', got {vtype!r}")
+            elif vtype == "regex" and not validation.get("pattern"):
+                errors.append(f"{prefix}: validation.pattern is required when type is 'regex'")
+            elif vtype == "enum" and not validation.get("values"):
+                errors.append(
+                    f"{prefix}: validation.values must be a non-empty list when type is 'enum'"
+                )
+    return errors
+
+
 async def _get_codebundle_ref(workspace: str) -> str:
     """Resolve the codebundle branch used by this workspace's tool-builder runtime.
 

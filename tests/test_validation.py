@@ -11,6 +11,7 @@ from runwhen_platform_mcp.server import (
     _extract_env_vars,
     _resolve_script,
     _validate_script,
+    _validate_script_vars,
     _validate_slx_name,
 )
 
@@ -253,3 +254,102 @@ class TestWriteToolsCompleteness:
 
     def test_no_unexpected_removals(self) -> None:
         assert WRITE_TOOLS >= self.EXPECTED_WRITE_TOOLS
+
+
+class TestValidateScriptVars:
+    """Tests for _validate_script_vars."""
+
+    def test_empty_list_is_valid(self) -> None:
+        assert _validate_script_vars([]) == []
+
+    def test_none_is_valid(self) -> None:
+        assert _validate_script_vars(None) == []
+
+    def test_valid_regex_var(self) -> None:
+        errors = _validate_script_vars([
+            {
+                "name": "LOG_QUERY",
+                "description": "Log filter string",
+                "default": "error",
+                "validation": {"type": "regex", "pattern": "^.+$"},
+            }
+        ])
+        assert errors == []
+
+    def test_valid_enum_var(self) -> None:
+        errors = _validate_script_vars([
+            {
+                "name": "SEVERITY",
+                "description": "Severity level",
+                "default": "warning",
+                "validation": {"type": "enum", "values": ["debug", "warning", "error"]},
+            }
+        ])
+        assert errors == []
+
+    def test_missing_name(self) -> None:
+        errors = _validate_script_vars([
+            {"description": "x", "default": "y", "validation": {"type": "enum", "values": ["a"]}}
+        ])
+        assert any("name" in e for e in errors)
+
+    def test_missing_description(self) -> None:
+        errors = _validate_script_vars([
+            {"name": "FOO", "default": "y", "validation": {"type": "enum", "values": ["a"]}}
+        ])
+        assert any("description" in e for e in errors)
+
+    def test_missing_default(self) -> None:
+        errors = _validate_script_vars([
+            {"name": "FOO", "description": "x", "validation": {"type": "enum", "values": ["a"]}}
+        ])
+        assert any("default" in e for e in errors)
+
+    def test_missing_validation(self) -> None:
+        errors = _validate_script_vars([
+            {"name": "FOO", "description": "x", "default": "y"}
+        ])
+        assert any("validation" in e for e in errors)
+
+    def test_invalid_validation_type(self) -> None:
+        errors = _validate_script_vars([
+            {"name": "FOO", "description": "x", "default": "y", "validation": {"type": "freetext"}}
+        ])
+        assert any("type" in e for e in errors)
+
+    def test_regex_missing_pattern(self) -> None:
+        errors = _validate_script_vars([
+            {"name": "FOO", "description": "x", "default": "y", "validation": {"type": "regex"}}
+        ])
+        assert any("pattern" in e for e in errors)
+
+    def test_enum_missing_values(self) -> None:
+        errors = _validate_script_vars([
+            {"name": "FOO", "description": "x", "default": "y", "validation": {"type": "enum"}}
+        ])
+        assert any("values" in e for e in errors)
+
+    def test_enum_empty_values(self) -> None:
+        errors = _validate_script_vars([
+            {
+                "name": "FOO",
+                "description": "x",
+                "default": "y",
+                "validation": {"type": "enum", "values": []},
+            }
+        ])
+        assert any("values" in e for e in errors)
+
+    def test_multiple_vars_one_invalid(self) -> None:
+        """Errors reference the index of the invalid var."""
+        errors = _validate_script_vars([
+            {
+                "name": "GOOD",
+                "description": "x",
+                "default": "y",
+                "validation": {"type": "enum", "values": ["a"]},
+            },
+            {"name": "BAD", "default": "y", "validation": {"type": "enum", "values": ["a"]}},
+        ])
+        assert len(errors) == 1
+        assert "script_vars[1]" in errors[0]
