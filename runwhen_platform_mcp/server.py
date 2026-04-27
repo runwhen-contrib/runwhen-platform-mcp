@@ -3184,6 +3184,17 @@ async def commit_slx(
             "'sli_script' and 'sli_script_path'.",
         ),
     ] = None,
+    script_vars: Annotated[
+        list[dict] | None,
+        Field(
+            default=None,
+            description=(
+                "Runtime-overridable script parameters (task type only, never SLI). "
+                "Each entry requires: name (str), description (str), default (str), "
+                "validation (dict with type='regex'+'pattern' or type='enum'+'values')."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -3206,6 +3217,10 @@ async def commit_slx(
         _validate_slx_name(slx_name)
     except ValueError as exc:
         return _json_response({"error": str(exc)})
+
+    sv_errors = _validate_script_vars(script_vars)
+    if sv_errors:
+        return _json_response({"error": "Invalid script_vars", "errors": sv_errors})
 
     try:
         script = _resolve_script(script, script_path, script_base64)
@@ -3286,6 +3301,7 @@ async def commit_slx(
             env_vars=env_vars,
             secret_vars=secret_vars,
             codebundle_ref=codebundle_ref,
+            script_vars=script_vars or [],
         )
         committed_types.append("task")
 

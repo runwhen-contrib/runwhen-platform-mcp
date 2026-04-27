@@ -353,3 +353,37 @@ class TestValidateScriptVars:
         ])
         assert len(errors) == 1
         assert "script_vars[1]" in errors[0]
+
+
+class TestCommitSlxScriptVarsValidation:
+    """commit_slx returns validation errors for invalid script_vars."""
+
+    def _run(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    def test_invalid_script_var_returns_error(self, mock_resolve) -> None:
+        import json
+        from runwhen_platform_mcp.server import commit_slx
+
+        mock_resolve.return_value = "test-ws"
+        result = self._run(
+            commit_slx(
+                slx_name="my-task",
+                alias="My Task",
+                statement="Things should work",
+                workspace_name="test-ws",
+                script="def main(): return []",
+                interpreter="python",
+                script_vars=[
+                    # missing description and validation
+                    {"name": "FOO", "default": "bar"}
+                ],
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "script_vars" in data["error"].lower() or any(
+            "script_vars" in str(e) for e in data.get("errors", [])
+        )
