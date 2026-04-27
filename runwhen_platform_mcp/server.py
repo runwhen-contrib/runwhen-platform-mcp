@@ -1146,6 +1146,7 @@ def _build_runbook_yaml(
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
     codebundle_ref: str | None = None,
+    script_vars: list[dict] | None = None,
 ) -> str:
     """Generate runbook.yaml content for a Tool Builder task."""
     config_provided = [
@@ -1178,6 +1179,17 @@ def _build_runbook_yaml(
     }
     if secrets_provided:
         spec["secretsProvided"] = secrets_provided
+
+    if script_vars:
+        spec["scriptVarsProvided"] = [
+            {
+                "name": sv["name"],
+                "default": sv["default"],
+                "description": sv["description"],
+                "validation": sv["validation"],
+            }
+            for sv in script_vars
+        ]
 
     doc = {
         "apiVersion": "runwhen.com/v1",
