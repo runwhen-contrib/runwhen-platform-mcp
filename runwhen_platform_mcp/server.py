@@ -2896,6 +2896,16 @@ async def run_script_and_wait(
             "scripts is error-prone.",
         ),
     ] = None,
+    script_var_overrides: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "Per-run override values for script variables (name → value). "
+                "Merged into envVars at test time. Overrides win on name collision."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """Execute a script and wait for results (combines run + poll + output).
 
@@ -2939,7 +2949,7 @@ async def run_script_and_wait(
         "location": location,
         "run_type": run_type,
         "interpreter": interpreter,
-        "envVars": env_vars or {},
+        "envVars": {**(env_vars or {}), **(script_var_overrides or {})},
         "secretVars": secret_vars or {},
     }
 

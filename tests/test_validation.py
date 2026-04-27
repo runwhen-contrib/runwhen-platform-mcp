@@ -365,7 +365,7 @@ class TestCommitSlxScriptVarsValidation:
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
     def test_invalid_script_var_returns_error(self, mock_resolve) -> None:
         import json
-        from runwhen_platform_mcp.server import commit_slx
+        from runwhen_platform_mcp.server import commit_slx  # noqa: PLC0415
 
         mock_resolve.return_value = "test-ws"
         result = self._run(
@@ -387,3 +387,101 @@ class TestCommitSlxScriptVarsValidation:
         assert "script_vars" in data["error"].lower() or any(
             "script_vars" in str(e) for e in data.get("errors", [])
         )
+
+
+class TestRunScriptAndWaitScriptVarOverrides:
+    """script_var_overrides are merged into envVars sent to author/run."""
+
+    def _run(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_script_var_overrides_merged_into_env_vars(
+        self, mock_get, mock_post, mock_location, mock_ws
+    ) -> None:
+        from runwhen_platform_mcp.server import run_script_and_wait
+
+        mock_ws.return_value = "test-ws"
+        mock_location.return_value = "my-runner"
+        mock_post.return_value = (200, {"runId": "run-123"})
+        mock_get.side_effect = [
+            {"status": "SUCCEEDED"},
+            {"artifacts": []},
+        ]
+
+        self._run(
+            run_script_and_wait(
+                workspace_name="test-ws",
+                script="def main(): return []",
+                interpreter="python",
+                env_vars={"NAMESPACE": "default"},
+                script_var_overrides={"LOG_QUERY": "critical"},
+            )
+        )
+
+        body = mock_post.call_args[0][1]
+        assert body["envVars"]["NAMESPACE"] == "default"
+        assert body["envVars"]["LOG_QUERY"] == "critical"
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_script_var_overrides_take_precedence(
+        self, mock_get, mock_post, mock_location, mock_ws
+    ) -> None:
+        from runwhen_platform_mcp.server import run_script_and_wait
+
+        mock_ws.return_value = "test-ws"
+        mock_location.return_value = "my-runner"
+        mock_post.return_value = (200, {"runId": "run-123"})
+        mock_get.side_effect = [
+            {"status": "SUCCEEDED"},
+            {"artifacts": []},
+        ]
+
+        self._run(
+            run_script_and_wait(
+                workspace_name="test-ws",
+                script="def main(): return []",
+                interpreter="python",
+                env_vars={"LOG_QUERY": "original"},
+                script_var_overrides={"LOG_QUERY": "override"},
+            )
+        )
+
+        body = mock_post.call_args[0][1]
+        assert body["envVars"]["LOG_QUERY"] == "override"
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_no_overrides_works_as_before(
+        self, mock_get, mock_post, mock_location, mock_ws
+    ) -> None:
+        from runwhen_platform_mcp.server import run_script_and_wait
+
+        mock_ws.return_value = "test-ws"
+        mock_location.return_value = "my-runner"
+        mock_post.return_value = (200, {"runId": "run-123"})
+        mock_get.side_effect = [
+            {"status": "SUCCEEDED"},
+            {"artifacts": []},
+        ]
+
+        self._run(
+            run_script_and_wait(
+                workspace_name="test-ws",
+                script="def main(): return []",
+                interpreter="python",
+                env_vars={"NAMESPACE": "prod"},
+            )
+        )
+
+        body = mock_post.call_args[0][1]
+        assert body["envVars"] == {"NAMESPACE": "prod"}
