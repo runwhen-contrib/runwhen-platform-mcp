@@ -61,7 +61,7 @@ Read these files for complete, contract-compliant script templates:
 - **`resource_path` MUST start with `custom/`** — the server enforces this automatically. Never place custom tasks under an existing platform resource path (see configure-resource-path skill)
 - **`hierarchy` MUST start with `platform=custom`** — always include `{"name": "platform", "value": "custom"}` as the first tag and `"platform"` as the first hierarchy entry (see configure-hierarchy skill)
 
-## Script Variables (Tasks only — never SLIs)
+## Run-Time Variables (Tasks only — never SLIs)
 
 Script variables are runtime-overridable parameters that users change per individual run:
 query strings, log filters, time windows, transient target names. They are distinct from
@@ -72,14 +72,14 @@ query strings, log filters, time windows, transient target names. They are disti
 1. IF the variable identifies WHICH cluster, namespace, or named resource to connect to
    (KUBECTL_CONTEXT, NAMESPACE, *_NAME, *_CLUSTER) → use `env_vars`
 2. IF the variable is a search query, filter, pattern, time window, or per-run target →
-   use `script_vars`
+   use `run_time_vars`
 3. IF the variable name ends in *_QUERY, *_PATTERN, *_FILTER, *_WINDOW, *_TARGET →
-   use `script_vars`
-4. IF unsure → use `env_vars` (safer default; script vars are opt-in)
+   use `run_time_vars`
+4. IF unsure → use `env_vars` (safer default; run-time vars are opt-in)
 
-### Using script vars in `run_script_and_wait`
+### Using run-time vars in `run_script_and_wait`
 
-Pass override values via `script_var_overrides` (merged into `envVars` at test time):
+Pass override values via `run_time_var_overrides` (merged into `envVars` at test time):
 
 ```python
 run_script_and_wait(
@@ -87,13 +87,13 @@ run_script_and_wait(
     script=my_script,
     env_vars={"NAMESPACE": "backend", "KUBECTL_CONTEXT": "gke-prod"},
     secret_vars={"kubeconfig": "kubeconfig"},
-    script_var_overrides={"LOG_QUERY": "critical", "TIME_WINDOW": "30m"},
+    run_time_var_overrides={"LOG_QUERY": "critical", "TIME_WINDOW": "30m"},
 )
 ```
 
-### Using script vars in `commit_slx`
+### Using run-time vars in `commit_slx`
 
-Pass the full schema via `script_vars`. All four fields are **required**:
+Pass the full schema via `run_time_vars`. All four fields are **required**:
 
 ```python
 commit_slx(
@@ -106,7 +106,7 @@ commit_slx(
     task_type="task",
     env_vars={"NAMESPACE": "backend", "KUBECTL_CONTEXT": "gke-prod"},
     secret_vars={"kubeconfig": "kubeconfig"},
-    script_vars=[
+    run_time_vars=[
         {
             "name": "LOG_QUERY",
             "description": "Log search string to filter entries",
@@ -123,7 +123,7 @@ commit_slx(
 )
 ```
 
-**NEVER** pass `script_vars` when `task_type="sli"` — SLIs are automated health probes
+**NEVER** pass `run_time_vars` when `task_type="sli"` — SLIs are automated health probes
 with fixed thresholds; there is no per-run override concept for SLIs.
 
 ## Running tasks after committing

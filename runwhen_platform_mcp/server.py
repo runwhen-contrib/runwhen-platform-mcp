@@ -1100,16 +1100,23 @@ def _validate_slx_name(slx_name: str) -> None:
         )
 
 
-def _validate_script_vars(script_vars: list[dict] | None) -> list[str]:
-    """Validate script_vars list. Returns list of error strings (empty = valid)."""
-    if not script_vars:
+def _validate_run_time_vars(run_time_vars: list[dict] | None) -> list[str]:
+    """Validate run_time_vars list. Returns list of error strings (empty = valid)."""
+    if not run_time_vars:
         return []
     errors: list[str] = []
-    for i, var in enumerate(script_vars):
-        prefix = f"script_vars[{i}]"
+    seen: set[str] = set()
+    for i, var in enumerate(run_time_vars):
+        prefix = f"run_time_vars[{i}]"
         for field in ("name", "description", "default"):
             if not var.get(field):
                 errors.append(f"{prefix}: '{field}' is required and must be non-empty")
+        name = var.get("name")
+        if name:
+            if name in seen:
+                errors.append(f"{prefix}: duplicate name {name!r}")
+            else:
+                seen.add(name)
         validation = var.get("validation")
         if not validation:
             errors.append(f"{prefix}: 'validation' is required")
@@ -1146,7 +1153,7 @@ def _build_runbook_yaml(
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
     codebundle_ref: str | None = None,
-    script_vars: list[dict] | None = None,
+    run_time_vars: list[dict] | None = None,
 ) -> str:
     """Generate runbook.yaml content for a Tool Builder task."""
     config_provided = [
@@ -1180,15 +1187,15 @@ def _build_runbook_yaml(
     if secrets_provided:
         spec["secretsProvided"] = secrets_provided
 
-    if script_vars:
-        spec["scriptVarsProvided"] = [
+    if run_time_vars:
+        spec["runTimeVarsProvided"] = [
             {
-                "name": sv["name"],
-                "default": sv["default"],
-                "description": sv["description"],
-                "validation": sv["validation"],
+                "name": rv["name"],
+                "default": rv["default"],
+                "description": rv["description"],
+                "validation": rv["validation"],
             }
-            for sv in script_vars
+            for rv in run_time_vars
         ]
 
     doc = {
@@ -2896,7 +2903,7 @@ async def run_script_and_wait(
             "scripts is error-prone.",
         ),
     ] = None,
-    script_var_overrides: Annotated[
+    run_time_var_overrides: Annotated[
         dict[str, str] | None,
         Field(
             default=None,
@@ -2949,7 +2956,7 @@ async def run_script_and_wait(
         "location": location,
         "run_type": run_type,
         "interpreter": interpreter,
-        "envVars": {**(env_vars or {}), **(script_var_overrides or {})},
+        "envVars": {**(env_vars or {}), **(run_time_var_overrides or {})},
         "secretVars": secret_vars or {},
     }
 
@@ -3194,14 +3201,19 @@ async def commit_slx(
             "'sli_script' and 'sli_script_path'.",
         ),
     ] = None,
-    script_vars: Annotated[
+    run_time_vars: Annotated[
         list[dict] | None,
         Field(
             default=None,
             description=(
-                "Runtime-overridable script parameters (task type only, never SLI). "
+                "Per-run task parameters that the END USER fills in when invoking the committed "
+                "task (e.g. log queries, time windows, filters). "
+                "Distinct from env_vars (set once by the task author — cluster, namespace, "
+                "context) and secret_vars (credentials injected as file paths). "
+                "Task-only — never valid for SLIs. "
                 "Each entry requires: name (str), description (str), default (str), "
-                "validation (dict with type='regex'+'pattern' or type='enum'+'values')."
+                "validation (dict with type='regex'+'pattern' or type='enum'+'values'). "
+                "Names must be unique and must not overlap with env_vars or secret_vars."
             ),
         ),
     ] = None,
@@ -3228,9 +3240,44 @@ async def commit_slx(
     except ValueError as exc:
         return _json_response({"error": str(exc)})
 
-    sv_errors = _validate_script_vars(script_vars)
-    if sv_errors:
-        return _json_response({"error": "Invalid script_vars", "errors": sv_errors})
+    if run_time_vars and task_type != "task":
+        return _json_response(
+            {
+                "error": (
+                    "run_time_vars are only valid for task_type='task'. "
+                    "SLIs are automated probes with fixed thresholds and have no "
+                    "per-run override concept."
+                ),
+            }
+        )
+
+    rtv_errors = _validate_run_time_vars(run_time_vars)
+    if rtv_errors:
+        return _json_response({"error": "Invalid run_time_vars", "errors": rtv_errors})
+
+    if run_time_vars and env_vars:
+        overlap = {rv["name"] for rv in run_time_vars if rv.get("name")} & set(env_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both env_vars and run_time_vars: {sorted(overlap)}. "
+                        "A name must be in one or the other."
+                    ),
+                }
+            )
+
+    if run_time_vars and secret_vars:
+        overlap = {rv["name"] for rv in run_time_vars if rv.get("name")} & set(secret_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both secret_vars and run_time_vars: {sorted(overlap)}. "
+                        "A name must be in one or the other."
+                    ),
+                }
+            )
 
     try:
         script = _resolve_script(script, script_path, script_base64)
@@ -3311,7 +3358,7 @@ async def commit_slx(
             env_vars=env_vars,
             secret_vars=secret_vars,
             codebundle_ref=codebundle_ref,
-            script_vars=script_vars or [],
+            run_time_vars=run_time_vars or [],
         )
         committed_types.append("task")
 
