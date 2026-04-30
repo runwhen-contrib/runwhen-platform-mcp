@@ -243,7 +243,9 @@ The server exposes:
 - `/health` — Health check (200 OK with version info)
 - `/livez` — Kubernetes liveness probe
 
-**Authentication in HTTP mode**: Clients send a RunWhen token via `Authorization: Bearer <token>` header. The server validates it against PAPI's whoami endpoint — both JWTs and Personal Access Tokens work. No `RUNWHEN_TOKEN` env var is needed on the server side; each client authenticates with their own token.
+**Authentication in HTTP mode**: Each client sends credentials with the request — typically `Authorization: Bearer <token>` (JWT or Personal Access Token). The server validates tokens against the RunWhen API. No `RUNWHEN_TOKEN` env var is required **on the server** when clients supply Bearer tokens; each user authenticates with their own token.
+
+**OAuth (browser sign-in)** — When the server is configured with **`MCP_BASE_URL`** plus RunWhen OAuth client credentials (see [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments) below), MCP clients that support **remote OAuth** can complete sign-in in the browser instead of embedding a long-lived token. Bearer authentication remains supported for clients that do not use OAuth. Hosted beta exposes discovery at `https://mcp.beta.runwhen.com/.well-known/oauth-authorization-server`.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
@@ -251,7 +253,26 @@ The server exposes:
 | `MCP_HOST` | No | Bind address (default: `0.0.0.0`). |
 | `MCP_PORT` | No | Listen port (default: `8000`). |
 | `FASTMCP_STATELESS_HTTP` | No | Set to `true` for horizontal scaling behind a load balancer. |
-| `RW_API_URL` | Yes | PAPI base URL. Used for token verification and API calls. |
+| `RW_API_URL` | Yes | RunWhen API base URL. Used for token verification and API calls. |
+
+### OAuth for remote HTTP deployments
+
+Enable interactive OAuth alongside Bearer tokens by registering a **confidential** OAuth client with your RunWhen environment and pointing the MCP server at it.
+
+1. **`MCP_BASE_URL`** — Public origin of this MCP server (no path), e.g. `https://mcp.beta.runwhen.com`. Required for OAuth redirects and discovery (`/.well-known/oauth-authorization-server` is served from this base).
+2. **RunWhen OAuth client** — Create a confidential client whose authorization server matches your **`RW_API_URL`** (OpenID configuration at `{RW_API_URL}/.well-known/openid-configuration`). Register the redirect URI:
+   - **`{MCP_BASE_URL}/auth/callback`**  
+   Example: `https://mcp.beta.runwhen.com/auth/callback`
+3. **Token endpoint auth** — Use **client secret post** (`client_secret_post`), matching the server’s OIDC proxy configuration.
+4. Set on the MCP server:
+   - **`MCP_PAPI_OAUTH_CLIENT_ID`** — client ID from step 2  
+   - **`MCP_PAPI_OAUTH_CLIENT_SECRET`** — client secret from step 2  
+
+If these are unset, the server runs in **JWKS + PAT/JWT verification only** mode (Bearer tokens still work; no browser OAuth).
+
+**Legacy Auth0 path** — Older deployments may set **`MCP_AUTH0_CONFIG_URL`**, **`MCP_AUTH0_CLIENT_ID`**, **`MCP_AUTH0_CLIENT_SECRET`**, and **`MCP_AUTH0_AUDIENCE`** instead of the RunWhen-native client variables above. Prefer RunWhen OAuth when available.
+
+The consent screen shown during OAuth uses RunWhen branding (`runwhen_platform_mcp/consent_ui.py`).
 
 ### Multiple environments
 
@@ -366,6 +387,15 @@ The server exposes these tools, grouped by use case.
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
+
+**HTTP / OAuth only** (when `MCP_TRANSPORT=http`; see [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments)):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MCP_BASE_URL` | For OAuth | Public URL of the MCP server (origin only). |
+| `MCP_PAPI_OAUTH_CLIENT_ID` | For OAuth | RunWhen OAuth client ID (preferred). |
+| `MCP_PAPI_OAUTH_CLIENT_SECRET` | For OAuth | RunWhen OAuth client secret (preferred). |
+| `MCP_AUTH0_*` | Legacy | Auth0 OIDC alternative if RunWhen OAuth client vars are not used. |
 
 See `.env.example` in the repo.
 
