@@ -40,6 +40,7 @@ templates, and examples.
 | `configure-resource-path` | Setting resource paths for SLX indexing |
 | `configure-hierarchy` | Organizing SLXs with hierarchy tags |
 | `build-operational-context` | Building a RUNWHEN.md file for a project |
+| `decompose-skill-for-runwhen` | Assessing an existing skill / agent / runbook and proposing a RunWhen decomposition (working draft) |
 
 ## Script Contract (quick reference)
 

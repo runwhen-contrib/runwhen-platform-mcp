@@ -2,7 +2,7 @@
 .env
 .env.*
 !.env.example
-
+.scratch/
 # Python
 .venv/
 .ci-venv/
