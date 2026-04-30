@@ -3014,6 +3014,16 @@ async def run_slx(
     task_titles: str = Field(
         default="*", description="Tasks to run: '*' for all, or '||'-separated titles."
     ),
+    run_time_var_overrides: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "Per-run override values for run-time variables (name → value). "
+                "Passed through to the runner at execution time. Requires staff access."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """Run an existing SLX's runbook tasks on the workspace runner.
 
@@ -3028,53 +3038,47 @@ async def run_slx(
     NOTE: workspace_chat CANNOT run tasks directly — it can only search for
     and describe them. Use this tool to actually execute an SLX.
 
-    The tool creates a RunRequest, starts it, polls until completion, and
-    returns the results including pass/fail status and any issues found.
+    The tool creates a RunSession with the run request, polls until completion,
+    and returns the results including pass/fail status and any issues found.
     """
     ws = await _resolve_workspace(workspace_name)
 
-    # Step 1: Create a staged RunRequest
-    create_body: dict[str, Any] = {
+    # Full SLX name expected by the runsessions API: workspace--slx-short-name
+    full_slx_name = slx_name if "--" in slx_name else f"{ws}--{slx_name}"
+
+    # Build the run request dict
+    run_request: dict[str, Any] = {
+        "slx_name": full_slx_name,
         "task_titles": task_titles,
         "memo": {"source": "mcp-tool", "tool": "run_slx"},
     }
+    if run_time_var_overrides:
+        run_request["run_time_var_overrides"] = run_time_var_overrides
+
+    # Step 1: Create a RunSession — run requests are triggered automatically
     try:
-        status_code, create_data = await _papi_post(
-            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs",
-            create_body,
+        _, session_data = await _papi_post(
+            f"/api/v3/workspaces/{ws}/runsessions",
+            {"source": "direct", "run_requests": [run_request]},
         )
     except ValueError as exc:
-        return _json_response({"error": f"Failed to create RunRequest: {exc}"})
+        return _json_response({"error": f"Failed to create RunSession: {exc}"})
 
-    run_request_id = create_data.get("id")
-    if not run_request_id:
-        return _json_response({"error": "No RunRequest ID in response", "response": create_data})
+    session_id = session_data.get("id")
+    if not session_id:
+        return _json_response({"error": "No session ID in response", "response": session_data})
 
-    # Step 2: Start the RunRequest (submits to runner)
-    try:
-        _, start_data = await _papi_post(
-            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}/start",
-            {},
-        )
-    except ValueError as exc:
-        return _json_response(
-            {"error": f"Failed to start RunRequest: {exc}", "run_request_id": run_request_id}
-        )
-
-    # Step 3: Poll until completion
+    # Step 2: Poll until all run requests have a response_time (completed)
     elapsed = 0
     run_status = "running"
-    run_data: dict[str, Any] = {}
-    while run_status not in ("completed", "failed") and elapsed < SLX_RUN_MAX_POLL_S:
+    session_data = {}
+    while run_status != "completed" and elapsed < SLX_RUN_MAX_POLL_S:
         await asyncio.sleep(SLX_RUN_POLL_INTERVAL_S)
         elapsed += SLX_RUN_POLL_INTERVAL_S
         try:
-            run_data = await _papi_get(
-                f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}"
-            )
-            is_completed = run_data.get("isCompleted") or run_data.get("is_completed")
-            response_time = run_data.get("responseTime") or run_data.get("response_time")
-            if is_completed or response_time:
+            session_data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/{session_id}")
+            run_requests = session_data.get("run_requests", [])
+            if run_requests and all(rr.get("response_time") for rr in run_requests):
                 run_status = "completed"
         except ValueError:
             pass
@@ -3083,32 +3087,27 @@ async def run_slx(
         return _json_response(
             {
                 "status": "timeout",
-                "run_request_id": run_request_id,
+                "session_id": session_id,
                 "elapsed_seconds": elapsed,
-                "message": f"RunRequest did not complete within {SLX_RUN_MAX_POLL_S}s. "
+                "message": f"RunSession did not complete within {SLX_RUN_MAX_POLL_S}s. "
                 "It may still be running — check back later with get_run_sessions.",
-                "last_state": run_data,
             }
         )
 
-    # Step 4: Fetch output
-    try:
-        output_data = await _papi_get(
-            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}/output"
-        )
-    except ValueError:
-        output_data = {}
-
+    # Step 3: Return results — issues are embedded in run_requests
+    run_requests = session_data.get("run_requests", [])
+    first_rr = run_requests[0] if run_requests else {}
     result: dict[str, Any] = {
         "status": "completed",
         "slx_name": slx_name,
         "workspace": ws,
-        "run_request_id": run_request_id,
+        "session_id": session_id,
+        "run_request_id": first_rr.get("id"),
         "elapsed_seconds": elapsed,
-        "passed_titles": run_data.get("passedTitles") or run_data.get("passed_titles", ""),
-        "failed_titles": run_data.get("failedTitles") or run_data.get("failed_titles", ""),
-        "skipped_titles": run_data.get("skippedTitles") or run_data.get("skipped_titles", ""),
-        "output": output_data,
+        "passed_titles": first_rr.get("passed_titles", ""),
+        "failed_titles": first_rr.get("failed_titles", ""),
+        "skipped_titles": first_rr.get("skipped_titles", ""),
+        "issues": first_rr.get("issues", []),
     }
     return _json_response(result)
 
