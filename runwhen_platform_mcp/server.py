@@ -3046,20 +3046,23 @@ async def run_slx(
     # Full SLX name expected by the runsessions API: workspace--slx-short-name
     full_slx_name = slx_name if "--" in slx_name else f"{ws}--{slx_name}"
 
-    # Build the run request dict
+    # task_titles is a '||'-separated string or '*'; API expects a list
+    task_titles_list = [t.strip() for t in task_titles.split("||")] if task_titles != "*" else ["*"]
+
+    # Build the run request dict (camelCase keys for JSON payload)
     run_request: dict[str, Any] = {
-        "slx_name": full_slx_name,
-        "task_titles": task_titles,
+        "slxName": full_slx_name,
+        "taskTitles": task_titles_list,
         "memo": {"source": "mcp-tool", "tool": "run_slx"},
     }
     if run_time_var_overrides:
-        run_request["run_time_var_overrides"] = run_time_var_overrides
+        run_request["runTimeVarOverrides"] = run_time_var_overrides
 
     # Step 1: Create a RunSession — run requests are triggered automatically
     try:
         _, session_data = await _papi_post(
             f"/api/v3/workspaces/{ws}/runsessions",
-            {"source": "direct", "run_requests": [run_request]},
+            {"source": "direct", "runRequests": [run_request]},
         )
     except ValueError as exc:
         return _json_response({"error": f"Failed to create RunSession: {exc}"})
