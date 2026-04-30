@@ -17,6 +17,35 @@
 
 ---
 
+## Table of contents
+
+- [Key features](#key-features)
+- [Requirements](#requirements)
+- [Getting started](#getting-started)
+- [MCP client configuration](#mcp-client-configuration)
+  - [Cursor](#cursor)
+  - [VS Code (GitHub Copilot)](#vs-code-github-copilot)
+  - [Claude Desktop](#claude-desktop)
+  - [Other MCP clients](#other-mcp-clients)
+  - [Remote (HTTP) access](#remote-http-access)
+  - [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments)
+  - [Multiple environments](#multiple-environments)
+- [Your first prompt](#your-first-prompt)
+- [Tools](#tools)
+- [Configuration](#configuration)
+  - [Environment variables](#environment-variables)
+  - [Getting a token](#getting-a-token)
+  - [Access control and "Run with Assistant"](#access-control-and-run-with-assistant)
+- [Concepts](#concepts)
+  - [How it works](#how-it-works)
+  - [Infrastructure context (RUNWHEN.md)](#infrastructure-context-runwhenmd)
+- [What's in this repo](#whats-in-this-repo)
+- [Development and testing](#development-and-testing)
+- [PyPI and container images](#pypi-and-container-images)
+- [License](#license)
+
+---
+
 ## Key features
 
 - **Workspace chat**: Ask the RunWhen AI assistant about your infrastructure. It has access to issue search, task/SLX search, run sessions, resource discovery, knowledge base, graphing, and Mermaid diagrams. Supports selecting an assistant (persona) via `persona_name`.
