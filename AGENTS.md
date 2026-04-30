@@ -7,6 +7,11 @@ platform. Three agent personas interact with the platform through MCP tools:
 - **`runwhen-task-builder`** — Builds workspace-specific health checks and automation tasks by analyzing code and infrastructure, then testing and committing SLXs.
 - **`runwhen-codecollection-author`** — Builds reusable, parameterized codebundles that work across any environment. Tests them as SLXs in a workspace and cleans up after validation.
 
+## Authentication
+
+- **Local (stdio)** — The MCP client passes **`RUNWHEN_TOKEN`** (and **`RW_API_URL`**) in environment variables; there is no OAuth handshake in-process.
+- **Remote (HTTP)** — Each request carries auth: usually **`Authorization: Bearer`** with a JWT or Personal Access Token. When the server is deployed with **`MCP_BASE_URL`** and **`MCP_PAPI_OAUTH_CLIENT_ID`** / **`MCP_PAPI_OAUTH_CLIENT_SECRET`**, MCP clients that support remote OAuth can sign in via the browser; discovery is at **`{MCP_BASE_URL}/.well-known/oauth-authorization-server`**, and the upstream OAuth app must allow redirect **`{MCP_BASE_URL}/auth/callback`**. Configure these variables on the **server** (not in the agent’s MCP client env). See the repo README section **OAuth for remote HTTP deployments**.
+
 ## Important: `workspace_name` is required
 
 Most tools require a `workspace_name` parameter. **Always provide it explicitly** —

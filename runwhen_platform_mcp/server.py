@@ -28,9 +28,10 @@ Auth flow (stdio mode):
   3. The Agent service validates the token by calling back to the API
 
 Auth flow (http mode):
-  1. MCP client authenticates via Bearer token (PAT or OAuth access token)
-  2. Token is validated against PAPI /api/v3/users/whoami
-  3. Per-request token is forwarded to PAPI and AgentFarm
+  1. MCP client authenticates via Bearer token (PAT or OAuth access token), or
+     completes remote OAuth when MCP_BASE_URL + MCP_PAPI_OAUTH_* are configured.
+  2. Tokens are validated via JWKS (RS256) and/or RunWhen API whoami as needed.
+  3. Per-request token is forwarded to RunWhen API and AgentFarm.
 """
 
 from __future__ import annotations
@@ -3527,6 +3528,8 @@ def main() -> None:
       - MCP_HOST: Bind address (default: 0.0.0.0)
       - MCP_PORT: Listen port (default: 8000)
       - FASTMCP_STATELESS_HTTP: Set to "true" for horizontal scaling
+      - MCP_BASE_URL, MCP_PAPI_OAUTH_CLIENT_ID, MCP_PAPI_OAUTH_CLIENT_SECRET:
+        optional; enable remote OAuth (see README "OAuth for remote HTTP deployments")
     """
     if MCP_TRANSPORT == "http":
         host = os.environ.get("MCP_HOST", "0.0.0.0")
