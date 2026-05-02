@@ -61,6 +61,71 @@ Read these files for complete, contract-compliant script templates:
 - **`resource_path` MUST start with `custom/`** — the server enforces this automatically. Never place custom tasks under an existing platform resource path (see configure-resource-path skill)
 - **`hierarchy` MUST start with `platform=custom`** — always include `{"name": "platform", "value": "custom"}` as the first tag and `"platform"` as the first hierarchy entry (see configure-hierarchy skill)
 
+## Run-Time Variables (Tasks only — never SLIs)
+
+Script variables are runtime-overridable parameters that users change per individual run:
+query strings, log filters, time windows, transient target names. They are distinct from
+`env_vars` (infra targets like namespace/cluster) and `secret_vars` (credentials).
+
+### Classification rules — in order
+
+1. IF the variable identifies WHICH cluster, namespace, or named resource to connect to
+   (KUBECTL_CONTEXT, NAMESPACE, *_NAME, *_CLUSTER) → use `env_vars`
+2. IF the variable is a search query, filter, pattern, time window, or per-run target →
+   use `run_time_vars`
+3. IF the variable name ends in *_QUERY, *_PATTERN, *_FILTER, *_WINDOW, *_TARGET →
+   use `run_time_vars`
+4. IF unsure → use `env_vars` (safer default; run-time vars are opt-in)
+
+### Using run-time vars in `run_script_and_wait`
+
+Pass override values via `run_time_var_overrides` (merged into `envVars` at test time):
+
+```python
+run_script_and_wait(
+    workspace_name="my-workspace",
+    script=my_script,
+    env_vars={"NAMESPACE": "backend", "KUBECTL_CONTEXT": "gke-prod"},
+    secret_vars={"kubeconfig": "kubeconfig"},
+    run_time_var_overrides={"LOG_QUERY": "critical", "TIME_WINDOW": "30m"},
+)
+```
+
+### Using run-time vars in `commit_slx`
+
+Pass the full schema via `run_time_vars`. All four fields are **required**:
+
+```python
+commit_slx(
+    workspace_name="my-workspace",
+    slx_name="k8s-log-grep",
+    alias="Kubernetes Log Grep",
+    statement="Grep pod logs for a search term",
+    script=my_script,
+    interpreter="python",
+    task_type="task",
+    env_vars={"NAMESPACE": "backend", "KUBECTL_CONTEXT": "gke-prod"},
+    secret_vars={"kubeconfig": "kubeconfig"},
+    run_time_vars=[
+        {
+            "name": "LOG_QUERY",
+            "description": "Log search string to filter entries",
+            "default": "error",
+            "validation": {"type": "regex", "pattern": "^.+$"},
+        },
+        {
+            "name": "SEVERITY",
+            "description": "Minimum severity level to report",
+            "default": "warning",
+            "validation": {"type": "enum", "values": ["debug", "warning", "error", "critical"]},
+        },
+    ],
+)
+```
+
+**NEVER** pass `run_time_vars` when `task_type="sli"` — SLIs are automated health probes
+with fixed thresholds; there is no per-run override concept for SLIs.
+
 ## Running tasks after committing
 
 After committing an SLX, use `run_slx` to trigger execution — **not** `workspace_chat`.

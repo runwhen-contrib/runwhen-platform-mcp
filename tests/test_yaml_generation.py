@@ -194,6 +194,65 @@ class TestBuildRunbookYaml:
         doc = self._parse(codebundle_ref="v2.0")
         assert doc["spec"]["codeBundle"]["ref"] == "v2.0"
 
+    def test_no_run_time_vars_by_default(self) -> None:
+        """runTimeVarsProvided should not appear when run_time_vars is omitted."""
+        doc = self._parse()
+        assert "runTimeVarsProvided" not in doc["spec"]
+
+    def test_run_time_vars_added_to_spec(self) -> None:
+        """runTimeVarsProvided is written to the spec when run_time_vars are provided."""
+        doc = self._parse(
+            run_time_vars=[
+                {
+                    "name": "LOG_QUERY",
+                    "description": "Log filter",
+                    "default": "error",
+                    "validation": {"type": "regex", "pattern": "^.+$"},
+                }
+            ]
+        )
+        svp = doc["spec"].get("runTimeVarsProvided")
+        assert svp is not None
+        assert len(svp) == 1
+        assert svp[0]["name"] == "LOG_QUERY"
+        assert svp[0]["default"] == "error"
+        assert svp[0]["description"] == "Log filter"
+        assert svp[0]["validation"]["type"] == "regex"
+        assert svp[0]["validation"]["pattern"] == "^.+$"
+
+    def test_run_time_vars_enum_written_correctly(self) -> None:
+        doc = self._parse(
+            run_time_vars=[
+                {
+                    "name": "SEVERITY",
+                    "description": "Severity level",
+                    "default": "warning",
+                    "validation": {"type": "enum", "values": ["debug", "warning", "error"]},
+                }
+            ]
+        )
+        svp = doc["spec"]["runTimeVarsProvided"]
+        assert svp[0]["validation"]["values"] == ["debug", "warning", "error"]
+
+    def test_run_time_vars_not_in_config_provided(self) -> None:
+        """Script vars must NOT appear in configProvided — only in runTimeVarsProvided."""
+        doc = self._parse(
+            run_time_vars=[
+                {
+                    "name": "LOG_QUERY",
+                    "description": "x",
+                    "default": "error",
+                    "validation": {"type": "regex", "pattern": "^.+$"},
+                }
+            ]
+        )
+        config_names = [c["name"] for c in doc["spec"]["configProvided"]]
+        assert "LOG_QUERY" not in config_names
+
+    def test_empty_run_time_vars_omits_field(self) -> None:
+        doc = self._parse(run_time_vars=[])
+        assert "runTimeVarsProvided" not in doc["spec"]
+
 
 class TestBuildSliYaml:
     """Tests for _build_sli_yaml."""

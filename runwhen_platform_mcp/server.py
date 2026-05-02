@@ -1101,6 +1101,39 @@ def _validate_slx_name(slx_name: str) -> None:
         )
 
 
+def _validate_run_time_vars(run_time_vars: list[dict] | None) -> list[str]:
+    """Validate run_time_vars list. Returns list of error strings (empty = valid)."""
+    if not run_time_vars:
+        return []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for i, var in enumerate(run_time_vars):
+        prefix = f"run_time_vars[{i}]"
+        for field in ("name", "description", "default"):
+            if not var.get(field):
+                errors.append(f"{prefix}: '{field}' is required and must be non-empty")
+        name = var.get("name")
+        if name:
+            if name in seen:
+                errors.append(f"{prefix}: duplicate name {name!r}")
+            else:
+                seen.add(name)
+        validation = var.get("validation")
+        if not validation:
+            errors.append(f"{prefix}: 'validation' is required")
+        else:
+            vtype = validation.get("type")
+            if vtype not in ("regex", "enum"):
+                errors.append(f"{prefix}: validation.type must be 'regex' or 'enum', got {vtype!r}")
+            elif vtype == "regex" and not validation.get("pattern"):
+                errors.append(f"{prefix}: validation.pattern is required when type is 'regex'")
+            elif vtype == "enum" and not validation.get("values"):
+                errors.append(
+                    f"{prefix}: validation.values must be a non-empty list when type is 'enum'"
+                )
+    return errors
+
+
 async def _get_codebundle_ref(workspace: str) -> str:
     """Resolve the codebundle branch used by this workspace's tool-builder runtime.
 
@@ -1121,6 +1154,7 @@ def _build_runbook_yaml(
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
     codebundle_ref: str | None = None,
+    run_time_vars: list[dict] | None = None,
 ) -> str:
     """Generate runbook.yaml content for a Tool Builder task."""
     config_provided = [
@@ -1153,6 +1187,17 @@ def _build_runbook_yaml(
     }
     if secrets_provided:
         spec["secretsProvided"] = secrets_provided
+
+    if run_time_vars:
+        spec["runTimeVarsProvided"] = [
+            {
+                "name": rv["name"],
+                "default": rv["default"],
+                "description": rv["description"],
+                "validation": rv["validation"],
+            }
+            for rv in run_time_vars
+        ]
 
     doc = {
         "apiVersion": "runwhen.com/v1",
@@ -2859,6 +2904,16 @@ async def run_script_and_wait(
             "scripts is error-prone.",
         ),
     ] = None,
+    run_time_var_overrides: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "Per-run override values for script variables (name → value). "
+                "Merged into envVars at test time. Overrides win on name collision."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """Execute a script and wait for results (combines run + poll + output).
 
@@ -2902,7 +2957,7 @@ async def run_script_and_wait(
         "location": location,
         "run_type": run_type,
         "interpreter": interpreter,
-        "envVars": env_vars or {},
+        "envVars": {**(env_vars or {}), **(run_time_var_overrides or {})},
         "secretVars": secret_vars or {},
     }
 
@@ -2960,6 +3015,16 @@ async def run_slx(
     task_titles: str = Field(
         default="*", description="Tasks to run: '*' for all, or '||'-separated titles."
     ),
+    run_time_var_overrides: Annotated[
+        dict[str, str] | None,
+        Field(
+            default=None,
+            description=(
+                "Per-run override values for run-time variables (name → value). "
+                "Passed through to the runner at execution time. Requires staff access."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """Run an existing SLX's runbook tasks on the workspace runner.
 
@@ -2974,53 +3039,50 @@ async def run_slx(
     NOTE: workspace_chat CANNOT run tasks directly — it can only search for
     and describe them. Use this tool to actually execute an SLX.
 
-    The tool creates a RunRequest, starts it, polls until completion, and
-    returns the results including pass/fail status and any issues found.
+    The tool creates a RunSession with the run request, polls until completion,
+    and returns the results including pass/fail status and any issues found.
     """
     ws = await _resolve_workspace(workspace_name)
 
-    # Step 1: Create a staged RunRequest
-    create_body: dict[str, Any] = {
-        "task_titles": task_titles,
+    # Full SLX name expected by the runsessions API: workspace--slx-short-name
+    full_slx_name = slx_name if "--" in slx_name else f"{ws}--{slx_name}"
+
+    # task_titles is a '||'-separated string or '*'; API expects a list
+    task_titles_list = [t.strip() for t in task_titles.split("||")] if task_titles != "*" else ["*"]
+
+    # Build the run request dict (camelCase keys for JSON payload)
+    run_request: dict[str, Any] = {
+        "slxName": full_slx_name,
+        "taskTitles": task_titles_list,
         "memo": {"source": "mcp-tool", "tool": "run_slx"},
     }
+    if run_time_var_overrides:
+        run_request["runTimeVarOverrides"] = run_time_var_overrides
+
+    # Step 1: Create a RunSession — run requests are triggered automatically
     try:
-        status_code, create_data = await _papi_post(
-            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs",
-            create_body,
+        _, session_data = await _papi_post(
+            f"/api/v3/workspaces/{ws}/runsessions",
+            {"source": "direct", "runRequests": [run_request]},
         )
     except ValueError as exc:
-        return _json_response({"error": f"Failed to create RunRequest: {exc}"})
+        return _json_response({"error": f"Failed to create RunSession: {exc}"})
 
-    run_request_id = create_data.get("id")
-    if not run_request_id:
-        return _json_response({"error": "No RunRequest ID in response", "response": create_data})
+    session_id = session_data.get("id")
+    if not session_id:
+        return _json_response({"error": "No session ID in response", "response": session_data})
 
-    # Step 2: Start the RunRequest (submits to runner)
-    try:
-        _, start_data = await _papi_post(
-            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}/start",
-            {},
-        )
-    except ValueError as exc:
-        return _json_response(
-            {"error": f"Failed to start RunRequest: {exc}", "run_request_id": run_request_id}
-        )
-
-    # Step 3: Poll until completion
+    # Step 2: Poll until all run requests have a response_time (completed)
     elapsed = 0
     run_status = "running"
-    run_data: dict[str, Any] = {}
-    while run_status not in ("completed", "failed") and elapsed < SLX_RUN_MAX_POLL_S:
+    session_data = {}
+    while run_status != "completed" and elapsed < SLX_RUN_MAX_POLL_S:
         await asyncio.sleep(SLX_RUN_POLL_INTERVAL_S)
         elapsed += SLX_RUN_POLL_INTERVAL_S
         try:
-            run_data = await _papi_get(
-                f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}"
-            )
-            is_completed = run_data.get("isCompleted") or run_data.get("is_completed")
-            response_time = run_data.get("responseTime") or run_data.get("response_time")
-            if is_completed or response_time:
+            session_data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/{session_id}")
+            run_requests = session_data.get("run_requests", [])
+            if run_requests and all(rr.get("response_time") for rr in run_requests):
                 run_status = "completed"
         except ValueError:
             pass
@@ -3029,32 +3091,27 @@ async def run_slx(
         return _json_response(
             {
                 "status": "timeout",
-                "run_request_id": run_request_id,
+                "session_id": session_id,
                 "elapsed_seconds": elapsed,
-                "message": f"RunRequest did not complete within {SLX_RUN_MAX_POLL_S}s. "
+                "message": f"RunSession did not complete within {SLX_RUN_MAX_POLL_S}s. "
                 "It may still be running — check back later with get_run_sessions.",
-                "last_state": run_data,
             }
         )
 
-    # Step 4: Fetch output
-    try:
-        output_data = await _papi_get(
-            f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook/runs/{run_request_id}/output"
-        )
-    except ValueError:
-        output_data = {}
-
+    # Step 3: Return results — issues are embedded in run_requests
+    run_requests = session_data.get("run_requests", [])
+    first_rr = run_requests[0] if run_requests else {}
     result: dict[str, Any] = {
         "status": "completed",
         "slx_name": slx_name,
         "workspace": ws,
-        "run_request_id": run_request_id,
+        "session_id": session_id,
+        "run_request_id": first_rr.get("id"),
         "elapsed_seconds": elapsed,
-        "passed_titles": run_data.get("passedTitles") or run_data.get("passed_titles", ""),
-        "failed_titles": run_data.get("failedTitles") or run_data.get("failed_titles", ""),
-        "skipped_titles": run_data.get("skippedTitles") or run_data.get("skipped_titles", ""),
-        "output": output_data,
+        "passed_titles": first_rr.get("passed_titles", ""),
+        "failed_titles": first_rr.get("failed_titles", ""),
+        "skipped_titles": first_rr.get("skipped_titles", ""),
+        "issues": first_rr.get("issues", []),
     }
     return _json_response(result)
 
@@ -3147,6 +3204,22 @@ async def commit_slx(
             "'sli_script' and 'sli_script_path'.",
         ),
     ] = None,
+    run_time_vars: Annotated[
+        list[dict] | None,
+        Field(
+            default=None,
+            description=(
+                "Per-run task parameters that the END USER fills in when invoking the committed "
+                "task (e.g. log queries, time windows, filters). "
+                "Distinct from env_vars (set once by the task author — cluster, namespace, "
+                "context) and secret_vars (credentials injected as file paths). "
+                "Task-only — never valid for SLIs. "
+                "Each entry requires: name (str), description (str), default (str), "
+                "validation (dict with type='regex'+'pattern' or type='enum'+'values'). "
+                "Names must be unique and must not overlap with env_vars or secret_vars."
+            ),
+        ),
+    ] = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
@@ -3169,6 +3242,45 @@ async def commit_slx(
         _validate_slx_name(slx_name)
     except ValueError as exc:
         return _json_response({"error": str(exc)})
+
+    if run_time_vars and task_type != "task":
+        return _json_response(
+            {
+                "error": (
+                    "run_time_vars are only valid for task_type='task'. "
+                    "SLIs are automated probes with fixed thresholds and have no "
+                    "per-run override concept."
+                ),
+            }
+        )
+
+    rtv_errors = _validate_run_time_vars(run_time_vars)
+    if rtv_errors:
+        return _json_response({"error": "Invalid run_time_vars", "errors": rtv_errors})
+
+    if run_time_vars and env_vars:
+        overlap = {rv["name"] for rv in run_time_vars if rv.get("name")} & set(env_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both env_vars and run_time_vars: {sorted(overlap)}. "
+                        "A name must be in one or the other."
+                    ),
+                }
+            )
+
+    if run_time_vars and secret_vars:
+        overlap = {rv["name"] for rv in run_time_vars if rv.get("name")} & set(secret_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both secret_vars and run_time_vars: {sorted(overlap)}. "
+                        "A name must be in one or the other."
+                    ),
+                }
+            )
 
     try:
         script = _resolve_script(script, script_path, script_base64)
@@ -3249,6 +3361,7 @@ async def commit_slx(
             env_vars=env_vars,
             secret_vars=secret_vars,
             codebundle_ref=codebundle_ref,
+            run_time_vars=run_time_vars or [],
         )
         committed_types.append("task")
 
