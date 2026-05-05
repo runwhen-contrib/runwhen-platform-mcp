@@ -235,7 +235,7 @@ class TestBuildRunbookYaml:
         assert svp[0]["validation"]["values"] == ["debug", "warning", "error"]
 
     def test_runtime_vars_not_in_config_provided(self) -> None:
-        """Script vars must NOT appear in configProvided — only in runtimeVarsProvided."""
+        """Runtime vars must NOT appear in configProvided — only in runtimeVarsProvided."""
         doc = self._parse(
             runtime_vars=[
                 {

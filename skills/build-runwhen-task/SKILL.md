@@ -61,7 +61,7 @@ Read these files for complete, contract-compliant script templates:
 - **`resource_path` MUST start with `custom/`** — the server enforces this automatically. Never place custom tasks under an existing platform resource path (see configure-resource-path skill)
 - **`hierarchy` MUST start with `platform=custom`** — always include `{"name": "platform", "value": "custom"}` as the first tag and `"platform"` as the first hierarchy entry (see configure-hierarchy skill)
 
-## Run-Time Variables (Tasks only — never SLIs)
+## Runtime Variables (Tasks only — never SLIs)
 
 Script variables are runtime-overridable parameters that users change per individual run:
 query strings, log filters, time windows, transient target names. They are distinct from
