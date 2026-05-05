@@ -12,7 +12,7 @@ from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
     _resolve_script,
-    _validate_run_time_vars,
+    _validate_runtime_vars,
     _validate_script,
     _validate_slx_name,
     commit_slx,
@@ -261,16 +261,16 @@ class TestWriteToolsCompleteness:
 
 
 class TestValidateRunTimeVars:
-    """Tests for _validate_run_time_vars."""
+    """Tests for _validate_runtime_vars."""
 
     def test_empty_list_is_valid(self) -> None:
-        assert _validate_run_time_vars([]) == []
+        assert _validate_runtime_vars([]) == []
 
     def test_none_is_valid(self) -> None:
-        assert _validate_run_time_vars(None) == []
+        assert _validate_runtime_vars(None) == []
 
     def test_valid_regex_var(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {
                     "name": "LOG_QUERY",
@@ -283,7 +283,7 @@ class TestValidateRunTimeVars:
         assert errors == []
 
     def test_valid_enum_var(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {
                     "name": "SEVERITY",
@@ -296,29 +296,29 @@ class TestValidateRunTimeVars:
         assert errors == []
 
     def test_missing_name(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [{"description": "x", "default": "y", "validation": {"type": "enum", "values": ["a"]}}]
         )
         assert any("name" in e for e in errors)
 
     def test_missing_description(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [{"name": "FOO", "default": "y", "validation": {"type": "enum", "values": ["a"]}}]
         )
         assert any("description" in e for e in errors)
 
     def test_missing_default(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [{"name": "FOO", "description": "x", "validation": {"type": "enum", "values": ["a"]}}]
         )
         assert any("default" in e for e in errors)
 
     def test_missing_validation(self) -> None:
-        errors = _validate_run_time_vars([{"name": "FOO", "description": "x", "default": "y"}])
+        errors = _validate_runtime_vars([{"name": "FOO", "description": "x", "default": "y"}])
         assert any("validation" in e for e in errors)
 
     def test_invalid_validation_type(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {
                     "name": "FOO",
@@ -331,19 +331,19 @@ class TestValidateRunTimeVars:
         assert any("type" in e for e in errors)
 
     def test_regex_missing_pattern(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [{"name": "FOO", "description": "x", "default": "y", "validation": {"type": "regex"}}]
         )
         assert any("pattern" in e for e in errors)
 
     def test_enum_missing_values(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [{"name": "FOO", "description": "x", "default": "y", "validation": {"type": "enum"}}]
         )
         assert any("values" in e for e in errors)
 
     def test_enum_empty_values(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {
                     "name": "FOO",
@@ -357,7 +357,7 @@ class TestValidateRunTimeVars:
 
     def test_multiple_vars_one_invalid(self) -> None:
         """Errors reference the index of the invalid var."""
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {
                     "name": "GOOD",
@@ -369,17 +369,17 @@ class TestValidateRunTimeVars:
             ]
         )
         assert len(errors) == 1
-        assert "run_time_vars[1]" in errors[0]
+        assert "runtime_vars[1]" in errors[0]
 
 
 class TestCommitSlxRunTimeVarsValidation:
-    """commit_slx returns validation errors for invalid run_time_vars."""
+    """commit_slx returns validation errors for invalid runtime_vars."""
 
     def _run(self, coro):
         return asyncio.run(coro)
 
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_invalid_run_time_var_returns_error(self, mock_resolve) -> None:
+    def test_invalid_runtime_var_returns_error(self, mock_resolve) -> None:
         mock_resolve.return_value = "test-ws"
         result = self._run(
             commit_slx(
@@ -389,7 +389,7 @@ class TestCommitSlxRunTimeVarsValidation:
                 workspace_name="test-ws",
                 script="def main(): return []",
                 interpreter="python",
-                run_time_vars=[
+                runtime_vars=[
                     # missing description and validation
                     {"name": "FOO", "default": "bar"}
                 ],
@@ -397,13 +397,13 @@ class TestCommitSlxRunTimeVarsValidation:
         )
         data = json.loads(result)
         assert "error" in data
-        assert "run_time_vars" in data["error"].lower() or any(
-            "run_time_vars" in str(e) for e in data.get("errors", [])
+        assert "runtime_vars" in data["error"].lower() or any(
+            "runtime_vars" in str(e) for e in data.get("errors", [])
         )
 
 
 class TestRunScriptAndWaitRunTimeVarOverrides:
-    """run_time_var_overrides are merged into envVars sent to author/run."""
+    """runtime_var_overrides are merged into envVars sent to author/run."""
 
     def _run(self, coro):
         return asyncio.run(coro)
@@ -412,7 +412,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
     @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
-    def test_run_time_var_overrides_merged_into_env_vars(
+    def test_runtime_var_overrides_merged_into_env_vars(
         self, mock_get, mock_post, mock_location, mock_ws
     ) -> None:
         mock_ws.return_value = "test-ws"
@@ -429,7 +429,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
                 script="def main(): return []",
                 interpreter="python",
                 env_vars={"NAMESPACE": "default"},
-                run_time_var_overrides={"LOG_QUERY": "critical"},
+                runtime_var_overrides={"LOG_QUERY": "critical"},
             )
         )
 
@@ -441,7 +441,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
     @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
-    def test_run_time_var_overrides_take_precedence(
+    def test_runtime_var_overrides_take_precedence(
         self, mock_get, mock_post, mock_location, mock_ws
     ) -> None:
         mock_ws.return_value = "test-ws"
@@ -458,7 +458,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
                 script="def main(): return []",
                 interpreter="python",
                 env_vars={"LOG_QUERY": "original"},
-                run_time_var_overrides={"LOG_QUERY": "override"},
+                runtime_var_overrides={"LOG_QUERY": "override"},
             )
         )
 
@@ -494,12 +494,12 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
 
 
 class TestRunTimeVarsDuplicateNames:
-    """_validate_run_time_vars rejects duplicate names within the list."""
+    """_validate_runtime_vars rejects duplicate names within the list."""
 
     _REGEX_VAR = {"type": "regex", "pattern": ".*"}
 
     def test_duplicate_name_flagged(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {"name": "FOO", "description": "d", "default": "v", "validation": self._REGEX_VAR},
                 {
@@ -515,7 +515,7 @@ class TestRunTimeVarsDuplicateNames:
         assert "FOO" in errors[0]
 
     def test_unique_names_ok(self) -> None:
-        errors = _validate_run_time_vars(
+        errors = _validate_runtime_vars(
             [
                 {"name": "FOO", "description": "d", "default": "v", "validation": self._REGEX_VAR},
                 {
@@ -530,7 +530,7 @@ class TestRunTimeVarsDuplicateNames:
 
 
 class TestCommitSlxRunTimeVarsCollisions:
-    """commit_slx rejects run_time_vars overlapping env_vars/secret_vars, or used with SLIs."""
+    """commit_slx rejects runtime_vars overlapping env_vars/secret_vars, or used with SLIs."""
 
     def _run(self, coro):
         return asyncio.run(coro)
@@ -544,7 +544,7 @@ class TestCommitSlxRunTimeVarsCollisions:
         }
 
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_run_time_vars_rejected_for_sli(self, mock_resolve) -> None:
+    def test_runtime_vars_rejected_for_sli(self, mock_resolve) -> None:
         mock_resolve.return_value = "test-ws"
         result = self._run(
             commit_slx(
@@ -555,7 +555,7 @@ class TestCommitSlxRunTimeVarsCollisions:
                 script="def main(): return 1.0",
                 interpreter="python",
                 task_type="sli",
-                run_time_vars=[self._make_valid_runtime_var("LOG_QUERY")],
+                runtime_vars=[self._make_valid_runtime_var("LOG_QUERY")],
             )
         )
         data = json.loads(result)
@@ -563,7 +563,7 @@ class TestCommitSlxRunTimeVarsCollisions:
         assert "task_type='task'" in data["error"]
 
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_env_vars_run_time_vars_overlap_rejected(self, mock_resolve) -> None:
+    def test_env_vars_runtime_vars_overlap_rejected(self, mock_resolve) -> None:
         mock_resolve.return_value = "test-ws"
         result = self._run(
             commit_slx(
@@ -575,7 +575,7 @@ class TestCommitSlxRunTimeVarsCollisions:
                 interpreter="python",
                 task_type="task",
                 env_vars={"LOG_QUERY": "default"},
-                run_time_vars=[self._make_valid_runtime_var("LOG_QUERY")],
+                runtime_vars=[self._make_valid_runtime_var("LOG_QUERY")],
             )
         )
         data = json.loads(result)
@@ -584,7 +584,7 @@ class TestCommitSlxRunTimeVarsCollisions:
         assert "env_vars" in data["error"]
 
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_secret_vars_run_time_vars_overlap_rejected(self, mock_resolve) -> None:
+    def test_secret_vars_runtime_vars_overlap_rejected(self, mock_resolve) -> None:
         mock_resolve.return_value = "test-ws"
         result = self._run(
             commit_slx(
@@ -596,7 +596,7 @@ class TestCommitSlxRunTimeVarsCollisions:
                 interpreter="python",
                 task_type="task",
                 secret_vars={"LOG_QUERY": "some-secret-key"},
-                run_time_vars=[self._make_valid_runtime_var("LOG_QUERY")],
+                runtime_vars=[self._make_valid_runtime_var("LOG_QUERY")],
             )
         )
         data = json.loads(result)

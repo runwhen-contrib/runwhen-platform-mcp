@@ -1100,14 +1100,14 @@ def _validate_slx_name(slx_name: str) -> None:
         )
 
 
-def _validate_run_time_vars(run_time_vars: list[dict] | None) -> list[str]:
-    """Validate run_time_vars list. Returns list of error strings (empty = valid)."""
-    if not run_time_vars:
+def _validate_runtime_vars(runtime_vars: list[dict] | None) -> list[str]:
+    """Validate runtime_vars list. Returns list of error strings (empty = valid)."""
+    if not runtime_vars:
         return []
     errors: list[str] = []
     seen: set[str] = set()
-    for i, var in enumerate(run_time_vars):
-        prefix = f"run_time_vars[{i}]"
+    for i, var in enumerate(runtime_vars):
+        prefix = f"runtime_vars[{i}]"
         for field in ("name", "description", "default"):
             if not var.get(field):
                 errors.append(f"{prefix}: '{field}' is required and must be non-empty")
@@ -1153,7 +1153,7 @@ def _build_runbook_yaml(
     env_vars: dict[str, str] | None = None,
     secret_vars: dict[str, str] | None = None,
     codebundle_ref: str | None = None,
-    run_time_vars: list[dict] | None = None,
+    runtime_vars: list[dict] | None = None,
 ) -> str:
     """Generate runbook.yaml content for a Tool Builder task."""
     config_provided = [
@@ -1187,15 +1187,15 @@ def _build_runbook_yaml(
     if secrets_provided:
         spec["secretsProvided"] = secrets_provided
 
-    if run_time_vars:
-        spec["runTimeVarsProvided"] = [
+    if runtime_vars:
+        spec["runtimeVarsProvided"] = [
             {
                 "name": rv["name"],
                 "default": rv["default"],
                 "description": rv["description"],
                 "validation": rv["validation"],
             }
-            for rv in run_time_vars
+            for rv in runtime_vars
         ]
 
     doc = {
@@ -2903,7 +2903,7 @@ async def run_script_and_wait(
             "scripts is error-prone.",
         ),
     ] = None,
-    run_time_var_overrides: Annotated[
+    runtime_var_overrides: Annotated[
         dict[str, str] | None,
         Field(
             default=None,
@@ -2956,7 +2956,7 @@ async def run_script_and_wait(
         "location": location,
         "run_type": run_type,
         "interpreter": interpreter,
-        "envVars": {**(env_vars or {}), **(run_time_var_overrides or {})},
+        "envVars": {**(env_vars or {}), **(runtime_var_overrides or {})},
         "secretVars": secret_vars or {},
     }
 
@@ -3014,12 +3014,12 @@ async def run_slx(
     task_titles: str = Field(
         default="*", description="Tasks to run: '*' for all, or '||'-separated titles."
     ),
-    run_time_var_overrides: Annotated[
+    runtime_var_overrides: Annotated[
         dict[str, str] | None,
         Field(
             default=None,
             description=(
-                "Per-run override values for run-time variables (name → value). "
+                "Per-run override values for runtime variables (name → value). "
                 "Passed through to the runner at execution time. Requires staff access."
             ),
         ),
@@ -3055,8 +3055,8 @@ async def run_slx(
         "taskTitles": task_titles_list,
         "memo": {"source": "mcp-tool", "tool": "run_slx"},
     }
-    if run_time_var_overrides:
-        run_request["runTimeVarOverrides"] = run_time_var_overrides
+    if runtime_var_overrides:
+        run_request["runtimeVarOverrides"] = runtime_var_overrides
 
     # Step 1: Create a RunSession — run requests are triggered automatically
     try:
@@ -3203,7 +3203,7 @@ async def commit_slx(
             "'sli_script' and 'sli_script_path'.",
         ),
     ] = None,
-    run_time_vars: Annotated[
+    runtime_vars: Annotated[
         list[dict] | None,
         Field(
             default=None,
@@ -3242,40 +3242,40 @@ async def commit_slx(
     except ValueError as exc:
         return _json_response({"error": str(exc)})
 
-    if run_time_vars and task_type != "task":
+    if runtime_vars and task_type != "task":
         return _json_response(
             {
                 "error": (
-                    "run_time_vars are only valid for task_type='task'. "
+                    "runtime_vars are only valid for task_type='task'. "
                     "SLIs are automated probes with fixed thresholds and have no "
                     "per-run override concept."
                 ),
             }
         )
 
-    rtv_errors = _validate_run_time_vars(run_time_vars)
+    rtv_errors = _validate_runtime_vars(runtime_vars)
     if rtv_errors:
-        return _json_response({"error": "Invalid run_time_vars", "errors": rtv_errors})
+        return _json_response({"error": "Invalid runtime_vars", "errors": rtv_errors})
 
-    if run_time_vars and env_vars:
-        overlap = {rv["name"] for rv in run_time_vars if rv.get("name")} & set(env_vars)
+    if runtime_vars and env_vars:
+        overlap = {rv["name"] for rv in runtime_vars if rv.get("name")} & set(env_vars)
         if overlap:
             return _json_response(
                 {
                     "error": (
-                        f"Names appear in both env_vars and run_time_vars: {sorted(overlap)}. "
+                        f"Names appear in both env_vars and runtime_vars: {sorted(overlap)}. "
                         "A name must be in one or the other."
                     ),
                 }
             )
 
-    if run_time_vars and secret_vars:
-        overlap = {rv["name"] for rv in run_time_vars if rv.get("name")} & set(secret_vars)
+    if runtime_vars and secret_vars:
+        overlap = {rv["name"] for rv in runtime_vars if rv.get("name")} & set(secret_vars)
         if overlap:
             return _json_response(
                 {
                     "error": (
-                        f"Names appear in both secret_vars and run_time_vars: {sorted(overlap)}. "
+                        f"Names appear in both secret_vars and runtime_vars: {sorted(overlap)}. "
                         "A name must be in one or the other."
                     ),
                 }
@@ -3360,7 +3360,7 @@ async def commit_slx(
             env_vars=env_vars,
             secret_vars=secret_vars,
             codebundle_ref=codebundle_ref,
-            run_time_vars=run_time_vars or [],
+            runtime_vars=runtime_vars or [],
         )
         committed_types.append("task")
 
