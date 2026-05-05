@@ -3020,7 +3020,7 @@ async def run_slx(
             default=None,
             description=(
                 "Per-run override values for runtime variables (name → value). "
-                "Passed through to the runner at execution time. Requires staff access."
+                "Passed through to the runner at execution time."
             ),
         ),
     ] = None,
