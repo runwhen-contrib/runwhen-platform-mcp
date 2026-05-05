@@ -378,9 +378,7 @@ class TestCommitSlxRunTimeVarsValidation:
     def _run(self, coro):
         return asyncio.run(coro)
 
-    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_invalid_runtime_var_returns_error(self, mock_resolve) -> None:
-        mock_resolve.return_value = "test-ws"
+    def test_invalid_runtime_var_returns_error(self) -> None:
         result = self._run(
             commit_slx(
                 slx_name="my-task",
@@ -543,9 +541,7 @@ class TestCommitSlxRunTimeVarsCollisions:
             "validation": {"type": "regex", "pattern": "^.+$"},
         }
 
-    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_runtime_vars_rejected_for_sli(self, mock_resolve) -> None:
-        mock_resolve.return_value = "test-ws"
+    def test_runtime_vars_rejected_for_sli(self) -> None:
         result = self._run(
             commit_slx(
                 slx_name="my-sli",
@@ -562,9 +558,7 @@ class TestCommitSlxRunTimeVarsCollisions:
         assert "error" in data
         assert "task_type='task'" in data["error"]
 
-    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_env_vars_runtime_vars_overlap_rejected(self, mock_resolve) -> None:
-        mock_resolve.return_value = "test-ws"
+    def test_env_vars_runtime_vars_overlap_rejected(self) -> None:
         result = self._run(
             commit_slx(
                 slx_name="my-task",
@@ -583,9 +577,7 @@ class TestCommitSlxRunTimeVarsCollisions:
         assert "LOG_QUERY" in data["error"]
         assert "env_vars" in data["error"]
 
-    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
-    def test_secret_vars_runtime_vars_overlap_rejected(self, mock_resolve) -> None:
-        mock_resolve.return_value = "test-ws"
+    def test_secret_vars_runtime_vars_overlap_rejected(self) -> None:
         result = self._run(
             commit_slx(
                 slx_name="my-task",

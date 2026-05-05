@@ -3281,6 +3281,22 @@ async def commit_slx(
                 }
             )
 
+    if sli_script and cron_schedule:
+        return _json_response(
+            {
+                "error": "Cannot specify both sli_script and cron_schedule. "
+                "Use sli_script for a custom SLI metric, or cron_schedule "
+                "to trigger the runbook on a schedule.",
+            }
+        )
+
+    if access not in VALID_ACCESS_TAGS:
+        valid = ", ".join(VALID_ACCESS_TAGS)
+        return _json_response({"error": f"Invalid access tag '{access}'. Must be one of: {valid}"})
+    if data not in VALID_DATA_TAGS:
+        valid = ", ".join(VALID_DATA_TAGS)
+        return _json_response({"error": f"Invalid data tag '{data}'. Must be one of: {valid}"})
+
     try:
         script = _resolve_script(script, script_path, script_base64)
     except (ValueError, FileNotFoundError) as exc:
@@ -3300,22 +3316,6 @@ async def commit_slx(
         return _json_response({"error": str(exc)})
 
     script_b64 = base64.b64encode(script.encode()).decode()
-
-    if sli_script and cron_schedule:
-        return _json_response(
-            {
-                "error": "Cannot specify both sli_script and cron_schedule. "
-                "Use sli_script for a custom SLI metric, or cron_schedule "
-                "to trigger the runbook on a schedule.",
-            }
-        )
-
-    if access not in VALID_ACCESS_TAGS:
-        valid = ", ".join(VALID_ACCESS_TAGS)
-        return _json_response({"error": f"Invalid access tag '{access}'. Must be one of: {valid}"})
-    if data not in VALID_DATA_TAGS:
-        valid = ", ".join(VALID_DATA_TAGS)
-        return _json_response({"error": f"Invalid data tag '{data}'. Must be one of: {valid}"})
 
     if owners is None:
         owners = [await _get_user_email()]
