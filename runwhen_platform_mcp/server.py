@@ -3577,7 +3577,7 @@ async def commit_slx(
 
     type_label = " + ".join(committed_types)
 
-    status_code, data = await _sync_slx_resources(
+    status_code, resp_data = await _sync_slx_resources(
         ws=ws,
         slx_name=slx_name,
         slx_payload=slx_payload,
@@ -3592,7 +3592,7 @@ async def commit_slx(
         "workspace": ws,
         "codebundle_ref": codebundle_ref,
         "committed_types": type_label,
-        "response": data,
+        "response": resp_data,
     }
     return _json_response(result)
 
