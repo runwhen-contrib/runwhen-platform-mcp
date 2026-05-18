@@ -727,7 +727,18 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
             f"PAPI returned 403 Forbidden for {path}. "
             "You may not have access to this workspace or resource."
         )
-    resp.raise_for_status()
+    if resp.is_error:
+        # RW-706 strict-sync rejections return JSON like
+        # {"detail": ..., "unknown_keys": [...], "model": ...} — surface
+        # that body so the caller can see *why* the request failed instead
+        # of just the HTTP status.
+        try:
+            body_excerpt = json.dumps(resp.json())[:1000]
+        except (json.JSONDecodeError, ValueError):
+            body_excerpt = resp.text[:1000]
+        raise ValueError(
+            f"PAPI returned {resp.status_code} for {path}: {body_excerpt}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1373,8 +1384,6 @@ def _build_slx_payload(
 
 
 def _build_runbook_payload(
-    workspace: str,
-    slx_name: str,
     runner_uuid: str,
     code_bundle_repo_url: str,
     code_bundle_ref: str,
@@ -1385,10 +1394,11 @@ def _build_runbook_payload(
 ) -> dict[str, Any]:
     """Build Runbook sync payload for POST /api/v1/workspaces/{ws}/runbooks/sync.
 
-    slx_id is injected by _sync_slx_resources after the SLX sync completes.
+    slx_id is injected by _sync_slx_resources after the SLX sync completes —
+    RunbookModel is keyed by slx_id (1-to-1 with SLX), so the payload has no
+    `name` column. RW-706 strict-validates and rejects unknown top-level keys.
     """
     payload: dict[str, Any] = {
-        "name": f"{workspace}--{slx_name}",
         "runner_uuid": runner_uuid,
         "code_bundle_repo_url": code_bundle_repo_url,
         "code_bundle_ref": code_bundle_ref,
@@ -2592,8 +2602,6 @@ async def deploy_registry_codebundle(
 
     if deploy_runbook:
         runbook_payload = _build_runbook_payload(
-            workspace=ws,
-            slx_name=slx_name,
             runner_uuid=location,
             code_bundle_repo_url=git_url,
             code_bundle_ref=ref,
@@ -3066,8 +3074,17 @@ async def run_script_and_wait(
     - Bash task: define main() writing issue JSON array to FD 3 (>&3).
     - Bash SLI: define main() writing a metric float to FD 3.
 
-    Secret vars are injected as env vars pointing to file paths on the runner.
-    For kubeconfig: set KUBECONFIG = os.environ["kubeconfig"].
+    Bash scripts must NOT include `main "$@"` at the bottom. The runner
+    sources the script and invokes `main()` itself with FD 3 wired to a
+    run_output.json file. A trailing `main "$@"` triggers a preflight
+    invocation with FD 3 read-only and produces misleading "Bad file
+    descriptor" errors.
+
+    `secret_vars` entries are injected as env vars whose VALUE is a FILE
+    PATH on the runner — not the secret value itself. kubectl/KUBECONFIG
+    and gcloud/GOOGLE_APPLICATION_CREDENTIALS work unchanged. For tokens/
+    passwords the script must `cat "$VAR"` (bash) or
+    `open(os.environ["VAR"]).read()` (python) to get the actual value.
     """
     try:
         script = _resolve_script(script, script_path, script_base64)
@@ -3375,6 +3392,21 @@ async def commit_slx(
     2. Cron-scheduler SLI: set task_type="task" and provide cron_schedule with
        a cron expression (e.g. "0 */2 * * *"). The SLI will trigger the task's
        runbook on that schedule.
+
+    Script-content contract (the two most common footguns):
+
+    - Bash scripts must NOT include `main "$@"` at the bottom. The runner
+      sources the script and invokes `main()` itself with FD 3 wired to a
+      run_output.json file. A trailing `main "$@"` triggers a preflight
+      invocation with FD 3 read-only, producing misleading "Bad file
+      descriptor" errors. Just define `main()` and stop there.
+
+    - `secret_vars` entries are injected at runtime as env vars whose VALUE
+      is a FILE PATH on the runner — not the secret value itself. Tools
+      that read paths natively (kubectl/KUBECONFIG, gcloud/
+      GOOGLE_APPLICATION_CREDENTIALS) work unchanged. For tokens/passwords
+      the script must `cat "$VAR"` (bash) or `open(os.environ["VAR"]).read()`
+      (python) to get the actual value.
     """
     try:
         _validate_slx_name(slx_name)
@@ -3503,8 +3535,6 @@ async def commit_slx(
             rb_config.append({"name": k, "value": v})
         rb_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         runbook_payload = _build_runbook_payload(
-            workspace=ws,
-            slx_name=slx_name,
             runner_uuid=location,
             code_bundle_repo_url=RB_CODE_BUNDLE["repoUrl"],
             code_bundle_ref=codebundle_ref or RB_CODE_BUNDLE["ref"],
