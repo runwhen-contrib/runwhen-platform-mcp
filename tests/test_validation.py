@@ -11,7 +11,10 @@ from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
+    _form_persona_full_name,
+    _persona_short_name,
     _resolve_script,
+    _validate_assistant_name,
     _validate_runtime_vars,
     _validate_script,
     _validate_slx_name,
@@ -233,6 +236,56 @@ class TestValidateSlxName:
             _validate_slx_name("my.slx")
 
 
+class TestValidateAssistantName:
+    """Tests for _validate_assistant_name (persona short names)."""
+
+    def test_valid_names(self) -> None:
+        for name in ("azure-devops", "sre", "team-backend-1", "a1"):
+            _validate_assistant_name(name)
+
+    def test_empty_name_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_assistant_name("")
+
+    def test_too_long_rejected(self) -> None:
+        with pytest.raises(ValueError, match="max allowed is 63"):
+            _validate_assistant_name("a" * 64)
+
+    def test_exactly_63_chars_allowed(self) -> None:
+        _validate_assistant_name("a" * 63)
+
+    def test_uppercase_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_assistant_name("Azure-DevOps")
+
+    def test_double_hyphen_rejected(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            _validate_assistant_name("azure--devops")
+
+    def test_leading_hyphen_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_assistant_name("-azure")
+
+
+class TestPersonaNameHelpers:
+    """Tests for persona full-name / short-name conversion."""
+
+    def test_form_full_name_adds_prefix(self) -> None:
+        assert _form_persona_full_name("t-oncall", "azure-devops") == "t-oncall--azure-devops"
+
+    def test_form_full_name_idempotent_when_prefixed(self) -> None:
+        assert (
+            _form_persona_full_name("t-oncall", "t-oncall--azure-devops")
+            == "t-oncall--azure-devops"
+        )
+
+    def test_short_name_strips_prefix(self) -> None:
+        assert _persona_short_name("t-oncall", "t-oncall--azure-devops") == "azure-devops"
+
+    def test_short_name_passthrough_when_unprefixed(self) -> None:
+        assert _persona_short_name("t-oncall", "azure-devops") == "azure-devops"
+
+
 class TestWriteToolsCompleteness:
     """Ensure WRITE_TOOLS includes all mutating tool names."""
 
@@ -247,6 +300,9 @@ class TestWriteToolsCompleteness:
         "update_chat_rule",
         "create_chat_command",
         "update_chat_command",
+        "create_assistant",
+        "update_assistant",
+        "delete_assistant",
         "create_knowledge_base_article",
         "update_knowledge_base_article",
         "delete_knowledge_base_article",

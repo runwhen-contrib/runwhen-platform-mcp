@@ -23,6 +23,11 @@ EXPECTED_TOOLS = {
     "get_chat_command",
     "create_chat_command",
     "update_chat_command",
+    "list_assistants",
+    "get_assistant",
+    "create_assistant",
+    "update_assistant",
+    "delete_assistant",
     "get_workspace_issues",
     "get_workspace_slxs",
     "get_run_sessions",
@@ -109,6 +114,8 @@ def test_tool_names_are_snake_case(tools) -> None:
         "commit_slx",
         "delete_slx",
         "validate_script",
+        "create_assistant",
+        "update_assistant",
     ],
 )
 def test_key_tools_have_parameters(tools, tool_name) -> None:

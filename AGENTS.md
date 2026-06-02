@@ -44,6 +44,7 @@ RunWhen UI (e.g. to run tasks from the chat).
 | Task authoring | `validate_script`, `run_script_and_wait`, `commit_slx`, `delete_slx` |
 | Registry | `search_registry`, `get_registry_codebundle`, `deploy_registry_codebundle` |
 | Chat config CRUD | `list/get/create/update_chat_rule`, `list/get/create/update_chat_command` |
+| AI assistant (persona) CRUD | `list/get/create/update/delete_assistant` |
 | KB mutations | `create/update/delete_knowledge_base_article` |
 | Workspace discovery | `list_workspaces` |
 | Runner config | `get_workspace_secrets`, `get_workspace_locations` (location auto-resolves; only needed for multi-runner disambiguation) |
@@ -74,6 +75,7 @@ to interact with the platform — do not attempt to call APIs directly.
 | `get_workspace_chat_config` | Get resolved chat rules and commands for a workspace (metadata only) |
 | `list_chat_rules`, `get_chat_rule`, `create_chat_rule`, `update_chat_rule` | List, get, create, update workspace chat rules |
 | `list_chat_commands`, `get_chat_command`, `create_chat_command`, `update_chat_command` | List, get, create, update workspace chat commands (slash-commands) |
+| `list_assistants`, `get_assistant`, `create_assistant`, `update_assistant`, `delete_assistant` | List, get, create, update, delete AI assistants (personas). An assistant's `short_name` is the `persona_name` for `workspace_chat`. Tailor it with `scope_type="persona"` rules/commands. |
 | `get_workspace_issues` | Raw JSON: current issues (prefer `workspace_chat` for search/investigation) |
 | `get_workspace_slxs` | Raw JSON: list SLXs (prefer `workspace_chat` for search/investigation) |
 | `get_run_sessions` | Raw JSON: recent run sessions (prefer `workspace_chat` for search/investigation) |

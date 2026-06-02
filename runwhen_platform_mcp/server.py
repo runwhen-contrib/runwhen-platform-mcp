@@ -1908,6 +1908,344 @@ async def update_chat_command(
         return _json_response({"error": str(e)})
 
 
+# ---------------------------------------------------------------------------
+# AI Assistants (personas)
+#
+# An "AI Assistant" / "Agent" is a *persona* in the RunWhen platform. The
+# ``short_name`` of an assistant is exactly the value you pass as
+# ``persona_name`` to ``workspace_chat``. Assistants are human-managed (never
+# touched by the upload/sync pipeline), so writes here persist directly.
+#
+# Tailor an assistant's behavior by attaching persona-scoped chat rules and
+# commands: call ``create_chat_rule`` / ``create_chat_command`` with
+# ``scope_type="persona"`` and ``scope_id=<short_name>``.
+# ---------------------------------------------------------------------------
+
+_ASSISTANT_NAME_MAX_LEN = 63
+_ASSISTANT_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+
+def _validate_assistant_name(short_name: str) -> None:
+    """Validate an assistant (persona) short name.
+
+    Raises ``ValueError`` with a user-friendly message when invalid. Rules:
+      - non-empty
+      - max 63 characters
+      - lowercase kebab-case (a-z, 0-9, interior hyphens)
+      - no leading/trailing hyphens, no consecutive hyphens (``--`` is the
+        reserved workspace/persona separator)
+    """
+    if not short_name:
+        raise ValueError("Assistant short_name must not be empty.")
+    if len(short_name) > _ASSISTANT_NAME_MAX_LEN:
+        raise ValueError(
+            f"Assistant short_name is {len(short_name)} characters — "
+            f"max allowed is {_ASSISTANT_NAME_MAX_LEN}. Shorten it and try again."
+        )
+    if "--" in short_name:
+        raise ValueError(
+            f"Invalid assistant short_name: {short_name!r}. "
+            "Consecutive hyphens ('--') are reserved for the workspace--persona separator."
+        )
+    if not _ASSISTANT_NAME_RE.match(short_name):
+        raise ValueError(
+            f"Invalid assistant short_name: {short_name!r}. "
+            "Use lowercase kebab-case (a-z, 0-9, hyphens), starting and ending "
+            "with an alphanumeric character."
+        )
+
+
+def _form_persona_full_name(workspace: str, short_name: str) -> str:
+    """Build the platform's full persona name: ``{workspace}--{short_name}``.
+
+    Accepts a value that is already fully-qualified for this workspace and
+    returns it unchanged.
+    """
+    prefix = f"{workspace}--"
+    if short_name.startswith(prefix):
+        return short_name
+    return f"{workspace}{'--'}{short_name}"
+
+
+def _persona_short_name(workspace: str, name: str) -> str:
+    """Strip the ``{workspace}--`` prefix from a persona name, if present."""
+    prefix = f"{workspace}--"
+    return name[len(prefix) :] if name.startswith(prefix) else name
+
+
+def _build_persona_payload(
+    *,
+    full_name: str,
+    description: str | None,
+    display_name: str | None,
+    avatar_url: str | None,
+    filter_confidence_threshold: float,
+    filter_issue_selection_strategy: str,
+    filter_codebundle_task_tags: list[str] | None,
+    filter_stop_words: list[str] | None,
+    filter_scope: str | None,
+    search_filters: dict[str, Any] | None,
+    run_confidence_threshold: float,
+    run_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Assemble a camelCase persona payload for the v4 sync-typed endpoint.
+
+    The sync endpoint performs a *full* upsert — any field omitted here is
+    reset to its schema default. Callers that want partial-update semantics
+    must merge over the existing persona first (see ``update_assistant``).
+    """
+    workspace_prefix = full_name.split("--", 1)[0]
+    return {
+        "name": full_name,
+        "description": description or "",
+        "fullName": display_name or _persona_short_name(workspace_prefix, full_name),
+        "avatarUrl": avatar_url,
+        "filterConfidenceThreshold": filter_confidence_threshold,
+        "filterIssueSelectionStrategy": filter_issue_selection_strategy,
+        "filterCodebundleTaskTags": filter_codebundle_task_tags or [],
+        "filterStopWords": filter_stop_words or [],
+        "filterScope": filter_scope,
+        "searchFilters": search_filters or {},
+        "runConfidenceThreshold": run_confidence_threshold,
+        "runConfig": run_config or {},
+    }
+
+
+@mcp.tool()
+async def list_assistants(
+    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
+) -> str:
+    """List AI assistants (personas) configured in a workspace.
+
+    An assistant is a persona — its ``shortName`` is the value you pass as
+    ``persona_name`` to ``workspace_chat``. Use this to discover which
+    assistants already exist before creating a new one.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        data = await _papi_get(f"/api/v4/workspaces/{ws}/personas")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def get_assistant(
+    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
+    assistant_name: str = Field(
+        description="Assistant short name (e.g. 'azure-devops'). Workspace prefix optional."
+    ),
+) -> str:
+    """Get a single AI assistant (persona) by its short name (full config)."""
+    ws = await _resolve_workspace(workspace_name)
+    short = _persona_short_name(ws, assistant_name)
+    try:
+        data = await _papi_get(f"/api/v4/workspaces/{ws}/personas/{short}")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def create_assistant(
+    workspace_name: str = Field(description="The workspace to create the assistant in."),
+    short_name: str = Field(
+        description="Assistant short name (lowercase-kebab-case, e.g. 'azure-devops'). "
+        "This is the value you pass as persona_name to workspace_chat."
+    ),
+    display_name: str = Field(
+        default="", description="Human-readable display name (e.g. 'Azure DevOps Helper')."
+    ),
+    description: str = Field(
+        default="", description="What this assistant specializes in (e.g. tech stack, team)."
+    ),
+    avatar_url: Annotated[
+        str | None,
+        Field(description="Optional avatar image URL (e.g. '/personas/Man1-Happy.svg')."),
+    ] = None,
+    filter_codebundle_task_tags: Annotated[
+        list[str] | None,
+        Field(
+            description="Only surface tasks tagged with these (e.g. ['azure', 'devops']). "
+            "Empty/omitted means no tag filter."
+        ),
+    ] = None,
+    filter_stop_words: Annotated[
+        list[str] | None,
+        Field(description="Words stripped from search queries before matching."),
+    ] = None,
+    filter_scope: Annotated[
+        str | None, Field(description="Optional scope filter for results (advanced).")
+    ] = None,
+    search_filters: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Vector-search filter operators "
+            "(e.g. {'codebundleTaskTags': ['kubernetes'], 'slxGroup': ['my-group']})."
+        ),
+    ] = None,
+    filter_confidence_threshold: float = Field(
+        default=0.5, description="Confidence threshold for filtering results (0-1)."
+    ),
+    filter_issue_selection_strategy: str = Field(
+        default="MOST_SEVERE", description="Issue selection strategy (e.g. 'MOST_SEVERE')."
+    ),
+    run_confidence_threshold: float = Field(
+        default=0.95, description="Confidence threshold for automatic task runs (0-1)."
+    ),
+    run_config: Annotated[
+        dict[str, Any] | None,
+        Field(description="Run configuration: allow/disallow/budget settings (advanced)."),
+    ] = None,
+) -> str:
+    """Create a new AI assistant (persona) in a workspace.
+
+    An assistant is a persona that tailors how the RunWhen AI investigates and
+    acts — e.g. an "Azure DevOps Helper" focused on a specific tech stack. The
+    ``short_name`` you choose becomes the ``persona_name`` for ``workspace_chat``.
+
+    After creating the assistant, shape its behavior by attaching
+    persona-scoped rules and commands:
+
+        create_chat_rule(scope_type="persona", scope_id=short_name, ...)
+        create_chat_command(scope_type="persona", scope_id=short_name, ...)
+
+    This is an UPSERT — calling it again with an existing short_name REPLACES
+    the assistant's full configuration (omitted fields reset to defaults). To
+    change a few fields on an existing assistant, use ``update_assistant``.
+    """
+    try:
+        _validate_assistant_name(short_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
+    ws = await _resolve_workspace(workspace_name)
+    full_name = _form_persona_full_name(ws, short_name)
+
+    payload = _build_persona_payload(
+        full_name=full_name,
+        description=description,
+        display_name=display_name or short_name,
+        avatar_url=avatar_url,
+        filter_confidence_threshold=filter_confidence_threshold,
+        filter_issue_selection_strategy=filter_issue_selection_strategy,
+        filter_codebundle_task_tags=filter_codebundle_task_tags,
+        filter_stop_words=filter_stop_words,
+        filter_scope=filter_scope,
+        search_filters=search_filters,
+        run_confidence_threshold=run_confidence_threshold,
+        run_config=run_config,
+    )
+    try:
+        _, data = await _papi_post(
+            f"/api/v4/workspaces/{ws}/personas/sync-typed", {"payload": payload}
+        )
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def update_assistant(
+    workspace_name: str = Field(description="The workspace the assistant belongs to."),
+    assistant_name: str = Field(
+        description="Assistant short name to update (e.g. 'azure-devops')."
+    ),
+    display_name: Annotated[str | None, Field(description="New display name.")] = None,
+    description: Annotated[str | None, Field(description="New description.")] = None,
+    avatar_url: Annotated[str | None, Field(description="New avatar image URL.")] = None,
+    filter_codebundle_task_tags: Annotated[
+        list[str] | None, Field(description="Replace the task-tag filter list.")
+    ] = None,
+    filter_stop_words: Annotated[
+        list[str] | None, Field(description="Replace the stop-words list.")
+    ] = None,
+    filter_scope: Annotated[str | None, Field(description="New scope filter.")] = None,
+    search_filters: Annotated[
+        dict[str, Any] | None, Field(description="Replace the vector-search filters.")
+    ] = None,
+    filter_confidence_threshold: Annotated[
+        float | None, Field(description="New filter confidence threshold (0-1).")
+    ] = None,
+    filter_issue_selection_strategy: Annotated[
+        str | None, Field(description="New issue selection strategy.")
+    ] = None,
+    run_confidence_threshold: Annotated[
+        float | None, Field(description="New run confidence threshold (0-1).")
+    ] = None,
+    run_config: Annotated[
+        dict[str, Any] | None, Field(description="Replace the run configuration.")
+    ] = None,
+) -> str:
+    """Partially update an existing AI assistant (persona).
+
+    Fetches the current configuration, applies only the fields you provide
+    (leaving everything else intact), then writes the merged result back.
+    Use this instead of ``create_assistant`` when you only want to change a
+    few settings without resetting the rest.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    short = _persona_short_name(ws, assistant_name)
+    try:
+        existing = await _papi_get(f"/api/v4/workspaces/{ws}/personas/{short}")
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+    def _pick(override: Any, key: str, default: Any) -> Any:
+        if override is not None:
+            return override
+        return existing.get(key, default)
+
+    payload = {
+        "name": existing.get("name") or _form_persona_full_name(ws, short),
+        "description": _pick(description, "description", "") or "",
+        "fullName": _pick(display_name, "fullName", short),
+        "avatarUrl": _pick(avatar_url, "avatarUrl", None),
+        "filterConfidenceThreshold": _pick(
+            filter_confidence_threshold, "filterConfidenceThreshold", 0.5
+        ),
+        "filterIssueSelectionStrategy": _pick(
+            filter_issue_selection_strategy, "filterIssueSelectionStrategy", "MOST_SEVERE"
+        ),
+        "filterCodebundleTaskTags": _pick(
+            filter_codebundle_task_tags, "filterCodebundleTaskTags", []
+        ),
+        "filterStopWords": _pick(filter_stop_words, "filterStopWords", []),
+        "filterScope": _pick(filter_scope, "filterScope", None),
+        "searchFilters": _pick(search_filters, "searchFilters", {}),
+        "runConfidenceThreshold": _pick(run_confidence_threshold, "runConfidenceThreshold", 0.95),
+        "runConfig": _pick(run_config, "runConfig", {}),
+    }
+    try:
+        _, data = await _papi_post(
+            f"/api/v4/workspaces/{ws}/personas/sync-typed", {"payload": payload}
+        )
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def delete_assistant(
+    workspace_name: str = Field(description="The workspace the assistant belongs to."),
+    assistant_name: str = Field(
+        description="Assistant short name to delete (e.g. 'azure-devops')."
+    ),
+) -> str:
+    """Delete (soft-delete) an AI assistant (persona) from a workspace.
+
+    Persona-scoped rules and commands attached to this assistant are not
+    removed automatically — clean them up separately if no longer needed.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    short = _persona_short_name(ws, assistant_name)
+    try:
+        _, data = await _papi_delete(f"/api/v4/workspaces/{ws}/personas/{short}")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
 @mcp.tool()
 async def get_workspace_issues(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
