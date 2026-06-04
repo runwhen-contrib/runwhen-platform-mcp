@@ -2123,6 +2123,13 @@ def _persona_short_name(workspace: str, name: str) -> str:
     return name[len(prefix) :] if name.startswith(prefix) else name
 
 
+def _resolve_assistant_short_name(workspace: str, assistant_name: str) -> str:
+    """Normalize *assistant_name* and validate before embedding in a PAPI path."""
+    short = _persona_short_name(workspace, assistant_name)
+    _validate_assistant_name(short)
+    return short
+
+
 def _build_persona_payload(
     *,
     full_name: str,
@@ -2188,7 +2195,10 @@ async def get_assistant(
 ) -> str:
     """Get a single AI assistant (persona) by its short name (full config)."""
     ws = await _resolve_workspace(workspace_name)
-    short = _persona_short_name(ws, assistant_name)
+    try:
+        short = _resolve_assistant_short_name(ws, assistant_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
     try:
         data = await _papi_get(f"/api/v4/workspaces/{ws}/personas/{short}")
         return _json_response(data)
@@ -2266,9 +2276,8 @@ async def create_assistant(
     change a few fields on an existing assistant, use ``update_assistant``.
     """
     ws = await _resolve_workspace(workspace_name)
-    short = _persona_short_name(ws, short_name)
     try:
-        _validate_assistant_name(short)
+        short = _resolve_assistant_short_name(ws, short_name)
     except ValueError as exc:
         return _json_response({"error": str(exc)})
 
@@ -2301,7 +2310,8 @@ async def create_assistant(
 async def update_assistant(
     workspace_name: str = Field(description="The workspace the assistant belongs to."),
     assistant_name: str = Field(
-        description="Assistant short name to update (e.g. 'azure-devops')."
+        description="Assistant short name to update (e.g. 'azure-devops'). "
+        "Workspace prefix optional."
     ),
     display_name: Annotated[str | None, Field(description="New display name.")] = None,
     description: Annotated[str | None, Field(description="New description.")] = None,
@@ -2337,7 +2347,10 @@ async def update_assistant(
     few settings without resetting the rest.
     """
     ws = await _resolve_workspace(workspace_name)
-    short = _persona_short_name(ws, assistant_name)
+    try:
+        short = _resolve_assistant_short_name(ws, assistant_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
     try:
         existing = await _papi_get(f"/api/v4/workspaces/{ws}/personas/{short}")
     except (ValueError, httpx.HTTPStatusError) as e:
@@ -2381,7 +2394,8 @@ async def update_assistant(
 async def delete_assistant(
     workspace_name: str = Field(description="The workspace the assistant belongs to."),
     assistant_name: str = Field(
-        description="Assistant short name to delete (e.g. 'azure-devops')."
+        description="Assistant short name to delete (e.g. 'azure-devops'). "
+        "Workspace prefix optional."
     ),
 ) -> str:
     """Delete (soft-delete) an AI assistant (persona) from a workspace.
@@ -2390,7 +2404,10 @@ async def delete_assistant(
     removed automatically — clean them up separately if no longer needed.
     """
     ws = await _resolve_workspace(workspace_name)
-    short = _persona_short_name(ws, assistant_name)
+    try:
+        short = _resolve_assistant_short_name(ws, assistant_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
     try:
         _, data = await _papi_delete(f"/api/v4/workspaces/{ws}/personas/{short}")
         return _json_response(data)

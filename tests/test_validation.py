@@ -13,6 +13,7 @@ from runwhen_platform_mcp.server import (
     _extract_env_vars,
     _form_persona_full_name,
     _persona_short_name,
+    _resolve_assistant_short_name,
     _resolve_script,
     _validate_assistant_name,
     _validate_runtime_vars,
@@ -286,11 +287,18 @@ class TestPersonaNameHelpers:
         assert _persona_short_name("t-oncall", "azure-devops") == "azure-devops"
 
     def test_prefixed_name_valid_after_strip(self) -> None:
-        """create_assistant strips workspace prefix before -- validation."""
+        """Assistant tools strip workspace prefix before -- validation."""
         ws = "t-oncall"
-        short = _persona_short_name(ws, "t-oncall--azure-devops")
-        _validate_assistant_name(short)
-        assert _form_persona_full_name(ws, short) == "t-oncall--azure-devops"
+        assert _resolve_assistant_short_name(ws, "t-oncall--azure-devops") == "azure-devops"
+        assert _form_persona_full_name(ws, "azure-devops") == "t-oncall--azure-devops"
+
+    def test_resolve_rejects_path_traversal_segments(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _resolve_assistant_short_name("t-oncall", "..")
+
+    def test_resolve_rejects_unprefixed_double_hyphen(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            _resolve_assistant_short_name("t-oncall", "other--azure-devops")
 
 
 class TestWriteToolsCompleteness:
