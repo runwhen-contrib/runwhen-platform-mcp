@@ -2201,6 +2201,7 @@ async def create_assistant(
     workspace_name: str = Field(description="The workspace to create the assistant in."),
     short_name: str = Field(
         description="Assistant short name (lowercase-kebab-case, e.g. 'azure-devops'). "
+        "Workspace prefix optional (e.g. 'my-ws--azure-devops'). "
         "This is the value you pass as persona_name to workspace_chat."
     ),
     display_name: str = Field(
@@ -2264,18 +2265,19 @@ async def create_assistant(
     the assistant's full configuration (omitted fields reset to defaults). To
     change a few fields on an existing assistant, use ``update_assistant``.
     """
+    ws = await _resolve_workspace(workspace_name)
+    short = _persona_short_name(ws, short_name)
     try:
-        _validate_assistant_name(short_name)
+        _validate_assistant_name(short)
     except ValueError as exc:
         return _json_response({"error": str(exc)})
 
-    ws = await _resolve_workspace(workspace_name)
-    full_name = _form_persona_full_name(ws, short_name)
+    full_name = _form_persona_full_name(ws, short)
 
     payload = _build_persona_payload(
         full_name=full_name,
         description=description,
-        display_name=display_name or short_name,
+        display_name=display_name or short,
         avatar_url=avatar_url,
         filter_confidence_threshold=filter_confidence_threshold,
         filter_issue_selection_strategy=filter_issue_selection_strategy,

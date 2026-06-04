@@ -285,6 +285,13 @@ class TestPersonaNameHelpers:
     def test_short_name_passthrough_when_unprefixed(self) -> None:
         assert _persona_short_name("t-oncall", "azure-devops") == "azure-devops"
 
+    def test_prefixed_name_valid_after_strip(self) -> None:
+        """create_assistant strips workspace prefix before -- validation."""
+        ws = "t-oncall"
+        short = _persona_short_name(ws, "t-oncall--azure-devops")
+        _validate_assistant_name(short)
+        assert _form_persona_full_name(ws, short) == "t-oncall--azure-devops"
+
 
 class TestWriteToolsCompleteness:
     """Ensure WRITE_TOOLS includes all mutating tool names."""
