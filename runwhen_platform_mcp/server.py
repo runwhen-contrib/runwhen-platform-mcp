@@ -727,7 +727,18 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
             f"PAPI returned 403 Forbidden for {path}. "
             "You may not have access to this workspace or resource."
         )
-    resp.raise_for_status()
+    if resp.is_error:
+        # RW-706 strict-sync rejections return JSON like
+        # {"detail": ..., "unknown_keys": [...], "model": ...} — surface
+        # that body so the caller can see *why* the request failed instead
+        # of just the HTTP status.
+        try:
+            body_excerpt = json.dumps(resp.json())[:1000]
+        except (json.JSONDecodeError, ValueError):
+            body_excerpt = resp.text[:1000]
+        raise ValueError(
+            f"PAPI returned {resp.status_code} for {path}: {body_excerpt}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -929,9 +940,9 @@ async def _get_authorized_locations(workspace: str) -> list[dict[str, Any]]:
     except Exception:
         pass
 
-    # Fallback: try the platform-wide /api/v3/locations endpoint (PAPI v2)
+    # Fallback: try the platform-wide /api/v3/runners endpoint (CRD-less)
     try:
-        data = await _papi_get("/api/v3/locations")
+        data = await _papi_get("/api/v3/runners")
         results = data.get("results", []) if isinstance(data, dict) else []
         if results:
             return [
@@ -1341,6 +1352,147 @@ def _build_cron_sli_yaml(
         "spec": spec,
     }
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
+
+
+# ---------------------------------------------------------------------------
+# CRD-less sync payload builders (POST /api/v1/workspaces/{ws}/*s/sync)
+# ---------------------------------------------------------------------------
+
+
+def _build_slx_payload(
+    workspace: str,
+    slx_name: str,
+    alias: str,
+    statement: str,
+    owners: list[str],
+    tags: list[dict[str, str]] | None = None,
+    image_url: str | None = None,
+    access: str = "read-write",
+    data: str = "logs-bulk",
+    additional_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build SLX sync payload for POST /api/v1/workspaces/{ws}/slxs/sync."""
+    return {
+        "name": f"{workspace}--{slx_name}",
+        "alias": alias,
+        "statement": statement,
+        "owners": owners,
+        "tags": _ensure_required_tags(tags, access, data),
+        "image_url": image_url or GENERIC_SLX_ICON,
+        "additional_context": additional_context or {},
+    }
+
+
+def _build_runbook_payload(
+    runner_uuid: str,
+    code_bundle_repo_url: str,
+    code_bundle_ref: str,
+    code_bundle_path: str,
+    config_provided: list[dict[str, Any]],
+    secrets_provided: list[dict] | None = None,
+    runtime_vars: list[dict] | None = None,
+) -> dict[str, Any]:
+    """Build Runbook sync payload for POST /api/v1/workspaces/{ws}/runbooks/sync.
+
+    slx_id is injected by _sync_slx_resources after the SLX sync completes —
+    RunbookModel is keyed by slx_id (1-to-1 with SLX), so the payload has no
+    `name` column. RW-706 strict-validates and rejects unknown top-level keys.
+    """
+    payload: dict[str, Any] = {
+        "runner_uuid": runner_uuid,
+        "code_bundle_repo_url": code_bundle_repo_url,
+        "code_bundle_ref": code_bundle_ref,
+        "code_bundle_path": code_bundle_path,
+        "config_provided": config_provided,
+        "secrets_provided": secrets_provided or [],
+        "requirements": {},
+    }
+    if runtime_vars:
+        payload["runtime_vars_provided"] = runtime_vars
+    return payload
+
+
+def _build_sli_payload(
+    runner_uuid: str,
+    code_bundle_repo_url: str,
+    code_bundle_ref: str,
+    code_bundle_path: str,
+    config_provided: list[dict[str, Any]],
+    secrets_provided: list[dict] | None = None,
+    interval_seconds: int = 300,
+    description: str | None = None,
+) -> dict[str, Any]:
+    """Build SLI sync payload for POST /api/v1/workspaces/{ws}/slis/sync.
+
+    slx_id is injected by _sync_slx_resources after the SLX sync completes.
+    """
+    payload: dict[str, Any] = {
+        "runner_uuid": runner_uuid,
+        "display_units_long": "OK",
+        "display_units_short": "ok",
+        "interval_seconds": interval_seconds,
+        "interval_strategy": "intermezzo",
+        "code_bundle_repo_url": code_bundle_repo_url,
+        "code_bundle_ref": code_bundle_ref,
+        "code_bundle_path": code_bundle_path,
+        "config_provided": config_provided,
+        "secrets_provided": secrets_provided or [],
+        "alert_config": {"tasks": {"persona": "eager-edgar", "sessionTTL": "10m"}},
+    }
+    if description:
+        payload["description"] = description
+    return payload
+
+
+async def _sync_slx_resources(
+    ws: str,
+    slx_name: str,
+    slx_payload: dict[str, Any],
+    runbook_payload: dict[str, Any] | None = None,
+    sli_payload: dict[str, Any] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    """Upsert SLX and its child resources via the CRD-less sync endpoints.
+
+    Syncs the SLX first, injects the returned resource_id as slx_id into
+    the runbook/SLI payloads, then syncs each child in order.
+
+    Returns (overall_status_code, combined_response_dict).
+    """
+    slx_status, slx_data = await _papi_post(
+        f"/api/v1/workspaces/{ws}/slxs/sync",
+        {"payload": slx_payload},
+    )
+    if slx_status not in (200, 201):
+        return slx_status, slx_data
+
+    slx_id = slx_data.get("resource_id")
+    if slx_id is None:
+        return 500, {"error": "SLX sync did not return resource_id"}
+
+    overall_status = slx_status
+    response: dict[str, Any] = {"slx": slx_data}
+
+    if runbook_payload is not None:
+        runbook_payload["slx_id"] = slx_id
+        rb_status, rb_data = await _papi_post(
+            f"/api/v1/workspaces/{ws}/runbooks/sync",
+            {"payload": runbook_payload},
+        )
+        response["runbook"] = rb_data
+        if rb_status not in (200, 201):
+            overall_status = rb_status
+
+    if sli_payload is not None:
+        sli_payload["slx_id"] = slx_id
+        sli_status, sli_data = await _papi_post(
+            f"/api/v1/workspaces/{ws}/slis/sync",
+            {"payload": sli_payload},
+        )
+        response["sli"] = sli_data
+        if sli_status not in (200, 201) and overall_status in (200, 201):
+            overall_status = sli_status
+
+    return overall_status, response
 
 
 # ---------------------------------------------------------------------------
@@ -2428,7 +2580,7 @@ async def deploy_registry_codebundle(
         if hierarchy:
             additional_context["hierarchy"] = hierarchy
 
-    slx_yaml = _build_slx_yaml(
+    slx_payload = _build_slx_payload(
         workspace=ws,
         slx_name=slx_name,
         alias=alias,
@@ -2441,49 +2593,45 @@ async def deploy_registry_codebundle(
         additional_context=additional_context,
     )
 
-    files: dict[str, str] = {"slx.yaml": slx_yaml}
     committed_types: list[str] = []
+    runbook_payload: dict[str, Any] | None = None
+    sli_payload: dict[str, Any] | None = None
+
+    config_provided = [{"name": k, "value": v} for k, v in (config_vars or {}).items()]
+    secrets_provided = [{"name": k, "workspaceKey": v} for k, v in (secret_vars or {}).items()]
 
     if deploy_runbook:
-        files["runbook.yaml"] = _build_registry_runbook_yaml(
-            workspace=ws,
-            slx_name=slx_name,
-            repo_url=git_url,
-            path_to_robot=f"{cb_path}/runbook.robot",
-            location=location,
-            config_vars=config_vars,
-            secret_vars=secret_vars,
-            ref=ref,
+        runbook_payload = _build_runbook_payload(
+            runner_uuid=location,
+            code_bundle_repo_url=git_url,
+            code_bundle_ref=ref,
+            code_bundle_path=f"{cb_path}/runbook.robot",
+            config_provided=config_provided,
+            secrets_provided=secrets_provided,
         )
         committed_types.append("runbook")
 
     if deploy_sli:
-        files["sli.yaml"] = _build_registry_sli_yaml(
-            workspace=ws,
-            slx_name=slx_name,
-            repo_url=git_url,
-            path_to_robot=f"{cb_path}/sli.robot",
-            location=location,
-            config_vars=config_vars,
-            secret_vars=secret_vars,
-            ref=ref,
+        sli_payload = _build_sli_payload(
+            runner_uuid=location,
+            code_bundle_repo_url=git_url,
+            code_bundle_ref=ref,
+            code_bundle_path=f"{cb_path}/sli.robot",
+            config_provided=config_provided,
+            secrets_provided=secrets_provided,
             interval_seconds=sli_interval_seconds,
-            description=sli_description,
+            description=sli_description or None,
         )
         committed_types.append("sli")
 
     type_label = " + ".join(committed_types)
-    if not commit_message:
-        commit_message = f"Deploy registry codebundle {type_label}: {alias}"
 
-    body = {
-        "commit_msg": commit_message,
-        "files": files,
-    }
-
-    status_code, resp_data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
-        body,
+    status_code, resp_data = await _sync_slx_resources(
+        ws=ws,
+        slx_name=slx_name,
+        slx_payload=slx_payload,
+        runbook_payload=runbook_payload,
+        sli_payload=sli_payload,
     )
 
     success = status_code in (200, 201)
@@ -2491,11 +2639,9 @@ async def deploy_registry_codebundle(
         "status": "deployed" if success else f"error_{status_code}",
         "slx_name": slx_name,
         "workspace": ws,
-        "branch": branch,
         "repo_url": git_url,
         "codebundle_path": cb_path,
         "ref": ref,
-        "committed_files": list(files.keys()),
         "committed_types": type_label,
         "config_vars": config_vars or {},
         "response": resp_data,
@@ -2928,8 +3074,17 @@ async def run_script_and_wait(
     - Bash task: define main() writing issue JSON array to FD 3 (>&3).
     - Bash SLI: define main() writing a metric float to FD 3.
 
-    Secret vars are injected as env vars pointing to file paths on the runner.
-    For kubeconfig: set KUBECONFIG = os.environ["kubeconfig"].
+    Bash scripts must NOT include `main "$@"` at the bottom. The runner
+    sources the script and invokes `main()` itself with FD 3 wired to a
+    run_output.json file. A trailing `main "$@"` triggers a preflight
+    invocation with FD 3 read-only and produces misleading "Bad file
+    descriptor" errors.
+
+    `secret_vars` entries are injected as env vars whose VALUE is a FILE
+    PATH on the runner — not the secret value itself. kubectl/KUBECONFIG
+    and gcloud/GOOGLE_APPLICATION_CREDENTIALS work unchanged. For tokens/
+    passwords the script must `cat "$VAR"` (bash) or
+    `open(os.environ["VAR"]).read()` (python) to get the actual value.
     """
     try:
         script = _resolve_script(script, script_path, script_base64)
@@ -3237,6 +3392,21 @@ async def commit_slx(
     2. Cron-scheduler SLI: set task_type="task" and provide cron_schedule with
        a cron expression (e.g. "0 */2 * * *"). The SLI will trigger the task's
        runbook on that schedule.
+
+    Script-content contract (the two most common footguns):
+
+    - Bash scripts must NOT include `main "$@"` at the bottom. The runner
+      sources the script and invokes `main()` itself with FD 3 wired to a
+      run_output.json file. A trailing `main "$@"` triggers a preflight
+      invocation with FD 3 read-only, producing misleading "Bad file
+      descriptor" errors. Just define `main()` and stop there.
+
+    - `secret_vars` entries are injected at runtime as env vars whose VALUE
+      is a FILE PATH on the runner — not the secret value itself. Tools
+      that read paths natively (kubectl/KUBECONFIG, gcloud/
+      GOOGLE_APPLICATION_CREDENTIALS) work unchanged. For tokens/passwords
+      the script must `cat "$VAR"` (bash) or `open(os.environ["VAR"]).read()`
+      (python) to get the actual value.
     """
     try:
         _validate_slx_name(slx_name)
@@ -3334,7 +3504,7 @@ async def commit_slx(
         if hierarchy:
             additional_context["hierarchy"] = hierarchy
 
-    slx_yaml = _build_slx_yaml(
+    slx_payload = _build_slx_payload(
         workspace=ws,
         slx_name=slx_name,
         alias=alias,
@@ -3347,20 +3517,30 @@ async def commit_slx(
         additional_context=additional_context,
     )
 
-    files: dict[str, str] = {"slx.yaml": slx_yaml}
     committed_types: list[str] = []
+    runbook_payload: dict[str, Any] | None = None
+    sli_payload: dict[str, Any] | None = None
 
     if task_type == "task":
-        files["runbook.yaml"] = _build_runbook_yaml(
-            workspace=ws,
-            slx_name=slx_name,
-            script_b64=script_b64,
-            interpreter=interpreter,
-            task_title=task_title,
-            location=location,
-            env_vars=env_vars,
-            secret_vars=secret_vars,
-            codebundle_ref=codebundle_ref,
+        env_vars = env_vars or {}
+        secret_vars = secret_vars or {}
+        rb_config = [
+            {"name": "TASK_TITLE", "value": task_title},
+            {"name": "GEN_CMD", "value": script_b64},
+            {"name": "INTERPRETER", "value": interpreter},
+            {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)},
+            {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))},
+        ]
+        for k, v in env_vars.items():
+            rb_config.append({"name": k, "value": v})
+        rb_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
+        runbook_payload = _build_runbook_payload(
+            runner_uuid=location,
+            code_bundle_repo_url=RB_CODE_BUNDLE["repoUrl"],
+            code_bundle_ref=codebundle_ref or RB_CODE_BUNDLE["ref"],
+            code_bundle_path=RB_CODE_BUNDLE["pathToRobot"],
+            config_provided=rb_config,
+            secrets_provided=rb_secrets,
             runtime_vars=runtime_vars or [],
         )
         committed_types.append("task")
@@ -3368,55 +3548,71 @@ async def commit_slx(
         if sli_script:
             sli_b64 = base64.b64encode(sli_script.encode()).decode()
             sli_interp = sli_interpreter or interpreter
-            files["sli.yaml"] = _build_sli_yaml(
-                workspace=ws,
-                slx_name=slx_name,
-                script_b64=sli_b64,
-                interpreter=sli_interp,
-                location=location,
+            sli_config = [
+                {"name": "GEN_CMD", "value": sli_b64},
+                {"name": "INTERPRETER", "value": sli_interp},
+                {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)},
+                {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))},
+            ]
+            for k, v in env_vars.items():
+                sli_config.append({"name": k, "value": v})
+            sli_payload = _build_sli_payload(
+                runner_uuid=location,
+                code_bundle_repo_url=SLI_CODE_BUNDLE["repoUrl"],
+                code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
+                code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
+                config_provided=sli_config,
+                secrets_provided=rb_secrets,
                 interval_seconds=sli_interval_seconds,
-                env_vars=env_vars,
-                secret_vars=secret_vars,
-                codebundle_ref=codebundle_ref,
             )
             committed_types.append("sli (custom script)")
 
         elif cron_schedule:
-            files["sli.yaml"] = _build_cron_sli_yaml(
-                workspace=ws,
-                slx_name=slx_name,
-                location=location,
-                cron_schedule=cron_schedule,
+            cron_config = [
+                {"name": "CRON_SCHEDULE", "value": cron_schedule},
+                {"name": "DRY_RUN", "value": "false"},
+            ]
+            sli_payload = _build_sli_payload(
+                runner_uuid=location,
+                code_bundle_repo_url=CRON_SLI_CODE_BUNDLE["repoUrl"],
+                code_bundle_ref=CRON_SLI_CODE_BUNDLE["ref"],
+                code_bundle_path=CRON_SLI_CODE_BUNDLE["pathToRobot"],
+                config_provided=cron_config,
                 interval_seconds=sli_interval_seconds,
             )
             committed_types.append("sli (cron-scheduler)")
 
     elif task_type == "sli":
-        files["sli.yaml"] = _build_sli_yaml(
-            workspace=ws,
-            slx_name=slx_name,
-            script_b64=script_b64,
-            interpreter=interpreter,
-            location=location,
+        env_vars = env_vars or {}
+        secret_vars = secret_vars or {}
+        sli_config = [
+            {"name": "GEN_CMD", "value": script_b64},
+            {"name": "INTERPRETER", "value": interpreter},
+            {"name": "CONFIG_ENV_MAP", "value": json.dumps(env_vars)},
+            {"name": "SECRET_ENV_MAP", "value": json.dumps(list(secret_vars.keys()))},
+        ]
+        for k, v in env_vars.items():
+            sli_config.append({"name": k, "value": v})
+        sli_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
+        sli_payload = _build_sli_payload(
+            runner_uuid=location,
+            code_bundle_repo_url=SLI_CODE_BUNDLE["repoUrl"],
+            code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
+            code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
+            config_provided=sli_config,
+            secrets_provided=sli_secrets,
             interval_seconds=interval_seconds,
-            env_vars=env_vars,
-            secret_vars=secret_vars,
-            codebundle_ref=codebundle_ref,
         )
         committed_types.append("sli")
 
     type_label = " + ".join(committed_types)
-    if not commit_message:
-        commit_message = f"Add {type_label} SLX: {alias}"
 
-    body = {
-        "commit_msg": commit_message,
-        "files": files,
-    }
-
-    status_code, data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
-        body,
+    status_code, resp_data = await _sync_slx_resources(
+        ws=ws,
+        slx_name=slx_name,
+        slx_payload=slx_payload,
+        runbook_payload=runbook_payload,
+        sli_payload=sli_payload,
     )
 
     success = status_code in (200, 201)
@@ -3424,11 +3620,9 @@ async def commit_slx(
         "status": "committed" if success else f"error_{status_code}",
         "slx_name": slx_name,
         "workspace": ws,
-        "branch": branch,
         "codebundle_ref": codebundle_ref,
-        "committed_files": list(files.keys()),
         "committed_types": type_label,
-        "response": data,
+        "response": resp_data,
     }
     return _json_response(result)
 
@@ -3452,12 +3646,9 @@ async def delete_slx(
 
     ws = await _resolve_workspace(workspace_name)
 
-    if not commit_message:
-        commit_message = f"Remove SLX: {slx_name}"
-
     try:
         status_code, data = await _papi_delete(
-            f"/api/v3/workspaces/{ws}/branches/{branch}/slxs/{slx_name}",
+            f"/api/v1/workspaces/{ws}/slxs/{ws}--{slx_name}",
         )
     except (ValueError, httpx.HTTPStatusError) as exc:
         return _json_response({"error": f"Failed to delete SLX: {exc}"})
@@ -3466,7 +3657,6 @@ async def delete_slx(
         "status": "deleted" if status_code in (200, 204) else f"status_{status_code}",
         "slx_name": slx_name,
         "workspace": ws,
-        "branch": branch,
         "response": data,
     }
     return _json_response(result)
