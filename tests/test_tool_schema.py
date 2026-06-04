@@ -89,6 +89,17 @@ def test_all_expected_tools_registered(tools) -> None:
     assert not missing, f"Expected tools not registered: {missing}"
 
 
+def test_http_tool_functions_match_stdio_tools() -> None:
+    """HTTP mode registers tools only from _TOOL_FUNCTIONS — keep in sync with stdio."""
+    from runwhen_platform_mcp.server import _TOOL_FUNCTIONS
+
+    http_names = {fn.__name__ for fn in _TOOL_FUNCTIONS}
+    assert http_names == EXPECTED_TOOLS, (
+        f"HTTP _TOOL_FUNCTIONS out of sync with stdio tools. "
+        f"missing={EXPECTED_TOOLS - http_names}, extra={http_names - EXPECTED_TOOLS}"
+    )
+
+
 def test_no_unexpected_tools(tools) -> None:
     """Catch accidentally registered tools -- update EXPECTED_TOOLS."""
     registered = {t.name for t in tools}

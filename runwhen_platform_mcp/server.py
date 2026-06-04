@@ -736,9 +736,7 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
             body_excerpt = json.dumps(resp.json())[:1000]
         except (json.JSONDecodeError, ValueError):
             body_excerpt = resp.text[:1000]
-        raise ValueError(
-            f"PAPI returned {resp.status_code} for {path}: {body_excerpt}"
-        )
+        raise ValueError(f"PAPI returned {resp.status_code} for {path}: {body_excerpt}")
 
 
 # ---------------------------------------------------------------------------
@@ -4012,6 +4010,11 @@ _TOOL_FUNCTIONS = [
     get_chat_command,
     create_chat_command,
     update_chat_command,
+    list_assistants,
+    get_assistant,
+    create_assistant,
+    update_assistant,
+    delete_assistant,
     get_workspace_issues,
     get_workspace_slxs,
     get_run_sessions,
