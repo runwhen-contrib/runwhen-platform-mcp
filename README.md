@@ -383,7 +383,8 @@ The server exposes these tools, grouped by use case.
   - `update_chat_rule` — Update a rule by ID.
   - `list_chat_commands` — List chat commands (slash-commands).
   - `get_chat_command` — Get a command by ID (full content).
-  - `create_chat_command` — Create a command (name, commandContent, scopeType, scopeId).
+  - `create_chat_command` — Create a command (name, commandContent, scopeType, scopeId). Supports scheduling via `cron_schedule`, `sink_configs`, `run_as_user`, and `assistant_name`.
+  - `update_chat_command` — Update a command by ID (including schedule fields).
   - `update_chat_command` — Update a command by ID.
 
 - **AI assistants (personas)** (5 tools)

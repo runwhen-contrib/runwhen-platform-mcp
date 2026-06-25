@@ -1999,10 +1999,62 @@ async def create_chat_command(
         str | None, Field(description="Optional description for the command.")
     ] = None,
     is_active: bool = Field(default=True, description="Whether the command is active."),
+    cron_schedule: Annotated[
+        str | None,
+        Field(
+            description="Cron expression to run this command on a schedule (e.g. '0 8 * * 1-5'). "
+            "When set, also provide sink_configs, run_as_user, and assistant_name."
+        ),
+    ] = None,
+    sink_configs: Annotated[
+        list[dict] | None,
+        Field(
+            description=(
+                "Delivery targets when cron_schedule is set. Each entry: "
+                "{type: 'email'|'slack', mode: 'user'|'all-workspace-users'|"
+                "'channel'|'webhook', target: '...'}."
+            ),
+        ),
+    ] = None,
+    run_as_user: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Email of the user the scheduled session runs as. "
+                "Required when cron_schedule is set."
+            ),
+        ),
+    ] = None,
+    assistant_name: Annotated[
+        str | None,
+        Field(
+            description="Persona short name for scheduled runs (workspace prefix optional). "
+            "Required when cron_schedule is set; for persona-scoped commands must match scope_id."
+        ),
+    ] = None,
+    max_runs: Annotated[
+        int | None,
+        Field(description="Maximum scheduled runs before the schedule stops (omit for unlimited)."),
+    ] = None,
+    schedule_paused: Annotated[
+        bool | None,
+        Field(description="When true, the cron does not fire (independent of is_active)."),
+    ] = None,
+    auto_approve_readonly: Annotated[
+        bool | None,
+        Field(
+            description="When true, scheduled runs auto-approve read-only task execution "
+            "(write tasks still require approval)."
+        ),
+    ] = None,
 ) -> str:
     """Create a chat command (slash-command). Name must be alphanumeric, underscore, or hyphen only.
 
     Commands are invoked in chat as [/label](cmd://name).
+
+    To run a command on a schedule, set ``cron_schedule`` plus ``sink_configs``,
+    ``run_as_user``, and ``assistant_name``. Results are delivered to each sink
+    (email or Slack) when the cron fires.
     """
     ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {
@@ -2014,6 +2066,23 @@ async def create_chat_command(
     }
     if description is not None:
         body["description"] = description
+    if cron_schedule is not None:
+        body["cron_schedule"] = cron_schedule
+    if sink_configs is not None:
+        body["sink_configs"] = sink_configs
+    if run_as_user is not None:
+        body["run_as_user"] = run_as_user
+    if assistant_name is not None:
+        try:
+            body["assistant_name"] = _resolve_assistant_short_name(ws, assistant_name)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
+    if max_runs is not None:
+        body["max_runs"] = max_runs
+    if schedule_paused is not None:
+        body["schedule_paused"] = schedule_paused
+    if auto_approve_readonly is not None:
+        body["auto_approve_readonly"] = auto_approve_readonly
     try:
         status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/chat-config/commands", body)
         return _json_response(data)
@@ -2033,8 +2102,39 @@ async def update_chat_command(
     scope_type: Annotated[str | None, Field(description="New scope type.")] = None,
     scope_id: Annotated[str | None, Field(description="New scope ID.")] = None,
     is_active: Annotated[bool | None, Field(description="Set active/inactive.")] = None,
+    cron_schedule: Annotated[
+        str | None,
+        Field(description="New cron expression, or empty string to clear scheduling."),
+    ] = None,
+    sink_configs: Annotated[
+        list[dict] | None,
+        Field(description="Replace delivery targets for scheduled runs."),
+    ] = None,
+    run_as_user: Annotated[str | None, Field(description="Replace the run-as user email.")] = None,
+    assistant_name: Annotated[
+        str | None,
+        Field(description="Replace the persona for scheduled runs (workspace prefix optional)."),
+    ] = None,
+    max_runs: Annotated[
+        int | None, Field(description="Replace the run budget (null clears the cap).")
+    ] = None,
+    reset_runs_completed: Annotated[
+        bool | None,
+        Field(description="When true, reset runs_completed to 0 (e.g. after raising max_runs)."),
+    ] = None,
+    schedule_paused: Annotated[
+        bool | None, Field(description="Pause or resume the cron schedule.")
+    ] = None,
+    auto_approve_readonly: Annotated[
+        bool | None, Field(description="Toggle auto-approve for read-only tasks on scheduled runs.")
+    ] = None,
 ) -> str:
-    """Update an existing chat command by ID."""
+    """Update an existing chat command by ID.
+
+    Omitted fields are left unchanged. Schedule fields (``cron_schedule``,
+    ``sink_configs``, ``run_as_user``, ``assistant_name``, etc.) follow the
+    same partial-update semantics as the PAPI.
+    """
     ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {}
     if name is not None:
@@ -2049,6 +2149,25 @@ async def update_chat_command(
         body["scope_id"] = scope_id
     if is_active is not None:
         body["is_active"] = is_active
+    if cron_schedule is not None:
+        body["cron_schedule"] = cron_schedule
+    if sink_configs is not None:
+        body["sink_configs"] = sink_configs
+    if run_as_user is not None:
+        body["run_as_user"] = run_as_user
+    if assistant_name is not None:
+        try:
+            body["assistant_name"] = _resolve_assistant_short_name(ws, assistant_name)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
+    if max_runs is not None:
+        body["max_runs"] = max_runs
+    if reset_runs_completed is not None:
+        body["reset_runs_completed"] = reset_runs_completed
+    if schedule_paused is not None:
+        body["schedule_paused"] = schedule_paused
+    if auto_approve_readonly is not None:
+        body["auto_approve_readonly"] = auto_approve_readonly
     try:
         _, data = await _papi_put(
             f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}", body
