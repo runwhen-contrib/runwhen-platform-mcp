@@ -6,6 +6,8 @@ from unittest.mock import patch
 from runwhen_platform_mcp.server import (
     _code_bundle_from_env,
     _env_int,
+    _env_str,
+    _env_str_optional,
 )
 
 
@@ -95,3 +97,45 @@ class TestCodeBundleFromEnv:
             )
         assert bundle["repoUrl"] == "https://git.internal/override.git"
         assert bundle["ref"] == "override-ref"
+
+    def test_empty_env_falls_back_to_shared_and_defaults(self) -> None:
+        env = {
+            "MCP_TOOL_BUILDER_SLI_REPO_URL": "",
+            "MCP_TOOL_BUILDER_SLI_REF": "   ",
+            "MCP_TOOL_BUILDER_SLI_PATH": "",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            bundle = _code_bundle_from_env(
+                repo_url_var="MCP_TOOL_BUILDER_SLI_REPO_URL",
+                ref_var="MCP_TOOL_BUILDER_SLI_REF",
+                path_var="MCP_TOOL_BUILDER_SLI_PATH",
+                default_repo_url="https://github.com/example/rw-generic-codecollection.git",
+                default_ref="main",
+                default_path="codebundles/tool-builder/sli.robot",
+                repo_url_fallback="https://git.internal/rw-generic-codecollection.git",
+                ref_fallback="mirror-main",
+            )
+        assert bundle == {
+            "repoUrl": "https://git.internal/rw-generic-codecollection.git",
+            "ref": "mirror-main",
+            "pathToRobot": "codebundles/tool-builder/sli.robot",
+        }
+
+
+class TestEnvStr:
+    def test_blank_env_uses_default(self) -> None:
+        with patch.dict(os.environ, {"MCP_GENERIC_SLX_ICON": ""}, clear=True):
+            assert _env_str("MCP_GENERIC_SLX_ICON", "https://example/icon.svg") == (
+                "https://example/icon.svg"
+            )
+
+    def test_whitespace_env_uses_default(self) -> None:
+        with patch.dict(os.environ, {"MCP_GENERIC_CODECOLLECTION_REPO_URL": "  "}, clear=True):
+            assert _env_str(
+                "MCP_GENERIC_CODECOLLECTION_REPO_URL",
+                "https://github.com/runwhen-contrib/rw-generic-codecollection.git",
+            ) == "https://github.com/runwhen-contrib/rw-generic-codecollection.git"
+
+    def test_optional_blank_returns_none(self) -> None:
+        with patch.dict(os.environ, {"MCP_TOOL_BUILDER_RUNBOOK_REF": ""}, clear=True):
+            assert _env_str_optional("MCP_TOOL_BUILDER_RUNBOOK_REF") is None

@@ -256,6 +256,24 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_str(name: str, default: str) -> str:
+    """Return env var value, treating unset or blank as *default*."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    stripped = raw.strip()
+    return stripped if stripped else default
+
+
+def _env_str_optional(name: str) -> str | None:
+    """Return env var value, treating unset or blank as missing."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped if stripped else None
+
+
 def _code_bundle_from_env(
     *,
     repo_url_var: str,
@@ -268,27 +286,27 @@ def _code_bundle_from_env(
     ref_fallback: str | None = None,
 ) -> dict[str, str]:
     """Build a codeBundle dict from env vars with optional shared fallbacks."""
-    repo_url = os.environ.get(repo_url_var)
-    if repo_url is None and repo_url_fallback is not None:
+    repo_url = _env_str_optional(repo_url_var)
+    if repo_url is None and repo_url_fallback:
         repo_url = repo_url_fallback
     if repo_url is None:
         repo_url = default_repo_url
 
-    ref = os.environ.get(ref_var)
-    if ref is None and ref_fallback is not None:
+    ref = _env_str_optional(ref_var)
+    if ref is None and ref_fallback:
         ref = ref_fallback
     if ref is None:
         ref = default_ref
 
-    path = os.environ.get(path_var, default_path)
+    path = _env_str(path_var, default_path)
     return {"repoUrl": repo_url, "ref": ref, "pathToRobot": path}
 
 
-_GENERIC_CODECOLLECTION_REPO_URL = os.environ.get(
+_GENERIC_CODECOLLECTION_REPO_URL = _env_str(
     "MCP_GENERIC_CODECOLLECTION_REPO_URL",
     _DEFAULT_GENERIC_CODECOLLECTION_REPO,
 )
-_GENERIC_CODECOLLECTION_REF = os.environ.get(
+_GENERIC_CODECOLLECTION_REF = _env_str(
     "MCP_GENERIC_CODECOLLECTION_REF",
     _DEFAULT_CODE_BUNDLE_REF,
 )
@@ -328,7 +346,7 @@ POLL_INTERVAL_S = _env_int("MCP_POLL_INTERVAL_S", 5)
 MAX_POLL_DURATION_S = _env_int("MCP_MAX_POLL_DURATION_S", 300)
 ARTIFACT_SETTLE_DELAY_S = _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2)
 
-GENERIC_SLX_ICON = os.environ.get("MCP_GENERIC_SLX_ICON", _DEFAULT_GENERIC_SLX_ICON)
+GENERIC_SLX_ICON = _env_str("MCP_GENERIC_SLX_ICON", _DEFAULT_GENERIC_SLX_ICON)
 
 
 async def _fetch_artifact_content(signed_url: str) -> str | None:
