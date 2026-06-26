@@ -246,14 +246,17 @@ _DEFAULT_GENERIC_SLX_ICON = (
 )
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
 
 
 def _env_str(name: str, default: str) -> str:
@@ -342,9 +345,9 @@ CRON_SLI_CODE_BUNDLE = _code_bundle_from_env(
     default_path="codebundles/cron-scheduler-sli/sli.robot",
 )
 
-POLL_INTERVAL_S = _env_int("MCP_POLL_INTERVAL_S", 5)
-MAX_POLL_DURATION_S = _env_int("MCP_MAX_POLL_DURATION_S", 300)
-ARTIFACT_SETTLE_DELAY_S = _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2)
+POLL_INTERVAL_S = _env_int("MCP_POLL_INTERVAL_S", 5, minimum=1)
+MAX_POLL_DURATION_S = _env_int("MCP_MAX_POLL_DURATION_S", 300, minimum=1)
+ARTIFACT_SETTLE_DELAY_S = _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2, minimum=0)
 
 GENERIC_SLX_ICON = _env_str("MCP_GENERIC_SLX_ICON", _DEFAULT_GENERIC_SLX_ICON)
 

@@ -24,6 +24,18 @@ class TestEnvInt:
         with patch.dict(os.environ, {"MCP_POLL_INTERVAL_S": "not-a-number"}, clear=True):
             assert _env_int("MCP_POLL_INTERVAL_S", 5) == 5
 
+    def test_zero_below_minimum_falls_back(self) -> None:
+        with patch.dict(os.environ, {"MCP_POLL_INTERVAL_S": "0"}, clear=True):
+            assert _env_int("MCP_POLL_INTERVAL_S", 5, minimum=1) == 5
+
+    def test_negative_below_minimum_falls_back(self) -> None:
+        with patch.dict(os.environ, {"MCP_POLL_INTERVAL_S": "-1"}, clear=True):
+            assert _env_int("MCP_POLL_INTERVAL_S", 5, minimum=1) == 5
+
+    def test_minimum_allows_zero_when_configured(self) -> None:
+        with patch.dict(os.environ, {"MCP_ARTIFACT_SETTLE_DELAY_S": "0"}, clear=True):
+            assert _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2, minimum=0) == 0
+
 
 class TestCodeBundleFromEnv:
     def test_uses_defaults(self) -> None:
