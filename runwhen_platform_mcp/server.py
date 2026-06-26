@@ -1013,6 +1013,14 @@ def _strip_python_main_guards(script: str) -> tuple[str, int, int]:
             skipped += 1
             i = body_end
         else:
+            # Replace the entire guard (head + body) with a single ``pass``
+            # statement at the guard's indent. This is important for guards
+            # nested inside another control-flow block: removing the lines
+            # outright would leave the parent block empty (a ``SyntaxError``).
+            # ``pass`` is a harmless no-op at any indent — at module level it
+            # adds a single line; inside a parent ``if``/``def``/``for`` it
+            # preserves the parent's syntactic requirement of a body.
+            output.append(f"{guard_indent}pass\n")
             removed += 1
             i = body_end
     return "".join(output), removed, skipped
@@ -1290,20 +1298,27 @@ _PY_ISSUE_TITLE_EMPTY_RE = re.compile(
 # Detect ``"issue severity": <value>`` where ``<value>`` is NOT one of the
 # valid integers 1..4 (bare or quoted). Valid: ``1``, ``2``, ``3``, ``4``,
 # ``"1"``, ``"2"``, ``"3"``, ``"4"``. Everything else (``0``, ``5..9``,
-# ``10``+, ``"0"``, ``"5"``+, negatives, multi-digit quoted strings, etc.)
-# is flagged. The ``[05-9]`` character class deliberately omits ``1-4`` so
-# valid bare or quoted severities never match; ``\d{2,}`` covers any
-# multi-digit value (always invalid since severity is single-digit 1-4).
+# ``10``+, ``"0"``, ``"5"``+, negatives (incl. ``-1`` … ``-4``), multi-digit
+# quoted strings, etc.) is flagged.
+#
+# The inner alternative ``-\d+|[05-9]|\d{2,}`` accepts:
+#   - any *negative* integer (``-1``, ``-4``, ``-12`` …) — severity is
+#     unsigned in the contract, so all of these are invalid
+#   - the bare digits ``0`` and ``5``–``9`` (single-digit out-of-range)
+#   - any multi-digit value (``10``+ — always out of range)
+# It deliberately does NOT match the positive digits ``1``–``4``, so valid
+# bare or quoted severities never trigger.
 _PY_ISSUE_SEVERITY_INVALID_RE = re.compile(
     r'["\']issue severity["\']\s*:\s*'
     r"(?:"
-    # Bare invalid number (optionally negative).
-    r"-?(?:[05-9]|\d{2,})"
+    # Bare invalid (any negative, 0, 5-9, or any multi-digit number).
+    r"(?:-\d+|[05-9]|\d{2,})"
     r"|"
-    # Quoted invalid number wrapped in matching quotes.
-    r'"-?(?:[05-9]|\d{2,})"'
+    # Double-quoted invalid.
+    r'"(?:-\d+|[05-9]|\d{2,})"'
     r"|"
-    r"'-?(?:[05-9]|\d{2,})'"
+    # Single-quoted invalid.
+    r"'(?:-\d+|[05-9]|\d{2,})'"
     r")",
 )
 _BASH_ISSUE_DESC_EMPTY_RE = re.compile(
@@ -1349,12 +1364,28 @@ def _assess_issue_quality_static(script: str, interpreter: str, task_type: str) 
         # No f-string / no format anywhere in the script that emits issues
         # is a strong signal the description is static. Combined with the
         # presence of an 'issue description' key, that's almost always a bug.
+        #
+        # The ``+`` check only fires when ``+`` is adjacent to a string
+        # literal or a stringification call (``str(`` / ``repr(`` / ``format(``).
+        # A bare ``"+" in script`` test false-positives on arithmetic
+        # (``i + 1``, ``len(x) + 1``) and silently suppresses this warning
+        # for every script that does basic math — defeating the contract.
         has_issue_key = re.search(r'["\']issue\s+(?:title|description)["\']', script)
+        _str_concat_re = re.compile(
+            r"""
+            ["']\s*\+        # "..." + ...
+            |
+            \+\s*["']        # ... + "..."
+            |
+            \+\s*(?:str|repr|format)\(   # ... + str(x) / repr(x) / format(x)
+            """,
+            re.VERBOSE,
+        )
         has_dynamic = bool(
             re.search(r'f["\']', script)
             or ".format(" in script
             or re.search(r"%\s*\(", script)
-            or "+" in script
+            or _str_concat_re.search(script)
         )
         if has_issue_key and not has_dynamic:
             findings.append(
@@ -4329,24 +4360,46 @@ async def get_skill(
 # The recommended_env_var is what the agent should put on the LEFT side of
 # the ``secret_vars`` mapping (the script-facing env var name). The
 # workspace-secret key (right side) is the secret's actual key.
+#
+# Anchor convention: every suffix-anchored pattern starts with
+# ``(?:^|[-_.])`` so the matching token is either the whole key or
+# preceded by a separator. Without this, a short suffix like ``sa$``
+# false-positives on workspace secrets such as ``melissa`` (matches at
+# the trailing ``sa``) or ``myserviceaccount`` (matches ``service_account``
+# embedded in a longer identifier). The anchor keeps real conventions
+# (``prod-sa``, ``ops-suite-sa``, ``team_service_account``) intact while
+# rejecting incidental substrings.
+_SEC_SEP = r"(?:^|[-_.])"
 _SECRET_PLATFORM_RULES: list[tuple[str, re.Pattern[str], str]] = [
     ("kubernetes", re.compile(r"^kubeconfig$", re.IGNORECASE), "kubeconfig"),
-    ("azure", re.compile(r"(?i)azure[_-]?credentials?$"), "azure_credentials"),
-    ("azure", re.compile(r"(?i)client[_-]?id$"), "AZURE_CLIENT_ID"),
-    ("azure", re.compile(r"(?i)client[_-]?secret$"), "AZURE_CLIENT_SECRET"),
-    ("azure", re.compile(r"(?i)tenant[_-]?id$"), "AZURE_TENANT_ID"),
-    ("azure", re.compile(r"(?i)subscription[_-]?id$"), "AZURE_SUBSCRIPTION_ID"),
-    ("aws", re.compile(r"(?i)aws[_-]?credentials?$"), "aws_credentials"),
-    ("aws", re.compile(r"(?i)aws[_-]?access[_-]?key[_-]?id$"), "AWS_ACCESS_KEY_ID"),
-    ("aws", re.compile(r"(?i)aws[_-]?secret[_-]?access[_-]?key$"), "AWS_SECRET_ACCESS_KEY"),
-    ("aws", re.compile(r"(?i)aws[_-]?session[_-]?token$"), "AWS_SESSION_TOKEN"),
-    ("gcp", re.compile(r"(?i)gcp[_-]?credentials?$"), "gcp_credentials"),
-    ("gcp", re.compile(r"(?i)(?:ops-suite-)?sa$"), "GOOGLE_APPLICATION_CREDENTIALS"),
-    ("gcp", re.compile(r"(?i)service[_-]?account$"), "GOOGLE_APPLICATION_CREDENTIALS"),
-    ("github", re.compile(r"(?i)(?:^|[_-])repo[_-]?token$"), "GITHUB_TOKEN"),
-    ("github", re.compile(r"(?i)github[_-]?token$"), "GITHUB_TOKEN"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}azure[_-]?credentials?$"), "azure_credentials"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}client[_-]?id$"), "AZURE_CLIENT_ID"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}client[_-]?secret$"), "AZURE_CLIENT_SECRET"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}tenant[_-]?id$"), "AZURE_TENANT_ID"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}subscription[_-]?id$"), "AZURE_SUBSCRIPTION_ID"),
+    ("aws", re.compile(rf"(?i){_SEC_SEP}aws[_-]?credentials?$"), "aws_credentials"),
+    ("aws", re.compile(rf"(?i){_SEC_SEP}aws[_-]?access[_-]?key[_-]?id$"), "AWS_ACCESS_KEY_ID"),
+    (
+        "aws",
+        re.compile(rf"(?i){_SEC_SEP}aws[_-]?secret[_-]?access[_-]?key$"),
+        "AWS_SECRET_ACCESS_KEY",
+    ),
+    ("aws", re.compile(rf"(?i){_SEC_SEP}aws[_-]?session[_-]?token$"), "AWS_SESSION_TOKEN"),
+    ("gcp", re.compile(rf"(?i){_SEC_SEP}gcp[_-]?credentials?$"), "gcp_credentials"),
+    (
+        "gcp",
+        re.compile(rf"(?i){_SEC_SEP}(?:ops-suite-)?sa$"),
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ),
+    (
+        "gcp",
+        re.compile(rf"(?i){_SEC_SEP}service[_-]?account$"),
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ),
+    ("github", re.compile(rf"(?i){_SEC_SEP}repo[_-]?token$"), "GITHUB_TOKEN"),
+    ("github", re.compile(rf"(?i){_SEC_SEP}github[_-]?token$"), "GITHUB_TOKEN"),
     ("slack", re.compile(r"(?i)^slack(?:[_-]webhook|[_-]token)?$"), "SLACK_TOKEN"),
-    ("papi", re.compile(r"(?i)user[_-]?token$"), "USER_TOKEN"),
+    ("papi", re.compile(rf"(?i){_SEC_SEP}user[_-]?token$"), "USER_TOKEN"),
 ]
 
 

@@ -2369,3 +2369,200 @@ class TestGetWorkspaceLocationsWrapper:
         assert result["skill_reference"] == f"{SKILL_URI_SCHEME}discover-locations"
         # Backward compat: raw PAPI list preserved.
         assert result["locations"] == raw
+
+
+# ---------------------------------------------------------------------------
+# Bugbot round 3 regressions (PR #14 commit 26555c5)
+# ---------------------------------------------------------------------------
+
+
+class TestSeverityRegexCatchesNegatives:
+    """``_PY_ISSUE_SEVERITY_INVALID_RE`` must flag negative severities."""
+
+    def _quality(self, severity_literal: str) -> list[str]:
+        # Wrap the literal in a minimal Python issue payload to exercise the
+        # static scan path end-to-end.
+        script = (
+            "def main():\n"
+            "    return [{\n"
+            '        "issue title": "found something",\n'
+            f'        "issue severity": {severity_literal},\n'
+            '        "issue description": "context: " + str(123),\n'
+            '        "issue next steps": "investigate further now",\n'
+            "    }]\n"
+        )
+        return _assess_issue_quality_static(script, "python", "task")
+
+    def test_bare_negative_one_through_four_flagged(self) -> None:
+        for sev in ("-1", "-2", "-3", "-4"):
+            notes = self._quality(sev)
+            assert any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"bare {sev} should be flagged: {notes!r}"
+            )
+
+    def test_quoted_negative_one_through_four_flagged(self) -> None:
+        for sev in ('"-1"', '"-2"', '"-3"', '"-4"', "'-1'", "'-4'"):
+            notes = self._quality(sev)
+            assert any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"quoted {sev} should be flagged: {notes!r}"
+            )
+
+    def test_bare_negative_large_still_flagged(self) -> None:
+        for sev in ("-10", "-99", "-100"):
+            notes = self._quality(sev)
+            assert any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"large negative {sev} should be flagged: {notes!r}"
+            )
+
+    def test_valid_positives_not_flagged(self) -> None:
+        for sev in ("1", "2", "3", "4", '"1"', '"4"', "'2'"):
+            notes = self._quality(sev)
+            assert not any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"valid {sev} should NOT be flagged: {notes!r}"
+            )
+
+
+class TestStripPythonMainGuardsLeavesPass:
+    """A stripped guard must not orphan an outer block."""
+
+    def test_module_level_guard_replaced_with_pass(self) -> None:
+        script = 'def main():\n    return []\n\nif __name__ == "__main__":\n    main()\n'
+        cleaned, removed, skipped = _strip_python_main_guards(script)
+        assert removed == 1
+        assert skipped == 0
+        assert "if __name__" not in cleaned
+        # ``pass`` should appear at module-level indent.
+        assert "\npass\n" in cleaned
+        # Cleaned script must still be syntactically valid Python.
+        compile(cleaned, "<cleaned>", "exec")
+
+    def test_nested_guard_keeps_outer_block_valid(self) -> None:
+        # The inner ``if __name__ == "__main__":`` is the *only* statement
+        # inside the outer ``if True:`` branch. Previous behaviour stripped
+        # it entirely, leaving an empty ``if True:`` body and producing a
+        # SyntaxError that slipped through to ``run_script``.
+        script = (
+            "def main():\n"
+            "    return []\n"
+            "\n"
+            "if True:\n"
+            '    if __name__ == "__main__":\n'
+            "        main()\n"
+            "else:\n"
+            "    raise SystemExit(0)\n"
+        )
+        cleaned, removed, _ = _strip_python_main_guards(script)
+        assert removed == 1
+        compile(cleaned, "<cleaned>", "exec")
+        assert "if True:" in cleaned
+        assert "else:" in cleaned
+
+    def test_indent_preserved(self) -> None:
+        script = (
+            "def runner():\n"
+            "    def inner():\n"
+            "        return 1\n"
+            '    if __name__ == "__main__":\n'
+            "        inner()\n"
+        )
+        cleaned, removed, _ = _strip_python_main_guards(script)
+        assert removed == 1
+        # The replacement ``pass`` should sit at the 4-space indent of the
+        # original guard (inside ``runner``), not at module level.
+        assert "\n    pass\n" in cleaned
+        compile(cleaned, "<cleaned>", "exec")
+
+
+class TestClassifySecretRejectsEmbeddedSuffixes:
+    """``_classify_secret`` must require a separator before suffix tokens."""
+
+    def test_melissa_not_gcp(self) -> None:
+        platform, env_var = _classify_secret("melissa")
+        assert platform == "other"
+        assert env_var == "melissa"
+
+    def test_lisa_marissa_medusa_not_gcp(self) -> None:
+        for key in ("lisa", "marissa", "medusa", "vista"):
+            platform, _env = _classify_secret(key)
+            assert platform == "other", key
+
+    def test_myserviceaccount_not_gcp(self) -> None:
+        platform, _env = _classify_secret("myserviceaccount")
+        assert platform == "other"
+
+    def test_prod_sa_is_gcp(self) -> None:
+        platform, env_var = _classify_secret("prod-sa")
+        assert platform == "gcp"
+        assert env_var == "GOOGLE_APPLICATION_CREDENTIALS"
+
+    def test_team_service_account_is_gcp(self) -> None:
+        platform, env_var = _classify_secret("team-service-account")
+        assert platform == "gcp"
+        assert env_var == "GOOGLE_APPLICATION_CREDENTIALS"
+
+    def test_exact_sa_and_ops_suite_sa_still_match(self) -> None:
+        assert _classify_secret("sa")[0] == "gcp"
+        assert _classify_secret("ops-suite-sa")[0] == "gcp"
+
+    def test_embedded_clientid_no_separator_not_azure(self) -> None:
+        # ``aclientid`` has no separator before ``clientid`` and should fall
+        # through to ``other`` rather than being misclassified as Azure.
+        platform, _env = _classify_secret("aclientid")
+        assert platform == "other"
+
+    def test_separator_clientid_still_azure(self) -> None:
+        for key in ("azure-clientId", "oauth_client_id", "client_id"):
+            platform, env_var = _classify_secret(key)
+            assert platform == "azure", key
+            assert env_var == "AZURE_CLIENT_ID", key
+
+
+class TestHasDynamicNarrowedPlusCheck:
+    """``has_dynamic`` should only trip on ``+`` adjacent to string-y operands."""
+
+    def _quality(self, body: str) -> list[str]:
+        # Build a script that has a populated issue payload (so
+        # ``has_issue_key`` is true) but no dynamic-text construction.
+        # ``body`` is appended verbatim before the return.
+        script = (
+            "def main():\n"
+            f"{body}"
+            "    return [{\n"
+            '        "issue title": "found a thing",\n'
+            '        "issue severity": 3,\n'
+            '        "issue description": "context observed at runtime",\n'
+            '        "issue next steps": "investigate and report back",\n'
+            "    }]\n"
+        )
+        return _assess_issue_quality_static(script, "python", "task")
+
+    def test_arithmetic_does_not_suppress_stub_warning(self) -> None:
+        # Pure arithmetic must not be treated as dynamic string building.
+        # The "no f-strings / concatenation" warning must therefore fire
+        # because the issue fields are all static literals.
+        body = "    i = 1 + 2\n    j = len([1,2,3]) + 1\n"
+        notes = self._quality(body)
+        assert any("f-strings" in n.lower() for n in notes), (
+            f"expected stub warning when only arithmetic is present: {notes!r}"
+        )
+
+    def test_string_concat_with_literal_suppresses_warning(self) -> None:
+        body = '    name = "foo"\n    msg = "hello " + name\n'
+        notes = self._quality(body)
+        assert not any("f-strings" in n.lower() for n in notes), (
+            f"static warning should NOT fire when concat is present: {notes!r}"
+        )
+
+    def test_str_call_concat_suppresses_warning(self) -> None:
+        body = '    x = 42\n    msg = "got " + str(x)\n'
+        notes = self._quality(body)
+        assert not any("f-strings" in n.lower() for n in notes), (
+            f"static warning should NOT fire when str() concat is present: {notes!r}"
+        )
+
+    def test_fstring_still_suppresses_warning(self) -> None:
+        body = '    name = "foo"\n    msg = f"hi {name}"\n'
+        notes = self._quality(body)
+        assert not any("f-strings" in n.lower() for n in notes), (
+            f"f-strings should still suppress the warning: {notes!r}"
+        )
