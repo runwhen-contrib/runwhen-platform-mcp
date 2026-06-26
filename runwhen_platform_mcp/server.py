@@ -40,6 +40,7 @@ import asyncio
 import base64
 import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -310,12 +311,39 @@ _SKILL_FRONTMATTER_RE = re.compile(
 def _skills_root() -> Path:
     """Return the canonical skills directory.
 
-    Override with ``RUNWHEN_SKILLS_DIR`` for tests / non-default deployments.
-    Falls back to ``<repo-root>/skills`` (two parents up from this file).
+    Resolution order:
+      1. ``RUNWHEN_SKILLS_DIR`` env override (tests, custom deployments)
+      2. The bundled ``skills`` data-package, located via
+         :mod:`importlib.resources`. This is the path that works for normal
+         ``pip install`` and the published Docker image — the previous
+         "two parents up from ``server.py``" trick resolved to
+         ``site-packages/skills`` and silently found nothing there because
+         the directory was not shipped with the wheel.
+      3. Legacy repo-root layout, as a last-resort fallback for environments
+         where the package metadata is missing (e.g. running ``server.py``
+         directly out of an unpacked sdist on ``sys.path``).
     """
     override = os.environ.get("RUNWHEN_SKILLS_DIR")
     if override:
         return Path(override).expanduser().resolve()
+
+    # Look up the bundled data-package. This works for both wheel installs
+    # (resolves to ``site-packages/skills``) and editable installs
+    # (resolves to the repo-root ``skills/`` directory).
+    try:
+        from importlib.resources import files as _resource_files
+
+        bundled = _resource_files("skills")
+        # ``files()`` returns a Traversable; we only ship on-disk files, so
+        # str() yields a real filesystem path we can hand to ``Path``.
+        bundled_path = Path(str(bundled)).resolve()
+        if bundled_path.is_dir():
+            return bundled_path
+    except (ModuleNotFoundError, AttributeError, TypeError):
+        # The data-package is missing (very old wheel build, or stripped
+        # install layout). Fall through to the legacy resolver.
+        pass
+
     return (Path(__file__).resolve().parent.parent / "skills").resolve()
 
 
@@ -387,17 +415,23 @@ def _get_skill_index(*, reload: bool = False) -> dict[str, dict[str, Any]]:
     return _skill_cache
 
 
-def _register_skill_resources() -> int:
-    """Register every discovered skill as an MCP resource.
+def _register_skill_resources(server: FastMCP) -> int:
+    """Register every discovered skill as an MCP resource on ``server``.
 
-    Returns the number of resources registered. Called once at module
-    import time. Failures are non-fatal — the tool shims still work.
+    Accepts the target FastMCP instance so the same resources land on both
+    the module-level ``mcp`` (stdio transport) and the HTTP server built
+    later in :func:`_build_http_server`. Previously the registration was
+    hard-coded to ``mcp`` and HTTP clients saw an empty ``resources/list``.
+
+    Returns the number of resources registered. Failures are non-fatal —
+    a malformed skill is skipped, the tool shims (``list_skills`` /
+    ``get_skill``) still work.
     """
-    skills = _discover_skills()
+    skills = list(_get_skill_index().values())
     registered = 0
     for skill in skills:
         try:
-            _register_one_skill_resource(skill)
+            _register_one_skill_resource(server, skill)
             registered += 1
         except Exception:
             # Don't let a malformed skill take down the whole server.
@@ -405,19 +439,27 @@ def _register_skill_resources() -> int:
     return registered
 
 
-def _register_one_skill_resource(skill: dict[str, Any]) -> None:
-    """Register a single skill via the ``@mcp.resource`` decorator.
+def _register_one_skill_resource(server: FastMCP, skill: dict[str, Any]) -> None:
+    """Register a single skill via the ``@server.resource`` decorator.
 
     The decorator both wraps the function as an MCP resource AND adds it
     to the server's resource registry; we do NOT need (and must not call)
-    ``mcp.add_resource`` afterwards.
+    ``server.add_resource`` afterwards.
+
+    The body is fetched live from :func:`_get_skill_index` at request time
+    rather than captured at registration. This keeps the resource path in
+    sync with the tool path: ``get_skill(name, reload=True)`` rebuilds the
+    cache, and the very next ``resources/read`` returns the fresh body.
+    Previously the closure captured a snapshot of ``skill["body"]``, so on-
+    disk edits surfaced through the tool but not through resources.
     """
     uri = skill["uri"]
     name = skill["name"]
     description = skill["description"]
-    body = skill["body"]  # Bind locally so the closure captures THIS skill.
+    # Capture only the name in the closure; body is looked up live below.
+    skill_name = name
 
-    @mcp.resource(
+    @server.resource(
         uri,
         name=f"skill:{name}",
         description=description,
@@ -425,13 +467,21 @@ def _register_one_skill_resource(skill: dict[str, Any]) -> None:
         tags={"skill", "runwhen"},
     )
     def _skill_resource() -> str:  # pragma: no cover - exercised via mcp client
-        return body
+        index = _get_skill_index()
+        live = index.get(skill_name)
+        if live is None:
+            # The skill went away between registration and read (rename or
+            # deletion on disk). Return a stable marker so the client gets
+            # a graceful response instead of a 500.
+            return f"Skill {skill_name!r} is no longer available on this server."
+        return live["body"]
 
 
-# Build the resource set at import time. The count is logged via the
-# instructions block but we don't fail if discovery is empty (some
-# deployments may not ship the skills/ tree).
-_SKILL_RESOURCE_COUNT = _register_skill_resources()
+# Build the resource set on the stdio MCP instance at import time. The
+# count is surfaced via the instructions block but we don't fail if
+# discovery is empty. HTTP transport registers its own copy on the
+# ``http_mcp`` instance inside ``_build_http_server``.
+_SKILL_RESOURCE_COUNT = _register_skill_resources(mcp)
 
 
 # ---------------------------------------------------------------------------
@@ -4819,6 +4869,11 @@ def _decode_script_gzip_base64(data: str, *, label: str = "script_gzip_base64") 
     Encode with:
         import base64, gzip
         base64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")
+
+    Decompression is bounded by ``SCRIPT_HARD_MAX_BYTES`` so a small encoded
+    payload that expands to many megabytes (decompression bomb) is rejected
+    before exhausting memory. The full :func:`_assess_script_size` check
+    still runs on the decoded UTF-8 string downstream.
     """
     try:
         raw = base64.b64decode(data.strip().encode("ascii"), validate=True)
@@ -4827,13 +4882,34 @@ def _decode_script_gzip_base64(data: str, *, label: str = "script_gzip_base64") 
             f"Invalid {label}: outer base64 layer failed to decode. "
             "Encode as: base64.b64encode(gzip.compress(script.encode('utf-8'))).decode('ascii')"
         ) from exc
+
+    # Stream-decompress with a hard byte cap. ``gzip.GzipFile.read(n)``
+    # reads at most ``n`` bytes from the decompressed stream; we ask for
+    # one byte more than the cap so the overflow case can be detected
+    # cheaply without ever materialising the full bomb payload.
+    cap = SCRIPT_HARD_MAX_BYTES
     try:
-        decompressed = gzip.decompress(raw)
-    except (OSError, gzip.BadGzipFile) as exc:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as gz:
+            decompressed = gz.read(cap + 1)
+            # A non-empty next read means the stream extends past the cap.
+            overflow = bool(gz.read(1))
+    except (OSError, EOFError, gzip.BadGzipFile) as exc:
         raise ValueError(
             f"Invalid {label}: gzip decompression failed (was the value not gzipped?). "
             "Encode as: base64.b64encode(gzip.compress(script.encode('utf-8'))).decode('ascii')"
         ) from exc
+
+    if overflow or len(decompressed) > cap:
+        raise ValueError(
+            f"Invalid {label}: decompressed script exceeds the hard cap "
+            f"({cap} bytes / "
+            f"RUNWHEN_SCRIPT_HARD_MAX_BYTES). This usually means the encoded "
+            "value is malicious (decompression bomb) or genuinely too large "
+            "for inline transport. If the script is real, deploy it as a "
+            "registry codebundle (search_registry + deploy_registry_codebundle) "
+            "or split the work into multiple SLXs."
+        )
+
     try:
         return decompressed.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -5534,9 +5610,49 @@ async def run_slx(
     # passed_titles (see ``.issues`` #6). When the caller passes a literal
     # human-readable title, hint them to use ``*``.
     if task_titles != "*":
+        # Reject empty / whitespace-only input before splitting so we never
+        # send ``taskTitles=[""]`` (or ``[]``) to PAPI. The literal-title
+        # guard below only fires for *non-empty* strings, so without this
+        # short-circuit a blank value would silently flow through.
+        if not task_titles or not task_titles.strip():
+            return _json_response(
+                {
+                    "error": "Invalid task_titles value",
+                    "message": (
+                        "task_titles must be '*' (run every task in the SLX) "
+                        "or one or more non-empty patterns joined by '||'. "
+                        f"Got {task_titles!r} which resolves to an empty list."
+                    ),
+                    "hint": (
+                        "For nearly all use cases, pass task_titles='*'. "
+                        "Only override when you know the SLX's runtime "
+                        "${TASK_TITLE} values."
+                    ),
+                }
+            )
+
         task_titles_list = [t.strip() for t in task_titles.split("||")]
+        # Drop any empty trailing/leading segments (e.g. ``"foo||"``) and
+        # reject the whole call if no valid entries remain.
+        non_empty = [t for t in task_titles_list if t]
+        if not non_empty:
+            return _json_response(
+                {
+                    "error": "Invalid task_titles value",
+                    "message": (
+                        f"task_titles={task_titles!r} contained only empty "
+                        "segments after splitting on '||'."
+                    ),
+                    "hint": (
+                        "Use task_titles='*' to run every task, or supply "
+                        "at least one non-empty pattern."
+                    ),
+                }
+            )
+        task_titles_list = non_empty
+
         suspicious = [
-            t for t in task_titles_list if t and not t.startswith("${") and not t.startswith("*")
+            t for t in task_titles_list if not t.startswith("${") and not t.startswith("*")
         ]
         if suspicious:
             return _json_response(
@@ -6384,6 +6500,11 @@ def _build_http_server() -> FastMCP:
         auth_check = _make_workspace_auth_check(fn.__name__)
         tool = FunctionTool.from_function(fn, auth=auth_check)  # type: ignore[arg-type]
         http_mcp.add_tool(tool)
+
+    # Register skill resources on the HTTP server too. Without this,
+    # ``runwhen-skill://`` resources are only visible to stdio clients
+    # even though the server instructions advertise them universally.
+    _register_skill_resources(http_mcp)
 
     @http_mcp.custom_route("/health", methods=["GET"])
     async def health_check(request: Any) -> Any:

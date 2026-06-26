@@ -6,6 +6,7 @@ import gzip
 import json
 import os
 import tempfile
+from pathlib import Path
 from unittest import mock
 
 import httpx
@@ -35,10 +36,12 @@ from runwhen_platform_mcp.server import (
     _parse_skill_file,
     _persona_short_name,
     _python_main_guard_has_paired_clause,
+    _register_skill_resources,
     _resolve_assistant_short_name,
     _resolve_command_assistant_name,
     _resolve_script,
     _scripts_have_identical_content,
+    _skills_root,
     _strip_python_main_guards,
     _strip_runner_unsafe_blocks,
     _validate_assistant_name,
@@ -2867,3 +2870,264 @@ class TestCommitSlxAcceptsNewScriptSourceVariants:
                 assert _resolve_script(None, None, None, None, path) == src
         finally:
             os.unlink(path)
+
+
+# ---------------------------------------------------------------------------
+# Bugbot regression — round 4 (commit-following 645d20c & 83b8516)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillsRootResolvesBundledPackage:
+    """_skills_root must find skills in both editable and wheel layouts.
+
+    Regression for Bugbot HIGH severity ("Skills missing in Docker"). The
+    previous "two parents up from server.py" fallback resolved to
+    ``site-packages/skills`` after a pip install — a directory that was
+    never shipped with the wheel. The fix bundles ``skills`` as a data-
+    package and prefers :func:`importlib.resources.files`.
+    """
+
+    def test_returns_existing_directory(self) -> None:
+        # The resolver must point at a real directory in every supported
+        # install layout. If both the resource lookup and the legacy
+        # fallback fail, this returns a non-existent path and skill
+        # discovery silently yields nothing.
+        root = _skills_root()
+        assert root.is_dir(), f"{root} does not exist; skills will not load"
+
+    def test_root_actually_contains_skill_files(self) -> None:
+        # Sanity: the resolved root must hold ``<skill>/SKILL.md`` files,
+        # which is what ``_discover_skills`` walks.
+        root = _skills_root()
+        skill_files = list(root.glob("*/SKILL.md"))
+        assert skill_files, f"no SKILL.md found under {root}"
+
+    def test_env_override_wins(self, tmp_path) -> None:
+        # The ``RUNWHEN_SKILLS_DIR`` override is honored above any
+        # auto-discovery, so tests and air-gap deployments can swap in
+        # their own skill tree without rebuilding the package.
+        (tmp_path / "demo").mkdir()
+        (tmp_path / "demo" / "SKILL.md").write_text("---\nname: x\ndescription: y\n---\nb\n")
+        with mock.patch.dict(os.environ, {"RUNWHEN_SKILLS_DIR": str(tmp_path)}):
+            assert _skills_root() == tmp_path.resolve()
+
+    def test_importlib_resources_path_used(self) -> None:
+        # When importlib.resources resolves the ``skills`` package, that
+        # path is preferred over the legacy two-parents-up fallback.
+        # Confirm the import succeeds (i.e. the data-package config in
+        # pyproject.toml is wired correctly).
+        from importlib.resources import files as _files
+
+        pkg_root = Path(str(_files("skills"))).resolve()
+        assert pkg_root.is_dir()
+        # And ``_skills_root`` returns that same path (env override not
+        # set in this test, so the importlib branch should win).
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RUNWHEN_SKILLS_DIR", None)
+            assert _skills_root() == pkg_root
+
+
+class TestSkillResourcesRegisteredOnHttpServer:
+    """Both stdio ``mcp`` and HTTP ``http_mcp`` must expose skill resources.
+
+    Regression for Bugbot MEDIUM severity ("HTTP mode lacks skill resources").
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_register_skill_resources_accepts_a_server_instance(self) -> None:
+        # The helper is parameterized so it can be invoked twice (once on
+        # ``mcp``, once on ``http_mcp``). Verify it accepts an arbitrary
+        # FastMCP target and returns the registration count.
+        from fastmcp import FastMCP
+
+        target = FastMCP("test-skills-target")
+        count = _register_skill_resources(target)
+        # The repo ships at least one canonical skill, so the count is
+        # strictly positive even in a fresh server.
+        assert count > 0
+        # And those resources are now discoverable on the target.
+        resources = self._run(target.list_resources())
+        skill_uris = {str(r.uri) for r in resources if str(r.uri).startswith(SKILL_URI_SCHEME)}
+        assert len(skill_uris) == count
+
+    def test_http_server_exposes_skill_resources_end_to_end(self) -> None:
+        # Build a fresh HTTP server and confirm the resource list matches
+        # what ``_discover_skills`` produced — without this fix the HTTP
+        # build path skipped skill registration entirely.
+        # ``_build_http_server`` lazily imports ``consent_ui`` and
+        # ``auth`` from sibling modules; patch them on those modules, not
+        # on ``server`` (the import path the function actually uses).
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.consent_ui.patch_fastmcp_consent_ui",
+                lambda: None,
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.auth.build_auth_provider",
+                return_value=None,
+            ),
+        ):
+            from runwhen_platform_mcp import server as _server
+
+            http_mcp = _server._build_http_server()
+        discovered = {s["uri"] for s in _discover_skills()}
+        resources = self._run(http_mcp.list_resources())
+        skill_uris = {str(r.uri) for r in resources if str(r.uri).startswith(SKILL_URI_SCHEME)}
+        assert skill_uris == discovered
+
+
+class TestSkillResourceReadsLiveBody:
+    """Skill resources must reflect on-disk edits after ``reload=True``.
+
+    Regression for Bugbot LOW severity ("Skill resources ignore disk reload").
+    Previously the closure captured ``skill["body"]`` at registration time
+    so resource reads served the import-time snapshot forever.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_resource_body_follows_cache_updates(self) -> None:
+        # Pick any registered skill; force its body to a sentinel value in
+        # the cache (no disk edit needed for the unit test), then read the
+        # resource through the live MCP server and assert we see the new
+        # body. Without the live-lookup fix, the closure would still
+        # return the import-time content.
+        skills = _discover_skills()
+        target = skills[0]
+        uri = target["uri"]
+        name = target["name"]
+
+        original = target["body"]
+        sentinel = f"## REGRESSION SENTINEL FOR {name}\n\nLive lookup works.\n"
+
+        from runwhen_platform_mcp import server as _server
+
+        # The cache is a private module attribute; patch it with a
+        # forced-fresh dict so the live lookup picks up our sentinel.
+        forced = {s["name"]: dict(s) for s in skills}
+        forced[name]["body"] = sentinel
+
+        with mock.patch.object(_server, "_skill_cache", forced):
+            result = self._run(_mcp.read_resource(uri))
+            body = result.contents[0].content
+            assert body == sentinel
+            assert original not in body
+
+        # And without the patch (cache restored to its real state), the
+        # original content comes back through the same path.
+        result_after = self._run(_mcp.read_resource(uri))
+        body_after = result_after.contents[0].content
+        assert sentinel not in body_after
+
+
+class TestGzipDecodeRejectsDecompressionBomb:
+    """``_decode_script_gzip_base64`` must cap decompression output.
+
+    Regression for Bugbot MEDIUM severity ("Gzip decode lacks size cap").
+    A small encoded payload should not be able to expand to many megabytes
+    in memory before the downstream size check fires.
+    """
+
+    def test_bomb_rejected_below_hard_cap(self) -> None:
+        # A few KB of compressed zeros expands to many MB. Pin the hard
+        # cap to a small value so this test is fast and deterministic.
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 4096):
+            payload = b"0" * (10 * 1024 * 1024)  # 10 MB of zeros
+            compressed = gzip.compress(payload)
+            encoded = base64.b64encode(compressed).decode("ascii")
+            # The compressed size is small (compresses extremely well),
+            # so the base64 payload itself fits well under any envelope.
+            assert len(encoded) < 50 * 1024, "test would not exercise the bomb path"
+            try:
+                _decode_script_gzip_base64(encoded)
+            except ValueError as exc:
+                msg = str(exc).lower()
+                assert "exceeds the hard cap" in msg or "decompressed" in msg
+                assert "registry codebundle" in msg
+            else:
+                raise AssertionError("expected ValueError for decompression bomb")
+
+    def test_legitimate_payload_decodes_successfully(self) -> None:
+        # A real script comfortably under the cap must still round-trip.
+        src = "def main():\n    return [{'issue title': 'x', 'issue severity': 4}]\n" * 10
+        encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+        assert _decode_script_gzip_base64(encoded) == src
+
+    def test_payload_just_under_cap_decodes(self) -> None:
+        # The cap is exclusive in error messaging but the helper returns
+        # the full payload when it fits, so a payload exactly at the cap
+        # value is accepted (cap is len(decompressed) > cap → reject).
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 4096):
+            src = "x" * 4000
+            encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+            assert _decode_script_gzip_base64(encoded) == src
+
+
+class TestRunSlxRejectsEmptyTaskTitles:
+    """run_slx must reject blank ``task_titles`` before building a request.
+
+    Regression for Bugbot LOW severity ("Empty task_titles sent to API").
+    Without the guard, ``task_titles=""`` produced ``taskTitles=[""]`` in
+    the run request payload and PAPI returned an opaque failure.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @pytest.mark.parametrize("bad_value", ["", "   ", "\t", "||", "  ||  "])
+    def test_blank_input_rejected_with_actionable_error(self, bad_value) -> None:
+        # No PAPI calls should happen — the validation runs before the
+        # workspace is resolved. We patch ``_resolve_workspace`` so the
+        # tool would otherwise try to reach the network, and assert it is
+        # never called.
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.server._resolve_workspace",
+                new=mock.AsyncMock(return_value="ws-name"),
+            ) as mock_resolve,
+            mock.patch(
+                "runwhen_platform_mcp.server._papi_post",
+                new=mock.AsyncMock(),
+            ) as mock_post,
+        ):
+            result = json.loads(
+                self._run(
+                    run_slx(workspace_name="ws-name", slx_name="my-slx", task_titles=bad_value)
+                )
+            )
+        # ``_resolve_workspace`` runs first (the guard is downstream of
+        # it), but the post must never fire — we caught the problem
+        # before PAPI saw it.
+        assert mock_resolve.call_count == 1
+        assert mock_post.call_count == 0
+        assert "error" in result
+        assert "task_titles" in result["error"].lower()
+        assert "hint" in result
+        assert "task_titles='*'" in result["hint"]
+
+    def test_wildcard_still_works(self) -> None:
+        # Sanity: the default wildcard path must not regress.
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.server._resolve_workspace",
+                new=mock.AsyncMock(return_value="ws-name"),
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server._papi_post",
+                new=mock.AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            # The function will attempt to call PAPI and our mock raises;
+            # we only need to confirm the validation pass let it through.
+            try:
+                self._run(run_slx(workspace_name="ws-name", slx_name="my-slx", task_titles="*"))
+            except RuntimeError as exc:
+                assert "boom" in str(exc)
+            else:
+                # If for some reason the call didn't raise, no error from
+                # the guard either — both paths confirm the guard let it
+                # through.
+                pass

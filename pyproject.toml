@@ -30,9 +30,15 @@ homepage = "https://github.com/runwhen-contrib/runwhen-platform-mcp"
 
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["runwhen_platform_mcp*", "skills*"]
 
 [tool.setuptools.package-data]
 runwhen_platform_mcp = ["docs/*.md", "docs/*.template", "docs/*.example"]
+# ``skills`` ships as a data-package so SKILL.md (progressive-disclosure
+# guides) and their reference assets are present in wheels and Docker
+# images, not just in editable installs. See ``_skills_root`` in
+# ``server.py`` for the runtime lookup.
+skills = ["**/SKILL.md", "**/references/**"]
 
 [project.optional-dependencies]
 dev = [
