@@ -2116,8 +2116,15 @@ async def update_chat_command(
         Field(description="Replace the persona for scheduled runs (workspace prefix optional)."),
     ] = None,
     max_runs: Annotated[
-        int | None, Field(description="Replace the run budget (null clears the cap).")
+        int | None, Field(description="Replace the run budget (must be >= 1 when scheduling).")
     ] = None,
+    clear_max_runs: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="When true, remove the run budget cap (unlimited scheduled runs).",
+        ),
+    ] = False,
     reset_runs_completed: Annotated[
         bool | None,
         Field(description="When true, reset runs_completed to 0 (e.g. after raising max_runs)."),
@@ -2133,9 +2140,12 @@ async def update_chat_command(
 
     Omitted fields are left unchanged. Schedule fields (``cron_schedule``,
     ``sink_configs``, ``run_as_user``, ``assistant_name``, etc.) follow the
-    same partial-update semantics as the PAPI.
+    same partial-update semantics as the PAPI. Use ``clear_max_runs=True`` to
+    remove an existing run cap (MCP cannot send bare null for ``max_runs``).
     """
     ws = await _resolve_workspace(workspace_name)
+    if clear_max_runs and max_runs is not None:
+        return _json_response({"error": "Cannot set both max_runs and clear_max_runs."})
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
@@ -2160,7 +2170,9 @@ async def update_chat_command(
             body["assistant_name"] = _resolve_assistant_short_name(ws, assistant_name)
         except ValueError as exc:
             return _json_response({"error": str(exc)})
-    if max_runs is not None:
+    if clear_max_runs:
+        body["max_runs"] = None
+    elif max_runs is not None:
         body["max_runs"] = max_runs
     if reset_runs_completed is not None:
         body["reset_runs_completed"] = reset_runs_completed

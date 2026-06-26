@@ -113,7 +113,9 @@ create_chat_command(
 | `schedule_paused` | Pause cron without losing schedule config |
 | `auto_approve_readonly` | Auto-run read-only tasks without approval widgets |
 
-Update scheduling with `update_chat_command` (same fields). Use `reset_runs_completed=True` after raising `max_runs`. Pause/resume via `schedule_paused`.
+Update scheduling with `update_chat_command` (same fields). Use `clear_max_runs=True`
+to remove a run cap, or `reset_runs_completed=True` after raising `max_runs`.
+Pause/resume via `schedule_paused`.
 
 ## Command categories and examples
 

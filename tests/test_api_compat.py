@@ -304,7 +304,10 @@ class TestChatCommandScheduleSchema:
         "auto_approve_readonly",
     )
 
-    _UPDATE_SCHEDULE_PARAMS = _CREATE_SCHEDULE_PARAMS + ("reset_runs_completed",)
+    _UPDATE_SCHEDULE_PARAMS = _CREATE_SCHEDULE_PARAMS + (
+        "reset_runs_completed",
+        "clear_max_runs",
+    )
 
     def test_create_chat_command_has_schedule_params(self, tools) -> None:
         tool = _find_tool(tools, "create_chat_command")
