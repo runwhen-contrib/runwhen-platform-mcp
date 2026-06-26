@@ -5,6 +5,7 @@ import base64
 import json
 from unittest import mock
 
+import httpx
 import pytest
 
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
@@ -24,6 +25,7 @@ from runwhen_platform_mcp.server import (
     _validate_slx_name,
     commit_slx,
     run_script_and_wait,
+    update_chat_command,
 )
 
 
@@ -338,6 +340,35 @@ class TestBuildPersonaPayload:
         assert payload["filterStopWords"] == []
         assert payload["searchFilters"] == {}
         assert payload["runConfig"] == {}
+
+
+class TestUpdateChatCommandScopeFetch:
+    """update_chat_command must surface PAPI errors when resolving scope_type."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_scope_fetch_error_returned_when_updating_persona_scope_id(
+        self, mock_get, mock_ws
+    ) -> None:
+        mock_ws.return_value = "t-oncall"
+        request = httpx.Request("GET", "https://papi.example/chat-config/commands/1")
+        response = httpx.Response(404, request=request)
+        mock_get.side_effect = httpx.HTTPStatusError(
+            "not found", request=request, response=response
+        )
+
+        result = self._run(
+            update_chat_command(
+                command_id=1,
+                workspace_name="t-oncall",
+                scope_id="t-oncall--azure-devops",
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
 
 
 class TestWriteToolsCompleteness:

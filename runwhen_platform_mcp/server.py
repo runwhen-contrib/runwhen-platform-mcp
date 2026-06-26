@@ -2174,7 +2174,10 @@ async def update_chat_command(
     ws = await _resolve_workspace(workspace_name)
     if clear_max_runs and max_runs is not None:
         return _json_response({"error": "Cannot set both max_runs and clear_max_runs."})
-    effective_scope_type = await _get_chat_command_scope_type(ws, command_id, scope_type)
+    try:
+        effective_scope_type = await _get_chat_command_scope_type(ws, command_id, scope_type)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
@@ -2347,10 +2350,7 @@ async def _get_chat_command_scope_type(
     """Resolve scope_type for partial command updates (fetch when omitted)."""
     if scope_type is not None:
         return scope_type
-    try:
-        data = await _papi_get(f"/api/v3/workspaces/{workspace}/chat-config/commands/{command_id}")
-    except (ValueError, httpx.HTTPStatusError):
-        return None
+    data = await _papi_get(f"/api/v3/workspaces/{workspace}/chat-config/commands/{command_id}")
     return data.get("scope_type") or data.get("scopeType")
 
 
