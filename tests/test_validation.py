@@ -10,19 +10,24 @@ import pytest
 
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
+    SKILL_URI_SCHEME,
     _assess_issue_quality_static,
     _assess_run_output_quality,
     _assess_script_size,
     _azure_credentials_hint,
     _build_persona_payload,
+    _classify_secret,
     _detect_unresolved_placeholders,
+    _discover_skills,
     _ensure_required_tags,
     _extract_env_vars,
+    _extract_secret_keys,
     _fetch_known_runtime_vars,
     _form_persona_full_name,
     _is_blocking_warning,
     _looks_like_runtime_var_error,
     _normalize_chat_persona_scope_id,
+    _parse_skill_file,
     _persona_short_name,
     _python_main_guard_has_paired_clause,
     _resolve_assistant_short_name,
@@ -36,11 +41,18 @@ from runwhen_platform_mcp.server import (
     _validate_slx_name,
     commit_slx,
     get_registry_codebundle,
+    get_skill,
+    get_workspace_locations,
+    get_workspace_secrets,
+    list_skills,
     run_script_and_wait,
     run_slx,
     search_registry,
     update_chat_command,
     validate_script,
+)
+from runwhen_platform_mcp.server import (
+    mcp as _mcp,
 )
 
 
@@ -1999,3 +2011,361 @@ class TestIssueSeverityRegex:
             assert any("severity" in n.lower() and "1-4" in n for n in notes), (
                 f"quoted severity {invalid!r} should be flagged: {notes!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Progressive-disclosure skills as MCP resources (cross-vendor)
+# ---------------------------------------------------------------------------
+
+
+class TestSkillLoader:
+    """Walks skills/*/SKILL.md, parses frontmatter, exposes records."""
+
+    def test_discovers_repo_skills(self) -> None:
+        skills = _discover_skills()
+        names = {s["name"] for s in skills}
+        # The canonical skill names should be present (from the repo's
+        # ``skills/`` tree). Spot-check a stable subset.
+        expected_subset = {
+            "build-runwhen-task",
+            "discover-secrets",
+            "discover-locations",
+            "find-and-deploy-codebundle",
+            "manage-rules",
+            "manage-commands",
+            "manage-knowledge",
+        }
+        assert expected_subset.issubset(names), names
+
+    def test_each_skill_has_required_fields(self) -> None:
+        for s in _discover_skills():
+            assert s["name"], s
+            assert s["description"], s
+            assert s["body"], s
+            assert s["uri"].startswith(SKILL_URI_SCHEME), s
+            assert s["uri"].endswith(s["name"]), s
+
+    def test_parse_skill_file_missing_frontmatter_returns_none(self, tmp_path) -> None:
+        bad = tmp_path / "bad.md"
+        bad.write_text("# No frontmatter here\n\nJust markdown.")
+        assert _parse_skill_file(bad) is None
+
+    def test_parse_skill_file_malformed_yaml_returns_none(self, tmp_path) -> None:
+        bad = tmp_path / "bad.md"
+        bad.write_text("---\nname: [unclosed\n---\nbody\n")
+        assert _parse_skill_file(bad) is None
+
+    def test_parse_skill_file_missing_name(self, tmp_path) -> None:
+        bad = tmp_path / "bad.md"
+        bad.write_text('---\ndescription: "no name"\n---\nbody\n')
+        assert _parse_skill_file(bad) is None
+
+    def test_parse_skill_file_happy_path(self, tmp_path) -> None:
+        ok = tmp_path / "ok.md"
+        ok.write_text("---\nname: my-skill\ndescription: Use when X.\n---\n# Body\n\nContent.\n")
+        parsed = _parse_skill_file(ok)
+        assert parsed is not None
+        assert parsed["name"] == "my-skill"
+        assert parsed["description"] == "Use when X."
+        assert parsed["body"].startswith("# Body")
+
+
+class TestSkillResourcesExposedViaMCP:
+    """Every discovered skill is exposed as an MCP resource."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_list_resources_includes_skills(self) -> None:
+        resources = self._run(_mcp.list_resources())
+        skill_uris = {str(r.uri) for r in resources if str(r.uri).startswith(SKILL_URI_SCHEME)}
+        # Match the loader's count exactly so we know nothing is dropped.
+        discovered = {s["uri"] for s in _discover_skills()}
+        assert skill_uris == discovered
+
+    def test_read_resource_returns_body(self) -> None:
+        skills = _discover_skills()
+        target = next(s for s in skills if s["name"] == "discover-secrets")
+        result = self._run(_mcp.read_resource(target["uri"]))
+        # FastMCP returns a ResourceResult with a list of ResourceContent
+        # objects; the body lives on `.content`.
+        body = result.contents[0].content
+        assert "discover-secrets" not in body.lower() or "kubeconfig" in body.lower()
+        # And the description on the LIST entry comes from frontmatter.
+        resources = self._run(_mcp.list_resources())
+        entry = next(r for r in resources if str(r.uri) == target["uri"])
+        assert entry.description == target["description"]
+
+
+class TestListSkillsAndGetSkillTools:
+    """Fallback tools for clients that under-surface MCP resources."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_list_skills_returns_all(self) -> None:
+        out = json.loads(self._run(list_skills()))
+        discovered = _discover_skills()
+        assert out["count"] == len(discovered)
+        names = {s["name"] for s in out["skills"]}
+        assert names == {s["name"] for s in discovered}
+        # Each entry carries a usable URI for clients that prefer the
+        # resource pathway.
+        for entry in out["skills"]:
+            assert entry["uri"].startswith(SKILL_URI_SCHEME)
+            assert entry["description"]
+
+    def test_list_skills_sorted_deterministic(self) -> None:
+        out = json.loads(self._run(list_skills()))
+        names = [s["name"] for s in out["skills"]]
+        assert names == sorted(names)
+
+    def test_get_skill_returns_body(self) -> None:
+        out = json.loads(self._run(get_skill(name="discover-secrets")))
+        assert out["name"] == "discover-secrets"
+        assert out["uri"] == f"{SKILL_URI_SCHEME}discover-secrets"
+        assert out["body"]
+        assert "kubeconfig" in out["body"].lower()
+
+    def test_get_skill_unknown_name_lists_available(self) -> None:
+        out = json.loads(self._run(get_skill(name="nope-no-such-skill")))
+        assert "error" in out
+        assert "available" in out
+        assert "discover-secrets" in out["available"]
+
+
+# ---------------------------------------------------------------------------
+# get_workspace_secrets wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestClassifySecret:
+    """Heuristic platform/env-var inference for workspace secret keys."""
+
+    def test_kubeconfig(self) -> None:
+        platform, env_var = _classify_secret("kubeconfig")
+        assert platform == "kubernetes"
+        assert env_var == "kubeconfig"
+
+    def test_azure_credentials(self) -> None:
+        platform, env_var = _classify_secret("azure_credentials")
+        assert platform == "azure"
+        assert env_var == "azure_credentials"
+
+    def test_azure_client_id_variants(self) -> None:
+        # Hyphenated and underscored variants both map to AZURE_CLIENT_ID.
+        for key in ("azure-clientId", "az-clientid", "clientId", "client_id"):
+            platform, env_var = _classify_secret(key)
+            assert platform == "azure", key
+            assert env_var == "AZURE_CLIENT_ID", key
+
+    def test_aws_credentials(self) -> None:
+        platform, env_var = _classify_secret("aws_credentials")
+        assert platform == "aws"
+
+    def test_papi_user_token(self) -> None:
+        for key in ("USER_TOKEN", "BETA-USER_TOKEN", "PROD-USER_TOKEN"):
+            platform, env_var = _classify_secret(key)
+            assert platform == "papi", key
+            assert env_var == "USER_TOKEN", key
+
+    def test_github_repo_token(self) -> None:
+        platform, env_var = _classify_secret("RUNWHEN-REPO-TOKEN")
+        assert platform == "github"
+        assert env_var == "GITHUB_TOKEN"
+
+    def test_unknown_falls_back_to_identity(self) -> None:
+        platform, env_var = _classify_secret("totally-custom-thing")
+        assert platform == "other"
+        assert env_var == "totally-custom-thing"
+
+
+class TestExtractSecretKeys:
+    """Normalising PAPI's varied secrets-keys response shapes."""
+
+    def test_flat_string_list(self) -> None:
+        assert _extract_secret_keys(["a", "b", "c"]) == ["a", "b", "c"]
+
+    def test_list_of_dicts(self) -> None:
+        keys = _extract_secret_keys([{"key": "a"}, {"name": "b"}, {"workspaceKey": "c"}])
+        assert keys == ["a", "b", "c"]
+
+    def test_dict_with_keys_field(self) -> None:
+        assert _extract_secret_keys({"keys": ["a", "b"]}) == ["a", "b"]
+
+    def test_dict_with_results_field(self) -> None:
+        assert _extract_secret_keys({"results": [{"key": "a"}]}) == ["a"]
+
+    def test_unsupported_shape_returns_empty(self) -> None:
+        assert _extract_secret_keys("not-a-list") == []
+        assert _extract_secret_keys(None) == []
+
+
+class TestGetWorkspaceSecretsWrapper:
+    """``get_workspace_secrets`` returns structured guidance."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_groups_by_platform(self, mock_get, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_get.return_value = [
+            "kubeconfig",
+            "azure_credentials",
+            "azure-clientId",
+            "azure-clientSecret",
+            "BETA-USER_TOKEN",
+            "RUNWHEN-REPO-TOKEN",
+        ]
+        result = json.loads(self._run(get_workspace_secrets(workspace_name="test-ws")))
+        groups = result["platform_groups"]
+        assert "kubeconfig" in groups["kubernetes"]
+        assert "azure_credentials" in groups["azure"]
+        assert "BETA-USER_TOKEN" in groups["papi"]
+        assert "RUNWHEN-REPO-TOKEN" in groups["github"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_recommended_secret_vars_uses_correct_env_var(self, mock_get, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_get.return_value = ["kubeconfig", "azure-clientId"]
+        result = json.loads(self._run(get_workspace_secrets(workspace_name="test-ws")))
+        # kubeconfig stays lowercase, clientId becomes AZURE_CLIENT_ID.
+        assert result["recommended_secret_vars"]["kubernetes"] == {"kubeconfig": "kubeconfig"}
+        assert result["recommended_secret_vars"]["azure"]["AZURE_CLIENT_ID"] == ("azure-clientId")
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_carries_skill_reference_and_semantics(self, mock_get, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_get.return_value = ["kubeconfig"]
+        result = json.loads(self._run(get_workspace_secrets(workspace_name="test-ws")))
+        assert result["skill_reference"] == f"{SKILL_URI_SCHEME}discover-secrets"
+        assert "FILE PATHS" in result["runtime_semantics"]
+        # Backward compat: the raw key list is preserved.
+        assert result["secrets"] == ["kubeconfig"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_empty_secrets_response_does_not_crash(self, mock_get, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_get.return_value = []
+        result = json.loads(self._run(get_workspace_secrets(workspace_name="test-ws")))
+        assert result["secrets"] == []
+        assert result["platform_groups"] == {}
+
+
+# ---------------------------------------------------------------------------
+# get_workspace_locations wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestGetWorkspaceLocationsWrapper:
+    """``get_workspace_locations`` returns structured guidance with recommendations."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._get_authorized_locations",
+        new_callable=mock.AsyncMock,
+    )
+    def test_single_private_location_auto_resolves(self, mock_locs, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_locs.return_value = [
+            {"name": "watcher-controlplane", "type": "workspace", "health": "online"}
+        ]
+        result = json.loads(self._run(get_workspace_locations(workspace_name="test-ws")))
+        assert result["recommended"] == "watcher-controlplane"
+        assert result["auto_resolves"] is True
+        assert "omit" in result["disambiguation_hint"].lower()
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._infer_location_from_slxs",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch(
+        "runwhen_platform_mcp.server._get_authorized_locations",
+        new_callable=mock.AsyncMock,
+    )
+    def test_multiple_private_inferred_pick_resolves(self, mock_locs, mock_infer, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_locs.return_value = [
+            {"name": "prod-runner", "type": "workspace", "health": "online"},
+            {"name": "dev-runner", "type": "workspace", "health": "online"},
+        ]
+        mock_infer.return_value = "prod-runner"
+        result = json.loads(self._run(get_workspace_locations(workspace_name="test-ws")))
+        assert result["recommended"] == "prod-runner"
+        assert result["auto_resolves"] is True
+        assert "existing SLX usage" in result["disambiguation_hint"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._infer_location_from_slxs",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch(
+        "runwhen_platform_mcp.server._get_authorized_locations",
+        new_callable=mock.AsyncMock,
+    )
+    def test_multiple_private_ambiguous_recommends_user_input(
+        self, mock_locs, mock_infer, mock_ws
+    ) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_locs.return_value = [
+            {"name": "prod-runner", "type": "workspace", "health": "online"},
+            {"name": "dev-runner", "type": "workspace", "health": "online"},
+        ]
+        mock_infer.return_value = None
+        result = json.loads(self._run(get_workspace_locations(workspace_name="test-ws")))
+        assert result["recommended"] is None
+        assert result["auto_resolves"] is False
+        assert "Ask the user" in result["disambiguation_hint"]
+        assert "prod-runner" in result["disambiguation_hint"]
+        assert "dev-runner" in result["disambiguation_hint"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._get_authorized_locations",
+        new_callable=mock.AsyncMock,
+    )
+    def test_only_public_locations_warns_about_internal_access(self, mock_locs, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_locs.return_value = [{"name": "public-runner", "type": "public", "health": "online"}]
+        result = json.loads(self._run(get_workspace_locations(workspace_name="test-ws")))
+        assert result["recommended"] == "public-runner"
+        assert result["auto_resolves"] is True
+        assert "internal" in result["disambiguation_hint"].lower()
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._get_authorized_locations",
+        new_callable=mock.AsyncMock,
+    )
+    def test_no_runners_returns_actionable_hint(self, mock_locs, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_locs.return_value = []
+        result = json.loads(self._run(get_workspace_locations(workspace_name="test-ws")))
+        assert result["count"] == 0
+        assert result["recommended"] is None
+        assert result["auto_resolves"] is False
+        assert "Register" in result["disambiguation_hint"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._get_authorized_locations",
+        new_callable=mock.AsyncMock,
+    )
+    def test_carries_skill_reference_and_raw_list(self, mock_locs, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        raw = [{"name": "wr", "type": "workspace", "health": "online"}]
+        mock_locs.return_value = raw
+        result = json.loads(self._run(get_workspace_locations(workspace_name="test-ws")))
+        assert result["skill_reference"] == f"{SKILL_URI_SCHEME}discover-locations"
+        # Backward compat: raw PAPI list preserved.
+        assert result["locations"] == raw

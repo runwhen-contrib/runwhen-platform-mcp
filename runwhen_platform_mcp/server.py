@@ -44,6 +44,7 @@ import os
 import re
 import time
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
 
@@ -243,7 +244,26 @@ def _build_server_instructions() -> str:
         "- Python/Bash SLI: `main()` returns/writes float 0-1\n\n"
         "REQUIRED TAGS for `commit_slx`: "
         "access='read-write'|'read-only', "
-        "data='logs-bulk'|'config'|'logs-stacktrace'"
+        "data='logs-bulk'|'config'|'logs-stacktrace'\n\n"
+        #
+        # ── Progressive-disclosure skills ──
+        #
+        "SKILLS (progressive disclosure for any MCP client):\n"
+        "- This server exposes 13 SKILL.md guides as MCP resources under the "
+        "`runwhen-skill://` URI scheme. Each skill has a short description in "
+        "the resource list and a full body fetchable on demand — the "
+        "standards-correct way to keep your context lean.\n"
+        "- Cross-vendor clients can also use the `list_skills` and "
+        "`get_skill(name)` tool shims to discover and load skills without "
+        "touching MCP resources.\n"
+        "- Key skills: `build-runwhen-task`, `run-existing-slx`, "
+        "`discover-secrets`, `discover-locations`, "
+        "`find-and-deploy-codebundle`, `create-ai-assistant`, "
+        "`manage-rules`, `manage-commands`, `manage-knowledge`, "
+        "`configure-resource-path`, `configure-hierarchy`, "
+        "`build-operational-context`, `verify-mcp-setup`.\n"
+        "- ALWAYS prefer reading the relevant skill over guessing — tool "
+        "docstrings cross-link to the skills they pair with."
     )
 
 
@@ -251,6 +271,167 @@ mcp = FastMCP(
     _build_server_name(),
     instructions=_build_server_instructions(),
 )
+
+
+# ---------------------------------------------------------------------------
+# Skills: progressive disclosure for ALL MCP clients
+# ---------------------------------------------------------------------------
+#
+# Skills live as SKILL.md files in ``skills/<skill-name>/`` with YAML
+# frontmatter (``name`` + ``description``). Filesystem-based clients
+# (Cursor, Claude Code, Copilot) discover them through symlinks
+# (.claude/skills, .github/skills), but *cross-vendor* MCP clients
+# (Goose, Continue, Cline, OpenAI Codex CLI, custom Gemini agents, ...)
+# only see what the MCP protocol exposes.
+#
+# We expose each skill *both* as:
+#   1. An MCP **resource** (the standards-correct progressive-disclosure
+#      primitive — every compliant MCP client gets it for free), and
+#   2. ``list_skills()`` / ``get_skill()`` *tool shims* for clients that
+#      under-surface resources in their default UX (some OpenAI / Gemini
+#      function-calling clients ignore non-tool primitives).
+#
+# The result: ANY agent connected via MCP can follow the same progressive
+# disclosure pattern Cursor / Claude Code already use — read a short
+# description, fetch the body on demand, keep the tool surface lean.
+
+# Canonical scheme used in resource URIs so clients can recognise our
+# skills (vs other resource families).
+SKILL_URI_SCHEME = "runwhen-skill://"
+
+# Frontmatter pattern: YAML block delimited by ``---`` at file head.
+_SKILL_FRONTMATTER_RE = re.compile(
+    r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z",
+    re.DOTALL,
+)
+
+
+def _skills_root() -> Path:
+    """Return the canonical skills directory.
+
+    Override with ``RUNWHEN_SKILLS_DIR`` for tests / non-default deployments.
+    Falls back to ``<repo-root>/skills`` (two parents up from this file).
+    """
+    override = os.environ.get("RUNWHEN_SKILLS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    return (Path(__file__).resolve().parent.parent / "skills").resolve()
+
+
+def _parse_skill_file(path: Path) -> dict[str, Any] | None:
+    """Read a SKILL.md and return ``{name, description, body, path}``.
+
+    Returns ``None`` when the file is missing required frontmatter so we
+    fail soft at registration time rather than crashing the server.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _SKILL_FRONTMATTER_RE.match(raw)
+    if not match:
+        return None
+    try:
+        meta = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    name = meta.get("name")
+    description = meta.get("description")
+    if not isinstance(name, str) or not isinstance(description, str):
+        return None
+    return {
+        "name": name.strip(),
+        "description": description.strip(),
+        "body": match.group(2),
+        "path": str(path),
+    }
+
+
+def _discover_skills(root: Path | None = None) -> list[dict[str, Any]]:
+    """Walk ``skills/*/SKILL.md`` and return parsed skill records.
+
+    Sorted by ``name`` so list_skills output is deterministic across
+    clients and OSes.
+    """
+    base = root or _skills_root()
+    if not base.is_dir():
+        return []
+    skills: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for skill_md in sorted(base.glob("*/SKILL.md")):
+        parsed = _parse_skill_file(skill_md)
+        if parsed is None:
+            continue
+        if parsed["name"] in seen:
+            continue  # de-dup if symlinks introduce a cycle
+        seen.add(parsed["name"])
+        parsed["uri"] = f"{SKILL_URI_SCHEME}{parsed['name']}"
+        skills.append(parsed)
+    return skills
+
+
+# Cache the discovery result. Skills are mostly static at deployment time
+# but we expose a ``reload`` flag on ``get_skill`` to support iterative
+# authoring without a server restart.
+_skill_cache: dict[str, dict[str, Any]] | None = None
+
+
+def _get_skill_index(*, reload: bool = False) -> dict[str, dict[str, Any]]:
+    """Return a ``{name: skill}`` index, populating the cache on first call."""
+    global _skill_cache
+    if _skill_cache is None or reload:
+        _skill_cache = {s["name"]: s for s in _discover_skills()}
+    return _skill_cache
+
+
+def _register_skill_resources() -> int:
+    """Register every discovered skill as an MCP resource.
+
+    Returns the number of resources registered. Called once at module
+    import time. Failures are non-fatal — the tool shims still work.
+    """
+    skills = _discover_skills()
+    registered = 0
+    for skill in skills:
+        try:
+            _register_one_skill_resource(skill)
+            registered += 1
+        except Exception:
+            # Don't let a malformed skill take down the whole server.
+            continue
+    return registered
+
+
+def _register_one_skill_resource(skill: dict[str, Any]) -> None:
+    """Register a single skill via the ``@mcp.resource`` decorator.
+
+    The decorator both wraps the function as an MCP resource AND adds it
+    to the server's resource registry; we do NOT need (and must not call)
+    ``mcp.add_resource`` afterwards.
+    """
+    uri = skill["uri"]
+    name = skill["name"]
+    description = skill["description"]
+    body = skill["body"]  # Bind locally so the closure captures THIS skill.
+
+    @mcp.resource(
+        uri,
+        name=f"skill:{name}",
+        description=description,
+        mime_type="text/markdown",
+        tags={"skill", "runwhen"},
+    )
+    def _skill_resource() -> str:  # pragma: no cover - exercised via mcp client
+        return body
+
+
+# Build the resource set at import time. The count is logged via the
+# instructions block but we don't fail if discovery is empty (some
+# deployments may not ship the skills/ tree).
+_SKILL_RESOURCE_COUNT = _register_skill_resources()
+
 
 # ---------------------------------------------------------------------------
 # Tool Builder constants
@@ -2457,7 +2638,10 @@ async def create_chat_rule(
     ] = None,
     is_active: bool = Field(default=True, description="Whether the rule is active."),
 ) -> str:
-    """Create a chat rule. Uses AgentFarm internal API."""
+    """Create a chat rule. Uses AgentFarm internal API.
+
+    Skill: runwhen-skill://manage-rules (scoping + wording guidance).
+    """
     ws = await _resolve_workspace(workspace_name)
     resolved_scope_id = scope_id
     if scope_type == "persona" and scope_id is not None:
@@ -2631,6 +2815,8 @@ async def create_chat_command(
     ] = None,
 ) -> str:
     """Create a chat command (slash-command). Name must be alphanumeric, underscore, or hyphen only.
+
+    Skill: runwhen-skill://manage-commands (scoping, scheduling, sinks).
 
     Commands are invoked in chat as [/label](cmd://name).
 
@@ -3057,6 +3243,8 @@ async def create_assistant(
     ] = None,
 ) -> str:
     """Create a new AI assistant (persona) in a workspace.
+
+    Skill: runwhen-skill://create-ai-assistant (full setup workflow).
 
     An assistant is a persona that tailors how the RunWhen AI investigates and
     acts — e.g. an "Azure DevOps Helper" focused on a specific tech stack. The
@@ -3498,6 +3686,8 @@ async def create_knowledge_base_article(
 ) -> str:
     """Create a new Knowledge Base article in a workspace.
 
+    Skill: runwhen-skill://manage-knowledge (article scoping + lifecycle).
+
     KB articles are indexed into the Knowledge Overlay Graph and become
     searchable by the workspace AI assistant and other tools.
 
@@ -3661,6 +3851,8 @@ async def search_registry(
     max_results: int = Field(default=10, description="Max results to return."),
 ) -> str:
     """Search the RunWhen CodeBundle Registry for reusable automation.
+
+    Skill: runwhen-skill://find-and-deploy-codebundle (search → deploy workflow).
 
     Use this BEFORE writing a custom script — there may already be a
     production-ready codebundle for the task.  Returns codebundles with
@@ -4032,33 +4224,354 @@ async def get_workspace_context(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Skill discovery shims for clients that under-surface MCP resources
+# ---------------------------------------------------------------------------
+#
+# Skills are exposed primarily as MCP resources (see the skill-loader at the
+# top of this file). Resources are the standards-correct progressive-
+# disclosure primitive. However, some clients (e.g. OpenAI function-calling
+# clients running through a simple harness, certain CLI MCP clients) only
+# surface tools in their prompt UX. These two tools give those clients the
+# same affordance.
+
+
+@mcp.tool()
+async def list_skills() -> str:
+    """List every progressive-disclosure skill the server exposes.
+
+    Returns ``[{name, description, uri}]``. Use this when you want to know
+    what guidance is available before running a tool — read the description
+    to decide whether you need the full body, then fetch it with
+    ``get_skill(name)`` (or, if your client supports MCP resources directly,
+    read the ``uri`` via the resource read API).
+
+    Cross-vendor note: this is the same information that ``list_resources``
+    returns for the ``runwhen-skill://`` family. Clients that surface MCP
+    resources should prefer that path; this tool is the explicit fallback.
+    """
+    skills = list(_get_skill_index().values())
+    summaries = [
+        {
+            "name": s["name"],
+            "uri": s["uri"],
+            "description": s["description"],
+        }
+        for s in sorted(skills, key=lambda x: x["name"])
+    ]
+    return _json_response(
+        {
+            "count": len(summaries),
+            "skills": summaries,
+            "usage_hint": (
+                "Pick a skill whose description matches your current task, "
+                "then call get_skill(name='<name>') to load its full body. "
+                "Skills are also addressable as MCP resources at "
+                f"{SKILL_URI_SCHEME}<name>."
+            ),
+        }
+    )
+
+
+@mcp.tool()
+async def get_skill(
+    name: str = Field(
+        description=(
+            "Skill name (e.g. 'build-runwhen-task'). Call list_skills first "
+            "if you don't know the available names."
+        )
+    ),
+    reload: bool = Field(
+        default=False,
+        description="Force re-read from disk (default: use cached version).",
+    ),
+) -> str:
+    """Return the full body of a skill by name.
+
+    Returns ``{name, description, uri, body, path}`` on success or
+    ``{error, available}`` when the name is unknown so the agent can self-
+    correct without a second round-trip.
+    """
+    index = _get_skill_index(reload=reload)
+    skill = index.get(name)
+    if skill is None:
+        return _json_response(
+            {
+                "error": f"Unknown skill {name!r}.",
+                "hint": (
+                    "Call list_skills() to see available names, or read the "
+                    f"resource list for URIs under {SKILL_URI_SCHEME}."
+                ),
+                "available": sorted(index.keys()),
+            }
+        )
+    return _json_response(
+        {
+            "name": skill["name"],
+            "description": skill["description"],
+            "uri": skill["uri"],
+            "body": skill["body"],
+            "path": skill["path"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Location & secret discovery (structured, agent-friendly responses)
+# ---------------------------------------------------------------------------
+
+
+# Platform inference heuristics for secret names. Order matters — we walk
+# in this order and assign each secret to the first matching platform, so
+# more-specific patterns (azure-clientId before azure) come first. Each
+# entry is (platform_label, compiled_regex, recommended_env_var).
+#
+# The recommended_env_var is what the agent should put on the LEFT side of
+# the ``secret_vars`` mapping (the script-facing env var name). The
+# workspace-secret key (right side) is the secret's actual key.
+_SECRET_PLATFORM_RULES: list[tuple[str, re.Pattern[str], str]] = [
+    ("kubernetes", re.compile(r"^kubeconfig$", re.IGNORECASE), "kubeconfig"),
+    ("azure", re.compile(r"(?i)azure[_-]?credentials?$"), "azure_credentials"),
+    ("azure", re.compile(r"(?i)client[_-]?id$"), "AZURE_CLIENT_ID"),
+    ("azure", re.compile(r"(?i)client[_-]?secret$"), "AZURE_CLIENT_SECRET"),
+    ("azure", re.compile(r"(?i)tenant[_-]?id$"), "AZURE_TENANT_ID"),
+    ("azure", re.compile(r"(?i)subscription[_-]?id$"), "AZURE_SUBSCRIPTION_ID"),
+    ("aws", re.compile(r"(?i)aws[_-]?credentials?$"), "aws_credentials"),
+    ("aws", re.compile(r"(?i)aws[_-]?access[_-]?key[_-]?id$"), "AWS_ACCESS_KEY_ID"),
+    ("aws", re.compile(r"(?i)aws[_-]?secret[_-]?access[_-]?key$"), "AWS_SECRET_ACCESS_KEY"),
+    ("aws", re.compile(r"(?i)aws[_-]?session[_-]?token$"), "AWS_SESSION_TOKEN"),
+    ("gcp", re.compile(r"(?i)gcp[_-]?credentials?$"), "gcp_credentials"),
+    ("gcp", re.compile(r"(?i)(?:ops-suite-)?sa$"), "GOOGLE_APPLICATION_CREDENTIALS"),
+    ("gcp", re.compile(r"(?i)service[_-]?account$"), "GOOGLE_APPLICATION_CREDENTIALS"),
+    ("github", re.compile(r"(?i)(?:^|[_-])repo[_-]?token$"), "GITHUB_TOKEN"),
+    ("github", re.compile(r"(?i)github[_-]?token$"), "GITHUB_TOKEN"),
+    ("slack", re.compile(r"(?i)^slack(?:[_-]webhook|[_-]token)?$"), "SLACK_TOKEN"),
+    ("papi", re.compile(r"(?i)user[_-]?token$"), "USER_TOKEN"),
+]
+
+
+def _classify_secret(key: str) -> tuple[str, str]:
+    """Return ``(platform, recommended_env_var_name)`` for *key*.
+
+    Falls back to ``("other", key)`` when no heuristic matches, so the
+    agent still gets a usable identity mapping.
+    """
+    for platform, pattern, env_var in _SECRET_PLATFORM_RULES:
+        if pattern.search(key):
+            return platform, env_var
+    return "other", key
+
+
+def _extract_secret_keys(raw: Any) -> list[str]:
+    """Normalise PAPI's secrets-keys response into a flat ``list[str]``."""
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict):
+                k = item.get("key") or item.get("name") or item.get("workspaceKey")
+                if isinstance(k, str):
+                    out.append(k)
+        return out
+    if isinstance(raw, dict):
+        # Some PAPI versions return ``{"keys": [...]}`` or
+        # ``{"results": [...]}``.
+        for field in ("keys", "results", "secret_keys", "secretKeys"):
+            value = raw.get(field)
+            if isinstance(value, list):
+                return _extract_secret_keys(value)
+    return []
+
+
 @mcp.tool()
 async def get_workspace_secrets(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List available secret key names in a workspace.
+    """List available secret keys with platform grouping and mapping guidance.
 
-    Returns the secret keys that can be referenced when running or committing
-    scripts (e.g. "kubeconfig", "api-token"). These map environment variable
-    names to workspace-stored secrets.
+    Returns a structured payload that helps agents pick the right
+    ``secret_vars`` mapping for a task. The raw key list is preserved in
+    ``secrets`` for backward compatibility.
+
+    Response shape::
+
+      {
+        "workspace": "<ws>",
+        "secrets": [<raw keys>],
+        "platform_groups": { "kubernetes": ["kubeconfig"], "azure": [...], ... },
+        "recommended_secret_vars": {
+          "kubernetes": { "kubeconfig": "kubeconfig" },
+          "azure":      { "AZURE_CLIENT_ID": "...", ... },
+          ...
+        },
+        "runtime_semantics": "<critical note about file-path semantics>",
+        "skill_reference": "runwhen-skill://discover-secrets",
+      }
+
+    Critical for agents: workspace secrets are injected into scripts as
+    FILE PATHS, not literal values. See the ``discover-secrets`` skill
+    for the ``read_secret`` helper pattern.
     """
     ws = await _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-    return _json_response(data)
+    raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
+    keys = _extract_secret_keys(raw)
+
+    platform_groups: dict[str, list[str]] = {}
+    recommended_secret_vars: dict[str, dict[str, str]] = {}
+    for key in sorted(set(keys)):
+        platform, env_var = _classify_secret(key)
+        platform_groups.setdefault(platform, []).append(key)
+        recommended_secret_vars.setdefault(platform, {})[env_var] = key
+
+    return _json_response(
+        {
+            "workspace": ws,
+            "secrets": keys,
+            "platform_groups": platform_groups,
+            "recommended_secret_vars": recommended_secret_vars,
+            "runtime_semantics": (
+                "Workspace secrets are injected into scripts as FILE PATHS, "
+                "not literal values. Read them with: "
+                "`v = os.environ.get('NAME'); open(v).read().strip() if os.path.isfile(v) else v`. "
+                "See the discover-secrets skill for the full read_secret helper."
+            ),
+            "common_pitfalls": [
+                "Treating secret env vars as literal values instead of file paths.",
+                "Using uppercase 'KUBECONFIG' as the env-var name — by convention "
+                "it stays lowercase 'kubeconfig' to match the workspace key.",
+                "Forgetting azure_credentials (or the 4-tuple "
+                "clientId/clientSecret/tenantId/subscriptionId) on Azure tasks — "
+                "commit_slx will reject the SLX with a hint.",
+            ],
+            "skill_reference": f"{SKILL_URI_SCHEME}discover-secrets",
+            "next_step_hint": (
+                "Pick the entry under recommended_secret_vars that matches your "
+                "task's target platform and pass it as secret_vars= to commit_slx "
+                "or run_script. Merge multiple groups for multi-cloud tasks."
+            ),
+        }
+    )
+
+
+def _summarise_location(loc: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a PAPI location record to ``{name, type, health, raw}``."""
+    return {
+        "name": _loc_name(loc) or "",
+        "type": loc.get("type") or "",
+        "health": loc.get("health") or loc.get("status") or "",
+        "raw": loc,
+    }
 
 
 @mcp.tool()
 async def get_workspace_locations(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List available runner locations for a workspace.
+    """List runner locations with auto-resolution guidance and recommendations.
 
-    Runner locations are where scripts execute. Returns location identifiers
-    that can be used with run_script and commit_slx.
+    Returns a structured payload that tells the agent which location to
+    use (or to omit the parameter entirely when auto-resolution can pick).
+    The raw list is preserved in ``locations`` for backward compatibility.
+
+    Response shape::
+
+      {
+        "workspace": "<ws>",
+        "count": <int>,
+        "locations": [<raw>],
+        "private": [<summary>],     # workspace-type runners (preferred)
+        "public":  [<summary>],     # shared runners (fallback)
+        "recommended": "<name|null>",
+        "auto_resolves": <bool>,    # True when run_*/commit_slx can pick alone
+        "disambiguation_hint": "...",
+        "skill_reference": "runwhen-skill://discover-locations",
+      }
+
+    ``recommended`` is the name run_script / run_script_and_wait /
+    commit_slx WILL pick when the ``location`` parameter is omitted.
+    When ``auto_resolves`` is True the agent should NOT pass a
+    ``location`` argument at all.
     """
     ws = await _resolve_workspace(workspace_name)
     locations = await _get_authorized_locations(ws)
-    return _json_response(locations)
+
+    summarised = [_summarise_location(loc) for loc in locations]
+    private = [s for s in summarised if s["type"] != "public"]
+    public = [s for s in summarised if s["type"] == "public"]
+
+    recommended: str | None = None
+    auto_resolves = False
+    disambiguation_hint = ""
+
+    if len(private) == 1 and private[0]["name"]:
+        recommended = private[0]["name"]
+        auto_resolves = True
+        disambiguation_hint = (
+            "One private runner available — omit the location parameter and "
+            "the MCP will auto-resolve to it."
+        )
+    elif len(private) > 1:
+        # Mirror the disambiguation logic in _resolve_location: ask PAPI
+        # which one existing SLXs prefer. Treat failures as soft (the
+        # agent can still see the list).
+        try:
+            inferred = await _infer_location_from_slxs(ws)
+        except Exception:
+            inferred = None
+        private_names = {s["name"] for s in private if s["name"]}
+        if inferred and inferred in private_names:
+            recommended = inferred
+            auto_resolves = True
+            disambiguation_hint = (
+                f"Multiple private runners exist; auto-resolution will pick "
+                f"{inferred!r} based on existing SLX usage. Override with the "
+                "location parameter if a different runner is needed."
+            )
+        else:
+            recommended = None
+            auto_resolves = False
+            opts = ", ".join(sorted(private_names))
+            disambiguation_hint = (
+                f"Multiple private runners exist ({opts}) and auto-resolution "
+                "cannot disambiguate. Ask the user which to use, or inspect "
+                "existing SLXs via get_slx_runbook to see prevailing choices."
+            )
+    elif public:
+        # No private runners — fall back to the first public runner.
+        recommended = next((p["name"] for p in public if p["name"]), None)
+        auto_resolves = recommended is not None
+        disambiguation_hint = (
+            "No private runners — auto-resolution will fall back to the public "
+            "runner. Public runners cannot reach workspace-internal "
+            "infrastructure (Kubernetes, internal databases, etc.); register a "
+            "private runner if your task targets internal resources."
+        )
+    else:
+        disambiguation_hint = (
+            "No runners found for this workspace. Register a private runner "
+            "before running any tasks."
+        )
+
+    return _json_response(
+        {
+            "workspace": ws,
+            "count": len(summarised),
+            "locations": locations,
+            "private": private,
+            "public": public,
+            "recommended": recommended,
+            "auto_resolves": auto_resolves,
+            "disambiguation_hint": disambiguation_hint,
+            "skill_reference": f"{SKILL_URI_SCHEME}discover-locations",
+            "next_step_hint": (
+                "If auto_resolves is True, OMIT the location parameter when "
+                "calling run_script / run_script_and_wait / commit_slx; the "
+                "MCP will pick the recommended location for you. Pass an "
+                "explicit location only to override that choice."
+            ),
+        }
+    )
 
 
 def _resolve_script(
@@ -4136,6 +4649,8 @@ async def validate_script(
     Task scripts must return/write issues with keys: 'issue title',
     'issue description', 'issue severity' (1-4), 'issue next steps',
     and optionally 'issue observed at'.
+
+    Skill: runwhen-skill://build-runwhen-task (full authoring workflow).
     """
     try:
         script_resolved = _resolve_script(script, script_path, script_base64)
@@ -4544,6 +5059,9 @@ async def run_slx(
 ) -> str:
     """Run an existing SLX's runbook tasks on the workspace runner.
 
+    Skill: runwhen-skill://run-existing-slx — and default ``task_titles="*"``
+    (a literal resolved title produces empty passedTitles).
+
     This triggers execution of a previously committed SLX (not an ad-hoc script).
     Use this when you want to run a health check, troubleshooting task, or
     automation that already exists in the workspace.
@@ -4785,6 +5303,12 @@ async def commit_slx(
     ] = None,
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
+
+    Skills:
+      - runwhen-skill://build-runwhen-task (authoring workflow)
+      - runwhen-skill://discover-secrets   (secret_vars mapping)
+      - runwhen-skill://discover-locations (location selection)
+      - runwhen-skill://configure-hierarchy (hierarchy/resource_path)
 
     Creates a new SLX with the script as a Task (runbook) and/or SLI.
     The script should already be tested via run_script or run_script_and_wait.
@@ -5188,6 +5712,8 @@ _TOOL_FUNCTIONS = [
     get_registry_codebundle,
     deploy_registry_codebundle,
     get_workspace_context,
+    list_skills,
+    get_skill,
     get_workspace_secrets,
     get_workspace_locations,
     validate_script,

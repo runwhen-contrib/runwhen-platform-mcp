@@ -483,13 +483,31 @@ Put a `RUNWHEN.md` in your project root with infrastructure rules (DBs, naming, 
 | **MCP server** | `runwhen_platform_mcp/` | Python package; run via `runwhen-platform-mcp` or `python -m runwhen_platform_mcp.server`. |
 | **Docs** | `runwhen_platform_mcp/docs/` | Tool Builder flow, RUNWHEN.md template/example. |
 | **Tests** | `tests/` | Pytest tests; run with `pytest tests/ -v` (see `requirements-dev.txt`). |
-| **Skills** | `skills/` | Reusable AI workflow skills (SKILL.md) — discovered by Cursor, Copilot, and Claude. Symlinked at `.github/skills/` for Copilot auto-discovery. |
+| **Skills** | `skills/` | Reusable AI workflow skills (SKILL.md). Filesystem-discovered by Cursor / Copilot / Claude via `.github/skills/` & `.claude/skills/` symlinks, AND exposed to **every MCP client** as `runwhen-skill://<name>` resources (plus `list_skills` / `get_skill` tool fallbacks for clients that under-surface resources). |
 | **Rules & agents** | `rules/`, `agents/` | Optional Cursor rules and agent personas. |
 | **Docker** | `Dockerfile` | Container image for remote HTTP deployment. Published to `ghcr.io/runwhen-contrib/runwhen-platform-mcp`. |
 | **Cursor plugin** | `.cursor-plugin/`, `mcp.json` | Plugin metadata and example MCP config. |
 | **Copilot instructions** | `.github/copilot-instructions.md` | Always-on instructions for GitHub Copilot. |
 
 The MCP server is client-agnostic; client-specific pieces (`.cursor-plugin/`, `.github/copilot-instructions.md`) are optional.
+
+---
+
+## Skills (progressive disclosure for any MCP client)
+
+`skills/<name>/SKILL.md` files are RunWhen's progressive-disclosure surface — short, task-focused guides agents load on demand instead of bundling everything into tool docstrings.
+
+**How each agent type sees them:**
+
+| Client | Discovery path | Mechanism |
+|--------|----------------|-----------|
+| Cursor / Claude Code / Copilot | `.cursor-plugin/`, `.claude/skills/`, `.github/skills/` (symlinks to `skills/`) | Native filesystem skill loading |
+| Goose, Continue, Cline, OpenAI Codex CLI, **any other compliant MCP client** | `runwhen-skill://<name>` MCP resources | Standard MCP `resources/list` + `resources/read` |
+| Clients that surface tools only (some OpenAI / Gemini function-callers) | `list_skills()` + `get_skill(name)` tool shims | Fallback path with identical content |
+
+The single source of truth is `skills/<name>/SKILL.md`. Frontmatter `description` is the trigger an agent reads to decide whether to load the body — keep it 1-2 sentences with explicit "Use when:" clauses.
+
+**Authoring rule of thumb:** if you find yourself growing a tool docstring past ~30 lines, lift the content into a new skill and reference its URI from the docstring instead. Tool-side guidance should be short; depth goes in skills.
 
 ---
 

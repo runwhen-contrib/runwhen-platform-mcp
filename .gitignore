@@ -22,3 +22,6 @@ build/
 *.log
 tmp/
 temp/
+
+# Local scratch / issue triage notes (not for tracking)
+.issues/
