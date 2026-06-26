@@ -426,6 +426,8 @@ The server exposes these tools, grouped by use case.
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
 | `RUNWHEN_AIRGAP` | No | Set to `true` for airgapped environments. `search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call to the registry. |
 | `RUNWHEN_REGISTRY_TIMEOUT_S` | No | HTTP timeout (seconds) for registry calls. Default `10`. Lowered from the PAPI default so an unreachable registry fails fast and is reported gracefully. |
+| `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` | No | Soft warning threshold for script payload size. Default `10240` (10KB). Scripts above this size produce an advisory warning in `validate_script` / `run_script_and_wait` — MCP HTTP intermediaries often truncate base64 payloads above ~13KB. |
+| `RUNWHEN_SCRIPT_HARD_MAX_BYTES` | No | Hard cap for script payload size. Default `65536` (64KB). `commit_slx` / `run_script*` reject scripts above this with an error and suggest using a registry codebundle or `script_path`. |
 
 **HTTP / OAuth only** (when `MCP_TRANSPORT=http`; see [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments)):
 

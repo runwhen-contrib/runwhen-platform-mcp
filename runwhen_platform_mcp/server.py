@@ -914,6 +914,303 @@ def _azure_credentials_hint(
     )
 
 
+# ---------------------------------------------------------------------------
+# Script size + transport guards
+# ---------------------------------------------------------------------------
+
+# Soft warning threshold. Above this size, base64-encoded payloads start
+# brushing up against MCP HTTP intermediary limits (≈13KB observed in the
+# wild — see .issues/06-25-2026.md). Below this we trust the transport.
+try:
+    SCRIPT_SOFT_MAX_BYTES = int(os.environ.get("RUNWHEN_SCRIPT_SOFT_MAX_BYTES", "10240"))
+except ValueError:
+    SCRIPT_SOFT_MAX_BYTES = 10240
+
+# Hard cap. Above this we reject the call rather than ship a payload that
+# the transport will likely truncate or 413. Configurable so customers with
+# generous proxies can opt-in to larger scripts.
+try:
+    SCRIPT_HARD_MAX_BYTES = int(os.environ.get("RUNWHEN_SCRIPT_HARD_MAX_BYTES", "65536"))
+except ValueError:
+    SCRIPT_HARD_MAX_BYTES = 65536
+
+
+def _assess_script_size(script: str, *, label: str = "script") -> tuple[str | None, str | None]:
+    """Inspect script size and return ``(warning, error)`` strings.
+
+    Both can be ``None``. The base64 expansion factor (≈4/3) is applied
+    because some MCP intermediaries re-encode payloads, so the practical
+    transport budget is base64 bytes, not raw bytes.
+    """
+    n = len(script.encode("utf-8"))
+    b64_n = (n + 2) // 3 * 4
+    if n > SCRIPT_HARD_MAX_BYTES:
+        return (
+            None,
+            (
+                f"{label} is {n} bytes (~{b64_n} bytes base64), exceeding the "
+                f"hard cap of {SCRIPT_HARD_MAX_BYTES} bytes. MCP HTTP "
+                "intermediaries truncate or 413 large payloads. Try:\n"
+                "  1. Use a registry codebundle (search_registry + "
+                "deploy_registry_codebundle) for reusable automation.\n"
+                "  2. Split the script: move helpers into a custom codebundle "
+                "git repo and deploy via deploy_registry_codebundle.\n"
+                "  3. In stdio mode, pass script_path=/local/path/to/script.py "
+                "instead of inline script or script_base64.\n"
+                "  4. Raise RUNWHEN_SCRIPT_HARD_MAX_BYTES if your transport "
+                "supports larger payloads."
+            ),
+        )
+    if n > SCRIPT_SOFT_MAX_BYTES:
+        return (
+            (
+                f"{label} is {n} bytes (~{b64_n} bytes base64). Some MCP HTTP "
+                "intermediaries truncate payloads above ~13KB base64. If the "
+                "call fails or times out, prefer script_path (stdio) or a "
+                "registry codebundle. Raise RUNWHEN_SCRIPT_SOFT_MAX_BYTES to "
+                "silence this warning."
+            ),
+            None,
+        )
+    return (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Issue / report quality contract
+# ---------------------------------------------------------------------------
+
+# Minimum reasonable lengths for issue payload fields. Shorter than this is a
+# strong signal the agent is producing a stub instead of useful telemetry.
+MIN_ISSUE_DESCRIPTION_CHARS = 40
+MIN_ISSUE_NEXT_STEPS_CHARS = 20
+MIN_ISSUE_TITLE_CHARS = 8
+
+# Tokens that suggest a placeholder rather than real content.
+_PLACEHOLDER_TOKENS = (
+    "todo",
+    "fixme",
+    "xxx",
+    "lorem ipsum",
+    "placeholder",
+    "fill me in",
+    "tbd",
+)
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    if not value:
+        return False
+    low = value.strip().lower()
+    return any(tok in low for tok in _PLACEHOLDER_TOKENS)
+
+
+# Regexes used to spot common contract violations in script source. We
+# deliberately err on the side of false positives — the cost of a warning
+# is small, the cost of an SLX returning empty issues for weeks is high.
+_PY_ISSUE_DESC_EMPTY_RE = re.compile(
+    r'["\']issue description["\']\s*:\s*["\']\s*["\']',
+)
+_PY_ISSUE_NEXT_STEPS_EMPTY_RE = re.compile(
+    r'["\']issue next steps["\']\s*:\s*["\']\s*["\']',
+)
+_PY_ISSUE_TITLE_EMPTY_RE = re.compile(
+    r'["\']issue title["\']\s*:\s*["\']\s*["\']',
+)
+_PY_ISSUE_SEVERITY_INVALID_RE = re.compile(
+    r'["\']issue severity["\']\s*:\s*(?:[05-9]|10|"0"|"5"|"\d+")',
+)
+_BASH_ISSUE_DESC_EMPTY_RE = re.compile(
+    r'--arg\s+description\s+["\']\s*["\']',
+)
+
+
+def _assess_issue_quality_static(script: str, interpreter: str, task_type: str) -> list[str]:
+    """Scan script source for common issue-contract violations.
+
+    Returns a list of human-readable advisory warnings. These are *not*
+    blocking — they surface in ``validate_script`` / ``run_script_and_wait``
+    output so agents can self-correct before commit. SLIs are skipped
+    (they emit a metric, not issues).
+    """
+    if task_type == "sli":
+        return []
+
+    findings: list[str] = []
+
+    if interpreter == "python":
+        if _PY_ISSUE_DESC_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty 'issue description'. Issues with empty "
+                "descriptions provide no signal to operators or workspace_chat. "
+                "Include the observed value, threshold, and any relevant context."
+            )
+        if _PY_ISSUE_NEXT_STEPS_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty 'issue next steps'. Always provide a "
+                "concrete remediation hint (kubectl command, runbook link, owner)."
+            )
+        if _PY_ISSUE_TITLE_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty 'issue title'. Titles are the primary "
+                "key for indexing and dedup — they must be present and meaningful."
+            )
+        if _PY_ISSUE_SEVERITY_INVALID_RE.search(script):
+            findings.append(
+                "Found an 'issue severity' value outside 1-4. RunWhen accepts "
+                "only integers 1 (critical) through 4 (informational)."
+            )
+        # No f-string / no format anywhere in the script that emits issues
+        # is a strong signal the description is static. Combined with the
+        # presence of an 'issue description' key, that's almost always a bug.
+        has_issue_key = re.search(r'["\']issue\s+(?:title|description)["\']', script)
+        has_dynamic = bool(
+            re.search(r'f["\']', script)
+            or ".format(" in script
+            or re.search(r"%\s*\(", script)
+            or "+" in script
+        )
+        if has_issue_key and not has_dynamic:
+            findings.append(
+                "Script emits issues but contains no f-strings or string "
+                "concatenation. Issues should embed runtime values (counts, "
+                "names, timestamps) so the next agent or operator can act "
+                "without re-running the task."
+            )
+    elif interpreter == "bash":
+        if _BASH_ISSUE_DESC_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty issue description in jq output. "
+                "Always interpolate the observed value into the description."
+            )
+
+    # Detect placeholder/stub text in any of the issue fields.
+    for token in _PLACEHOLDER_TOKENS:
+        pattern = re.compile(rf'["\'][^"\']*\b{re.escape(token)}\b[^"\']*["\']', re.IGNORECASE)
+        if pattern.search(script):
+            findings.append(
+                f"Script contains the placeholder token {token!r}. Replace "
+                "before committing — these typically indicate stub content."
+            )
+            break
+
+    return findings
+
+
+def _normalize_issue_keys(issue: dict[str, Any]) -> dict[str, str]:
+    """Return a dict with both snake_case and camelCase issue keys mapped to strings."""
+
+    def _get(*candidates: str) -> str:
+        for k in candidates:
+            v = issue.get(k)
+            if v not in (None, ""):
+                return str(v)
+        return ""
+
+    return {
+        "title": _get("title", "issue title", "issue_title"),
+        "description": _get("details", "description", "issue description", "issue_description"),
+        "next_steps": _get("nextSteps", "next_steps", "issue next steps", "issue_next_steps"),
+        "severity": _get("severity", "issue severity", "issue_severity"),
+    }
+
+
+def _assess_run_output_quality(parsed: dict[str, Any]) -> list[str]:
+    """Inspect a completed task run for contract-quality violations.
+
+    Surfaces:
+      - Empty / under-length descriptions, next-steps, titles.
+      - Placeholder text (TODO, FIXME, lorem-ipsum, ...).
+      - Missing summary issue when no high-severity issues were emitted.
+
+    Returns a list of human-readable warnings (empty when output looks fine).
+    """
+    notes: list[str] = []
+    issues = parsed.get("issues") or []
+    if not isinstance(issues, list):
+        return notes
+
+    has_high_severity = False
+    has_summary = False
+    for idx, issue in enumerate(issues):
+        if not isinstance(issue, dict):
+            continue
+        norm = _normalize_issue_keys(issue)
+        title = norm["title"]
+        desc = norm["description"]
+        steps = norm["next_steps"]
+        sev_str = norm["severity"]
+
+        prefix = f"issue[{idx}]"
+        if not title:
+            notes.append(f"{prefix}: missing 'issue title'.")
+        elif len(title) < MIN_ISSUE_TITLE_CHARS:
+            notes.append(
+                f"{prefix}: title {title!r} is only {len(title)} chars — "
+                "use a descriptive title (target ≥ "
+                f"{MIN_ISSUE_TITLE_CHARS} chars)."
+            )
+        if not desc:
+            notes.append(
+                f"{prefix}: missing 'issue description'. Always include "
+                "observed values + thresholds so the next agent can act."
+            )
+        elif len(desc) < MIN_ISSUE_DESCRIPTION_CHARS:
+            notes.append(
+                f"{prefix}: description is only {len(desc)} chars — include "
+                "observed numbers, names, and timestamps so workspace_chat can "
+                "surface useful detail (target ≥ "
+                f"{MIN_ISSUE_DESCRIPTION_CHARS} chars)."
+            )
+        if not steps:
+            notes.append(
+                f"{prefix}: missing 'issue next steps'. Operators rely on a "
+                "concrete remediation hint (command to run, runbook link, owner)."
+            )
+        elif len(steps) < MIN_ISSUE_NEXT_STEPS_CHARS:
+            notes.append(
+                f"{prefix}: next steps are only {len(steps)} chars — provide "
+                "an actionable remediation (target ≥ "
+                f"{MIN_ISSUE_NEXT_STEPS_CHARS} chars)."
+            )
+        if _looks_like_placeholder(title) or _looks_like_placeholder(desc):
+            notes.append(
+                f"{prefix}: placeholder/stub text detected. Replace TODO/FIXME/"
+                "lorem-ipsum content with real telemetry before committing."
+            )
+        try:
+            sev_int = int(sev_str) if sev_str else 0
+        except (TypeError, ValueError):
+            sev_int = 0
+        if sev_int < 1 or sev_int > 4:
+            notes.append(f"{prefix}: severity {sev_str!r} is out of contract; use 1-4.")
+        if 1 <= sev_int <= 3:
+            has_high_severity = True
+        title_lower = title.lower()
+        if (
+            "summary" in title_lower
+            or "data summary" in title_lower
+            or sev_int == 4
+            and ("found" in title_lower or "observed" in title_lower or "total" in title_lower)
+        ):
+            has_summary = True
+
+    if issues and not has_high_severity and not has_summary:
+        notes.append(
+            "No high-severity issues and no severity-4 summary issue detected. "
+            "Investigation tasks must always emit at least one severity-4 "
+            "summary issue containing the observed numbers — otherwise "
+            "workspace_chat has nothing to surface when everything looks healthy."
+        )
+    if not issues:
+        notes.append(
+            "Task emitted zero issues. The RunWhen contract requires every "
+            "task run to surface at least one severity-4 'summary' issue with "
+            "the observed values so results are searchable in workspace_chat."
+        )
+
+    return notes
+
+
 def _is_blocking_warning(warning: str) -> bool:
     """True when a validation warning indicates a real contract violation.
 
@@ -3711,24 +4008,44 @@ async def validate_script(
     _, auto_fix_notes = _strip_runner_unsafe_blocks(script_resolved, interpreter)
     blocking = [w for w in warnings if _is_blocking_warning(w)]
     auto_fixable = [w for w in warnings if not _is_blocking_warning(w)]
+    quality_notes = _assess_issue_quality_static(script_resolved, interpreter, task_type)
+    size_warning, size_error = _assess_script_size(script_resolved)
 
     result: dict[str, Any] = {
-        "valid": len(blocking) == 0,
+        "valid": len(blocking) == 0 and size_error is None,
         "warnings": warnings,
         "blocking_warnings": blocking,
         "auto_fixable_warnings": auto_fixable,
         "auto_fixes_applied_on_run": auto_fix_notes,
+        "issue_quality_notes": quality_notes,
         "detected_env_vars": env_vars,
         "interpreter": interpreter,
         "task_type": task_type,
+        "script_bytes": len(script_resolved.encode("utf-8")),
     }
+    if size_warning:
+        result["size_warning"] = size_warning
+    if size_error:
+        result["size_error"] = size_error
 
-    if not blocking and not auto_fixable:
+    if size_error:
+        result["message"] = "Script exceeds the configured hard size cap. See size_error."
+    elif not blocking and not auto_fixable and not quality_notes and not size_warning:
         result["message"] = "Script passes RunWhen contract validation."
     elif not blocking:
+        bits = []
+        if auto_fixable:
+            bits.append(f"{len(auto_fixable)} auto-fixable warning(s)")
+        if quality_notes:
+            bits.append(f"{len(quality_notes)} issue-quality note(s)")
+        if size_warning:
+            bits.append("size advisory")
         result["message"] = (
-            f"Script has {len(auto_fixable)} auto-fixable warning(s); MCP will clean "
-            "the script before sending it to the runner. Safe to run/commit."
+            "Script is runnable. "
+            + ", ".join(bits)
+            + ". Review issue_quality_notes / size_warning before committing — "
+            "scripts that return empty or stub issue payloads provide no signal "
+            "to operators or workspace_chat."
         )
     else:
         result["message"] = (
@@ -3792,8 +4109,6 @@ async def run_script(
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    ws = await _resolve_workspace(workspace_name)
-
     warnings = _validate_script(script, interpreter, run_type)
     blocking = [w for w in warnings if _is_blocking_warning(w)]
     if blocking:
@@ -3806,6 +4121,17 @@ async def run_script(
             }
         )
     script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
+    _size_warning, size_error = _assess_script_size(script)
+    if size_error:
+        return _json_response(
+            {
+                "error": "Script too large for transport",
+                "message": size_error,
+                "script_bytes": len(script.encode("utf-8")),
+            }
+        )
+
+    ws = await _resolve_workspace(workspace_name)
 
     try:
         location = await _resolve_location(ws, location)
@@ -3944,8 +4270,6 @@ async def run_script_and_wait(
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    ws = await _resolve_workspace(workspace_name)
-
     warnings = _validate_script(script, interpreter, run_type)
     blocking = [w for w in warnings if _is_blocking_warning(w)]
     if blocking:
@@ -3957,6 +4281,18 @@ async def run_script_and_wait(
             }
         )
     script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
+    _size_warning, size_error = _assess_script_size(script)
+    if size_error:
+        return _json_response(
+            {
+                "error": "Script too large for transport",
+                "message": size_error,
+                "script_bytes": len(script.encode("utf-8")),
+            }
+        )
+    static_quality_notes = _assess_issue_quality_static(script, interpreter, run_type)
+
+    ws = await _resolve_workspace(workspace_name)
 
     try:
         location = await _resolve_location(ws, location)
@@ -3999,7 +4335,10 @@ async def run_script_and_wait(
             if isinstance(output_data, dict):
                 parsed = await _fetch_and_parse_artifacts(output_data)
 
-    result = {
+    runtime_quality_notes = _assess_run_output_quality(parsed) if run_type == "task" else []
+    quality_notes = sorted(set(static_quality_notes + runtime_quality_notes))
+
+    result: dict[str, Any] = {
         "runId": run_id,
         "finalStatus": status,
         "elapsedSeconds": elapsed,
@@ -4008,6 +4347,14 @@ async def run_script_and_wait(
         "stderr": parsed["stderr"],
         "report": parsed["report"],
     }
+    if quality_notes:
+        result["issue_quality_notes"] = quality_notes
+        result["issue_quality_message"] = (
+            "The task ran successfully, but the issue payloads violate the "
+            "RunWhen reporting contract. workspace_chat surfaces only issues "
+            "(not stdout), so empty/stub issues mean operators cannot see "
+            "what the task observed. Fix these before committing the SLX."
+        )
     return _json_response(result)
 
 
@@ -4390,6 +4737,16 @@ async def commit_slx(
             }
         )
     script, _script_fixes = _strip_runner_unsafe_blocks(script, interpreter)
+    _size_warning, size_error = _assess_script_size(script, label="script")
+    if size_error:
+        return _json_response(
+            {
+                "error": "Script too large for transport",
+                "message": size_error,
+                "script_bytes": len(script.encode("utf-8")),
+            }
+        )
+    static_quality_notes = _assess_issue_quality_static(script, interpreter, task_type)
 
     if sli_script:
         sli_interp = sli_interpreter or interpreter
@@ -4404,6 +4761,15 @@ async def commit_slx(
                 }
             )
         sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
+        _sli_size_warning, sli_size_error = _assess_script_size(sli_script, label="SLI script")
+        if sli_size_error:
+            return _json_response(
+                {
+                    "error": "SLI script too large for transport",
+                    "message": sli_size_error,
+                    "sli_script_bytes": len(sli_script.encode("utf-8")),
+                }
+            )
 
     task_title_issue = _detect_unresolved_placeholders(task_title)
     if task_title_issue:
@@ -4560,7 +4926,7 @@ async def commit_slx(
     )
 
     success = status_code in (200, 201)
-    result = {
+    result: dict[str, Any] = {
         "status": "committed" if success else f"error_{status_code}",
         "slx_name": slx_name,
         "workspace": ws,
@@ -4568,6 +4934,16 @@ async def commit_slx(
         "committed_types": type_label,
         "response": resp_data,
     }
+    if static_quality_notes:
+        result["issue_quality_notes"] = static_quality_notes
+        result["issue_quality_message"] = (
+            "Commit succeeded, but a static scan of the script flagged issue-"
+            "contract concerns. Empty/stub issue payloads make this SLX "
+            "useless for workspace_chat (which surfaces issues, not stdout). "
+            "Strongly consider re-running run_script_and_wait and refining "
+            "the issue 'description' and 'next steps' before relying on this "
+            "task."
+        )
     return _json_response(result)
 
 

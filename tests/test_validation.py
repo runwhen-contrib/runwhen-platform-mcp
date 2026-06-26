@@ -10,6 +10,9 @@ import pytest
 
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
+    _assess_issue_quality_static,
+    _assess_run_output_quality,
+    _assess_script_size,
     _azure_credentials_hint,
     _build_persona_payload,
     _detect_unresolved_placeholders,
@@ -33,6 +36,7 @@ from runwhen_platform_mcp.server import (
     run_slx,
     search_registry,
     update_chat_command,
+    validate_script,
 )
 
 
@@ -1155,3 +1159,312 @@ class TestRunSlxTaskTitlesLiteralRejected:
         assert "error" in data
         assert data["known_runtime_vars"] == ["LOG_QUERY", "TIME_WINDOW"]
         assert data["submitted_override_keys"] == ["BOGUS"]
+
+
+class TestAssessScriptSize:
+    """Tests for ``_assess_script_size``."""
+
+    def test_small_script_no_warning(self) -> None:
+        warning, error = _assess_script_size("def main(): return []\n")
+        assert warning is None
+        assert error is None
+
+    def test_soft_limit_warns(self) -> None:
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_SOFT_MAX_BYTES", 100),
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 10000),
+        ):
+            warning, error = _assess_script_size("x" * 500)
+        assert warning is not None
+        assert "base64" in warning
+        assert error is None
+
+    def test_hard_cap_errors(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 100):
+            warning, error = _assess_script_size("x" * 500)
+        assert warning is None
+        assert error is not None
+        assert "registry codebundle" in error
+        assert "script_path" in error
+
+    def test_label_used_in_messages(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 50):
+            _, error = _assess_script_size("y" * 200, label="SLI script")
+        assert error is not None
+        assert error.startswith("SLI script")
+
+
+class TestRunScriptSizeGuards:
+    """``run_script_and_wait`` and ``commit_slx`` honour the size cap."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_run_script_and_wait_rejects_oversize(self) -> None:
+        script = "def main():\n    return []\n" + ("    # padding\n" * 5000)
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024):
+            result = self._run(
+                run_script_and_wait(
+                    workspace_name="test-ws",
+                    script=script,
+                    interpreter="python",
+                )
+            )
+        data = json.loads(result)
+        assert data["error"] == "Script too large for transport"
+        assert "script_bytes" in data
+        assert "registry codebundle" in data["message"]
+
+    def test_commit_slx_rejects_oversize_script(self) -> None:
+        script = (
+            "def main():\n"
+            "    return [{"
+            "'issue title': 'x' * 50, 'issue description': 'y' * 80, "
+            "'issue severity': 4, 'issue next steps': 'z' * 40}]\n" + ("    # padding\n" * 5000)
+        )
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024):
+            result = self._run(
+                commit_slx(
+                    slx_name="big-task",
+                    alias="Big Task",
+                    statement="should fail",
+                    workspace_name="test-ws",
+                    script=script,
+                    interpreter="python",
+                    task_type="task",
+                    task_title="Big Task",
+                    access="read-write",
+                    data="logs-bulk",
+                )
+            )
+        data = json.loads(result)
+        assert data["error"] == "Script too large for transport"
+
+
+class TestAssessIssueQualityStatic:
+    """Tests for ``_assess_issue_quality_static``."""
+
+    def test_empty_description_flagged(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": f"t {x}", "issue description": "",\n'
+            '             "issue severity": 2, "issue next steps": f"kubectl {cmd}"}]\n'
+        )
+        notes = _assess_issue_quality_static(script, "python", "task")
+        assert any("empty 'issue description'" in n for n in notes)
+
+    def test_empty_next_steps_flagged(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": f"t {x}", "issue description": f"d {y}",\n'
+            '             "issue severity": 2, "issue next steps": ""}]\n'
+        )
+        notes = _assess_issue_quality_static(script, "python", "task")
+        assert any("empty 'issue next steps'" in n for n in notes)
+
+    def test_placeholder_token_flagged(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": f"t {x}", "issue description": "TODO fill in",\n'
+            '             "issue severity": 2, "issue next steps": f"do {cmd}"}]\n'
+        )
+        notes = _assess_issue_quality_static(script, "python", "task")
+        assert any("placeholder token" in n for n in notes)
+
+    def test_no_dynamic_data_flagged(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "static title here",\n'
+            '             "issue description": "static description with no runtime data",\n'
+            '             "issue severity": 2,\n'
+            '             "issue next steps": "kubectl get pods"}]\n'
+        )
+        notes = _assess_issue_quality_static(script, "python", "task")
+        assert any("f-strings" in n for n in notes)
+
+    def test_dynamic_data_passes(self) -> None:
+        script = (
+            "def main():\n"
+            "    count = 5\n"
+            '    return [{"issue title": f"Pod restarts: {count}",\n'
+            '             "issue description": f"Found {count} restarts in namespace {ns}",\n'
+            '             "issue severity": 2,\n'
+            '             "issue next steps": f"kubectl logs {pod}"}]\n'
+        )
+        notes = _assess_issue_quality_static(script, "python", "task")
+        assert notes == []
+
+    def test_sli_skipped(self) -> None:
+        script = "def main(): return 0.95\n"
+        assert _assess_issue_quality_static(script, "python", "sli") == []
+
+    def test_bash_empty_description_flagged(self) -> None:
+        script = (
+            "main() {\n"
+            '  jq -n --arg title "x" --arg description "" '
+            '\'{"issue title":$title,"issue description":$description}\' >&3\n'
+            "}\n"
+        )
+        notes = _assess_issue_quality_static(script, "bash", "task")
+        assert any("empty issue description" in n for n in notes)
+
+
+class TestAssessRunOutputQuality:
+    """Tests for ``_assess_run_output_quality`` — runtime issue inspection."""
+
+    def test_no_issues_returns_summary_warning(self) -> None:
+        notes = _assess_run_output_quality({"issues": []})
+        assert any("zero issues" in n for n in notes)
+
+    def test_empty_description_flagged(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "Pod restart spike",
+                        "details": "",
+                        "nextSteps": "kubectl get pods",
+                        "severity": 2,
+                    }
+                ]
+            }
+        )
+        assert any("missing 'issue description'" in n for n in notes)
+
+    def test_short_description_flagged(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "Pod restart spike",
+                        "details": "short",
+                        "nextSteps": "kubectl get pods now",
+                        "severity": 2,
+                    }
+                ]
+            }
+        )
+        assert any("description is only" in n for n in notes)
+
+    def test_missing_next_steps_flagged(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "Pod restart spike",
+                        "details": "Pod foo in ns bar restarted 5 times in last hour",
+                        "nextSteps": "",
+                        "severity": 2,
+                    }
+                ]
+            }
+        )
+        assert any("missing 'issue next steps'" in n for n in notes)
+
+    def test_invalid_severity_flagged(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "Health check completed",
+                        "details": "Examined 12 pods; all healthy",
+                        "nextSteps": "No action needed",
+                        "severity": 0,
+                    }
+                ]
+            }
+        )
+        assert any("severity" in n.lower() and "out of contract" in n for n in notes)
+
+    def test_placeholder_text_flagged(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "TODO fill in title",
+                        "details": "Pod foo restarted; lorem ipsum dolor sit amet",
+                        "nextSteps": "Investigate; check logs and runbook",
+                        "severity": 2,
+                    }
+                ]
+            }
+        )
+        assert any("placeholder/stub" in n for n in notes)
+
+    def test_summary_issue_satisfies_check(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "Storage Auth Type — Summary",
+                        "details": "Examined 42 storage accounts, all use AAD auth",
+                        "nextSteps": "Informational; no action required",
+                        "severity": 4,
+                    }
+                ]
+            }
+        )
+        assert not any("zero issues" in n for n in notes)
+        assert not any("summary issue" in n for n in notes)
+
+    def test_high_severity_issue_satisfies_check(self) -> None:
+        notes = _assess_run_output_quality(
+            {
+                "issues": [
+                    {
+                        "title": "Pod crashlooping in production namespace",
+                        "details": ("Pod foo in namespace bar has 12 restarts in last hour"),
+                        "nextSteps": "kubectl logs foo -n bar --previous",
+                        "severity": 1,
+                    }
+                ]
+            }
+        )
+        assert not any("summary issue" in n for n in notes)
+
+
+class TestValidateScriptIncludesQualityNotes:
+    """``validate_script`` surfaces the new quality and size signals."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_clean_script_validates(self) -> None:
+        script = (
+            "def main():\n"
+            "    count = 5\n"
+            '    return [{"issue title": f"Pod restarts: {count}",\n'
+            '             "issue description": f"Found {count} restarts in {ns}",\n'
+            '             "issue severity": 2,\n'
+            '             "issue next steps": f"kubectl logs {pod}"}]\n'
+        )
+        result = self._run(validate_script(script=script, interpreter="python", task_type="task"))
+        data = json.loads(result)
+        assert data["valid"] is True
+        assert data["issue_quality_notes"] == []
+
+    def test_empty_description_surfaces_in_quality_notes(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": f"t {x}", "issue description": "",\n'
+            '             "issue severity": 2, "issue next steps": f"do {cmd}"}]\n'
+        )
+        result = self._run(validate_script(script=script, interpreter="python", task_type="task"))
+        data = json.loads(result)
+        notes = data.get("issue_quality_notes", [])
+        assert any("'issue description'" in n for n in notes)
+
+    def test_oversize_script_marks_invalid(self) -> None:
+        script = (
+            "def main():\n"
+            "    return [{'issue title': 'x' * 50, 'issue description': 'y' * 80,\n"
+            "             'issue severity': 4, 'issue next steps': 'z' * 40}]\n"
+            + ("    # padding\n" * 5000)
+        )
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024):
+            result = self._run(
+                validate_script(script=script, interpreter="python", task_type="task")
+            )
+        data = json.loads(result)
+        assert data["valid"] is False
+        assert "size_error" in data

@@ -90,6 +90,77 @@ def main():
     return issues
 ```
 
+## Issue payload quality bar — strictly enforced
+
+`workspace_chat` and search surface **only issues**, not stdout/stderr. An
+issue with an empty or stub description is invisible to operators. The MCP
+now both **statically** scans your script (in `validate_script` and
+`commit_slx`) and **dynamically** inspects emitted issues (in
+`run_script_and_wait`) for these violations:
+
+| Field | Minimum | Must include |
+|---|---|---|
+| `issue title` | ≥ 8 chars, non-empty | What was checked + what state was observed |
+| `issue description` | ≥ 40 chars, non-empty | Observed numbers, names, timestamps, thresholds — interpolated from runtime values |
+| `issue next steps` | ≥ 20 chars, non-empty | Concrete remediation: a kubectl/CLI command, runbook URL, owner, or escalation path |
+| `issue severity` | 1, 2, 3, or 4 | Use the scale: 1=critical, 2=high, 3=medium, 4=informational |
+
+Common anti-patterns the MCP will warn on:
+
+- ❌ `"issue description": ""` — empty literal
+- ❌ `"issue title": "Issue found"` — no signal
+- ❌ `"issue next steps": "Investigate."` — no actionable hint
+- ❌ Issue dict with no f-string or string interpolation anywhere — that means
+  no runtime data is being captured. workspace_chat sees only the static literal.
+- ❌ Placeholder tokens: `TODO`, `FIXME`, `XXX`, `lorem ipsum`, `placeholder`, `TBD`
+
+### Good vs bad — Python task
+
+```python
+# BAD — runner shows "no signal" forever
+issues.append({
+    "issue title": "Pod issue",
+    "issue description": "",
+    "issue severity": 2,
+    "issue next steps": "Check pods.",
+})
+
+# GOOD — operator can act without re-running the task
+issues.append({
+    "issue title": f"Pod {pod_name} restarted {restart_count} times in {NAMESPACE}",
+    "issue description": (
+        f"Pod {pod_name} in namespace {NAMESPACE} (cluster {CONTEXT}) has "
+        f"restarted {restart_count} times in the last {LOOKBACK_MIN} minutes. "
+        f"Last termination reason: {last_reason}. Container image: {image}. "
+        f"Owner: {owner_label or 'unknown'}."
+    ),
+    "issue severity": 2,
+    "issue next steps": (
+        f"kubectl --context={CONTEXT} -n {NAMESPACE} describe pod {pod_name} | "
+        f"head -50; then check container logs: kubectl --context={CONTEXT} -n "
+        f"{NAMESPACE} logs {pod_name} -p --tail=200"
+    ),
+})
+```
+
+## Script size and transport limits
+
+MCP HTTP intermediaries impose payload limits (~13KB base64 observed in the
+wild). The MCP now applies size guards:
+
+| Threshold | Behavior |
+|---|---|
+| ≤ `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` (10KB default) | Silent — ship it |
+| Soft threshold to hard cap | Advisory warning surfaced in `validate_script` and `run_script_and_wait` |
+| > `RUNWHEN_SCRIPT_HARD_MAX_BYTES` (64KB default) | Hard reject — `commit_slx` / `run_script*` return an error |
+
+If you hit the soft warning or hard cap, prefer:
+
+1. **Use a registry codebundle** — search with `search_registry` first.
+2. **Split into a custom codebundle** in a git repo and deploy with `deploy_registry_codebundle` (no inline script needed).
+3. **In stdio mode**, pass `script_path=/local/path/to/script.py` instead of inline `script` / `script_base64`.
+4. **Raise the cap** with `RUNWHEN_SCRIPT_HARD_MAX_BYTES` if your transport is known-good.
+
 ## Cloud-specific secret requirements
 
 Some cloud platforms require a canonical secret name in `secret_vars` for the
