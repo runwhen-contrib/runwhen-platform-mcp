@@ -736,9 +736,7 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
             body_excerpt = json.dumps(resp.json())[:1000]
         except (json.JSONDecodeError, ValueError):
             body_excerpt = resp.text[:1000]
-        raise ValueError(
-            f"PAPI returned {resp.status_code} for {path}: {body_excerpt}"
-        )
+        raise ValueError(f"PAPI returned {resp.status_code} for {path}: {body_excerpt}")
 
 
 # ---------------------------------------------------------------------------
@@ -1899,11 +1897,17 @@ async def create_chat_rule(
 ) -> str:
     """Create a chat rule. Uses AgentFarm internal API."""
     ws = await _resolve_workspace(workspace_name)
+    resolved_scope_id = scope_id
+    if scope_type == "persona" and scope_id is not None:
+        try:
+            resolved_scope_id = _normalize_chat_persona_scope_id(ws, scope_id)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
     body: dict[str, Any] = {
         "name": name,
         "rule_content": rule_content,
         "scope_type": scope_type,
-        "scope_id": scope_id,
+        "scope_id": resolved_scope_id,
         "is_active": is_active,
     }
     try:
@@ -1933,7 +1937,20 @@ async def update_chat_rule(
     if scope_type is not None:
         body["scope_type"] = scope_type
     if scope_id is not None:
-        body["scope_id"] = scope_id
+        effective_scope_type = scope_type
+        if effective_scope_type is None:
+            try:
+                existing = await _papi_get(f"/api/v3/workspaces/{ws}/chat-config/rules/{rule_id}")
+                effective_scope_type = existing.get("scope_type") or existing.get("scopeType")
+            except (ValueError, httpx.HTTPStatusError) as e:
+                return _json_response({"error": str(e)})
+        if effective_scope_type == "persona":
+            try:
+                body["scope_id"] = _normalize_chat_persona_scope_id(ws, scope_id)
+            except ValueError as exc:
+                return _json_response({"error": str(exc)})
+        else:
+            body["scope_id"] = scope_id
     if is_active is not None:
         body["is_active"] = is_active
     try:
@@ -2001,21 +2018,99 @@ async def create_chat_command(
         str | None, Field(description="Optional description for the command.")
     ] = None,
     is_active: bool = Field(default=True, description="Whether the command is active."),
+    cron_schedule: Annotated[
+        str | None,
+        Field(
+            description="Cron expression to run this command on a schedule (e.g. '0 8 * * 1-5'). "
+            "When set, also provide sink_configs, run_as_user, and assistant_name."
+        ),
+    ] = None,
+    sink_configs: Annotated[
+        list[dict] | None,
+        Field(
+            description=(
+                "Delivery targets when cron_schedule is set. Each entry: "
+                "{type: 'email'|'slack', mode: 'user'|'all-workspace-users'|"
+                "'channel'|'webhook', target: '...'}."
+            ),
+        ),
+    ] = None,
+    run_as_user: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Email of the user the scheduled session runs as. "
+                "Required when cron_schedule is set."
+            ),
+        ),
+    ] = None,
+    assistant_name: Annotated[
+        str | None,
+        Field(
+            description="Persona for scheduled runs (workspace prefix optional). "
+            "For persona-scoped commands, must match scope_id (full form after PAPI). "
+            "For workspace-scoped commands, use the short name (persona_name for chat)."
+        ),
+    ] = None,
+    max_runs: Annotated[
+        int | None,
+        Field(description="Maximum scheduled runs before the schedule stops (omit for unlimited)."),
+    ] = None,
+    schedule_paused: Annotated[
+        bool | None,
+        Field(description="When true, the cron does not fire (independent of is_active)."),
+    ] = None,
+    auto_approve_readonly: Annotated[
+        bool | None,
+        Field(
+            description="When true, scheduled runs auto-approve read-only task execution "
+            "(write tasks still require approval)."
+        ),
+    ] = None,
 ) -> str:
     """Create a chat command (slash-command). Name must be alphanumeric, underscore, or hyphen only.
 
     Commands are invoked in chat as [/label](cmd://name).
+
+    To run a command on a schedule, set ``cron_schedule`` plus ``sink_configs``,
+    ``run_as_user``, and ``assistant_name``. Results are delivered to each sink
+    (email or Slack) when the cron fires.
     """
     ws = await _resolve_workspace(workspace_name)
+    resolved_scope_id = scope_id
+    if scope_type == "persona" and scope_id is not None:
+        try:
+            resolved_scope_id = _normalize_chat_persona_scope_id(ws, scope_id)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
     body: dict[str, Any] = {
         "name": name,
         "command_content": command_content,
         "scope_type": scope_type,
-        "scope_id": scope_id,
+        "scope_id": resolved_scope_id,
         "is_active": is_active,
     }
     if description is not None:
         body["description"] = description
+    if cron_schedule is not None:
+        body["cron_schedule"] = cron_schedule
+    if sink_configs is not None:
+        body["sink_configs"] = sink_configs
+    if run_as_user is not None:
+        body["run_as_user"] = run_as_user
+    if assistant_name is not None:
+        try:
+            body["assistant_name"] = _resolve_command_assistant_name(ws, scope_type, assistant_name)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
+    elif cron_schedule and scope_type == "persona" and resolved_scope_id is not None:
+        body["assistant_name"] = _form_persona_full_name(ws, resolved_scope_id)
+    if max_runs is not None:
+        body["max_runs"] = max_runs
+    if schedule_paused is not None:
+        body["schedule_paused"] = schedule_paused
+    if auto_approve_readonly is not None:
+        body["auto_approve_readonly"] = auto_approve_readonly
     try:
         status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/chat-config/commands", body)
         return _json_response(data)
@@ -2035,9 +2130,54 @@ async def update_chat_command(
     scope_type: Annotated[str | None, Field(description="New scope type.")] = None,
     scope_id: Annotated[str | None, Field(description="New scope ID.")] = None,
     is_active: Annotated[bool | None, Field(description="Set active/inactive.")] = None,
+    cron_schedule: Annotated[
+        str | None,
+        Field(description="New cron expression, or empty string to clear scheduling."),
+    ] = None,
+    sink_configs: Annotated[
+        list[dict] | None,
+        Field(description="Replace delivery targets for scheduled runs."),
+    ] = None,
+    run_as_user: Annotated[str | None, Field(description="Replace the run-as user email.")] = None,
+    assistant_name: Annotated[
+        str | None,
+        Field(description="Replace the persona for scheduled runs (workspace prefix optional)."),
+    ] = None,
+    max_runs: Annotated[
+        int | None, Field(description="Replace the run budget (must be >= 1 when scheduling).")
+    ] = None,
+    clear_max_runs: Annotated[
+        bool,
+        Field(
+            default=False,
+            description="When true, remove the run budget cap (unlimited scheduled runs).",
+        ),
+    ] = False,
+    reset_runs_completed: Annotated[
+        bool | None,
+        Field(description="When true, reset runs_completed to 0 (e.g. after raising max_runs)."),
+    ] = None,
+    schedule_paused: Annotated[
+        bool | None, Field(description="Pause or resume the cron schedule.")
+    ] = None,
+    auto_approve_readonly: Annotated[
+        bool | None, Field(description="Toggle auto-approve for read-only tasks on scheduled runs.")
+    ] = None,
 ) -> str:
-    """Update an existing chat command by ID."""
+    """Update an existing chat command by ID.
+
+    Omitted fields are left unchanged. Schedule fields (``cron_schedule``,
+    ``sink_configs``, ``run_as_user``, ``assistant_name``, etc.) follow the
+    same partial-update semantics as the PAPI. Use ``clear_max_runs=True`` to
+    remove an existing run cap (MCP cannot send bare null for ``max_runs``).
+    """
     ws = await _resolve_workspace(workspace_name)
+    if clear_max_runs and max_runs is not None:
+        return _json_response({"error": "Cannot set both max_runs and clear_max_runs."})
+    try:
+        effective_scope_type = await _get_chat_command_scope_type(ws, command_id, scope_type)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
@@ -2047,14 +2187,465 @@ async def update_chat_command(
         body["description"] = description
     if scope_type is not None:
         body["scope_type"] = scope_type
+        effective_scope_type = scope_type
     if scope_id is not None:
-        body["scope_id"] = scope_id
+        if effective_scope_type == "persona":
+            try:
+                body["scope_id"] = _normalize_chat_persona_scope_id(ws, scope_id)
+            except ValueError as exc:
+                return _json_response({"error": str(exc)})
+        else:
+            body["scope_id"] = scope_id
     if is_active is not None:
         body["is_active"] = is_active
+    if cron_schedule is not None:
+        body["cron_schedule"] = cron_schedule
+    if sink_configs is not None:
+        body["sink_configs"] = sink_configs
+    if run_as_user is not None:
+        body["run_as_user"] = run_as_user
+    if assistant_name is not None:
+        if effective_scope_type is None:
+            return _json_response(
+                {"error": "Could not resolve scope_type to normalize assistant_name."}
+            )
+        try:
+            body["assistant_name"] = _resolve_command_assistant_name(
+                ws, effective_scope_type, assistant_name
+            )
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
+    elif cron_schedule and effective_scope_type == "persona":
+        persona_short: str | None = body.get("scope_id")
+        if persona_short is None:
+            try:
+                existing_cmd = await _papi_get(
+                    f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}"
+                )
+            except (ValueError, httpx.HTTPStatusError) as e:
+                return _json_response({"error": str(e)})
+            existing_type = existing_cmd.get("scope_type") or existing_cmd.get("scopeType")
+            existing_sid = existing_cmd.get("scope_id") or existing_cmd.get("scopeId")
+            if existing_type == "persona" and existing_sid:
+                try:
+                    persona_short = _normalize_chat_persona_scope_id(ws, existing_sid)
+                except ValueError as exc:
+                    return _json_response({"error": str(exc)})
+        if persona_short is not None:
+            body["assistant_name"] = _form_persona_full_name(ws, persona_short)
+        else:
+            return _json_response(
+                {
+                    "error": "Persona-scoped scheduled commands require assistant_name or "
+                    "scope_id when the persona cannot be inferred from the existing command."
+                }
+            )
+    if clear_max_runs:
+        body["max_runs"] = None
+    elif max_runs is not None:
+        body["max_runs"] = max_runs
+    if reset_runs_completed is not None:
+        body["reset_runs_completed"] = reset_runs_completed
+    if schedule_paused is not None:
+        body["schedule_paused"] = schedule_paused
+    if auto_approve_readonly is not None:
+        body["auto_approve_readonly"] = auto_approve_readonly
     try:
         _, data = await _papi_put(
             f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}", body
         )
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# AI Assistants (personas)
+#
+# An "AI Assistant" / "Agent" is a *persona* in the RunWhen platform. The
+# ``short_name`` of an assistant is exactly the value you pass as
+# ``persona_name`` to ``workspace_chat``. Assistants are human-managed (never
+# touched by the upload/sync pipeline), so writes here persist directly.
+#
+# Tailor an assistant's behavior by attaching persona-scoped chat rules and
+# commands: call ``create_chat_rule`` / ``create_chat_command`` with
+# ``scope_type="persona"`` and ``scope_id=<short_name>``.
+# ---------------------------------------------------------------------------
+
+_ASSISTANT_NAME_MAX_LEN = 63
+_ASSISTANT_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+
+def _validate_assistant_name(short_name: str) -> None:
+    """Validate an assistant (persona) short name.
+
+    Raises ``ValueError`` with a user-friendly message when invalid. Rules:
+      - non-empty
+      - max 63 characters
+      - lowercase kebab-case (a-z, 0-9, interior hyphens)
+      - no leading/trailing hyphens, no consecutive hyphens (``--`` is the
+        reserved workspace/persona separator)
+    """
+    if not short_name:
+        raise ValueError("Assistant short_name must not be empty.")
+    if len(short_name) > _ASSISTANT_NAME_MAX_LEN:
+        raise ValueError(
+            f"Assistant short_name is {len(short_name)} characters — "
+            f"max allowed is {_ASSISTANT_NAME_MAX_LEN}. Shorten it and try again."
+        )
+    if "--" in short_name:
+        raise ValueError(
+            f"Invalid assistant short_name: {short_name!r}. "
+            "Consecutive hyphens ('--') are reserved for the workspace--persona separator."
+        )
+    if not _ASSISTANT_NAME_RE.match(short_name):
+        raise ValueError(
+            f"Invalid assistant short_name: {short_name!r}. "
+            "Use lowercase kebab-case (a-z, 0-9, hyphens), starting and ending "
+            "with an alphanumeric character."
+        )
+
+
+def _form_persona_full_name(workspace: str, short_name: str) -> str:
+    """Build the platform's full persona name: ``{workspace}--{short_name}``.
+
+    Accepts a value that is already fully-qualified for this workspace and
+    returns it unchanged.
+    """
+    prefix = f"{workspace}--"
+    if short_name.startswith(prefix):
+        return short_name
+    return f"{workspace}{'--'}{short_name}"
+
+
+def _persona_short_name(workspace: str, name: str) -> str:
+    """Strip the ``{workspace}--`` prefix from a persona name, if present."""
+    prefix = f"{workspace}--"
+    return name[len(prefix) :] if name.startswith(prefix) else name
+
+
+def _resolve_assistant_short_name(workspace: str, assistant_name: str) -> str:
+    """Normalize *assistant_name* and validate before embedding in a PAPI path."""
+    short = _persona_short_name(workspace, assistant_name)
+    _validate_assistant_name(short)
+    return short
+
+
+def _normalize_chat_persona_scope_id(workspace: str, scope_id: str) -> str:
+    """Return validated persona short name for chat rule/command scope_id."""
+    return _resolve_assistant_short_name(workspace, scope_id)
+
+
+def _resolve_command_assistant_name(
+    workspace: str,
+    scope_type: str,
+    assistant_name: str,
+) -> str:
+    """Resolve assistant_name for chat commands.
+
+    Workspace/user-scoped scheduled commands use the persona *short* name.
+    Persona-scoped commands must store assistant_name equal to scope_id after
+    PAPI normalization (full ``{workspace}--{short}`` form).
+    """
+    short = _resolve_assistant_short_name(workspace, assistant_name)
+    if scope_type == "persona":
+        return _form_persona_full_name(workspace, short)
+    return short
+
+
+async def _get_chat_command_scope_type(
+    workspace: str,
+    command_id: int,
+    scope_type: str | None,
+) -> str | None:
+    """Resolve scope_type for partial command updates (fetch when omitted)."""
+    if scope_type is not None:
+        return scope_type
+    data = await _papi_get(f"/api/v3/workspaces/{workspace}/chat-config/commands/{command_id}")
+    return data.get("scope_type") or data.get("scopeType")
+
+
+def _build_persona_payload(
+    *,
+    full_name: str,
+    description: str | None,
+    display_name: str | None,
+    avatar_url: str | None,
+    filter_confidence_threshold: float,
+    filter_issue_selection_strategy: str,
+    filter_codebundle_task_tags: list[str] | None,
+    filter_stop_words: list[str] | None,
+    filter_scope: str | None,
+    search_filters: dict[str, Any] | None,
+    run_confidence_threshold: float,
+    run_config: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Assemble a camelCase persona payload for the v4 sync-typed endpoint.
+
+    The sync endpoint performs a *full* upsert — any field omitted here is
+    reset to its schema default. Callers that want partial-update semantics
+    must merge over the existing persona first (see ``update_assistant``).
+    """
+    workspace_prefix = full_name.split("--", 1)[0]
+    return {
+        "name": full_name,
+        "description": description or "",
+        "fullName": display_name or _persona_short_name(workspace_prefix, full_name),
+        "avatarUrl": avatar_url,
+        "filterConfidenceThreshold": filter_confidence_threshold,
+        "filterIssueSelectionStrategy": filter_issue_selection_strategy,
+        "filterCodebundleTaskTags": filter_codebundle_task_tags or [],
+        "filterStopWords": filter_stop_words or [],
+        "filterScope": filter_scope,
+        "searchFilters": search_filters or {},
+        "runConfidenceThreshold": run_confidence_threshold,
+        "runConfig": run_config or {},
+    }
+
+
+@mcp.tool()
+async def list_assistants(
+    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
+) -> str:
+    """List AI assistants (personas) configured in a workspace.
+
+    An assistant is a persona — its ``shortName`` is the value you pass as
+    ``persona_name`` to ``workspace_chat``. Use this to discover which
+    assistants already exist before creating a new one.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        data = await _papi_get(f"/api/v4/workspaces/{ws}/personas")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def get_assistant(
+    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
+    assistant_name: str = Field(
+        description="Assistant short name (e.g. 'azure-devops'). Workspace prefix optional."
+    ),
+) -> str:
+    """Get a single AI assistant (persona) by its short name (full config)."""
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        short = _resolve_assistant_short_name(ws, assistant_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+    try:
+        data = await _papi_get(f"/api/v4/workspaces/{ws}/personas/{short}")
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def create_assistant(
+    workspace_name: str = Field(description="The workspace to create the assistant in."),
+    short_name: str = Field(
+        description="Assistant short name (lowercase-kebab-case, e.g. 'azure-devops'). "
+        "Workspace prefix optional (e.g. 'my-ws--azure-devops'). "
+        "This is the value you pass as persona_name to workspace_chat."
+    ),
+    display_name: str = Field(
+        default="", description="Human-readable display name (e.g. 'Azure DevOps Helper')."
+    ),
+    description: str = Field(
+        default="", description="What this assistant specializes in (e.g. tech stack, team)."
+    ),
+    avatar_url: Annotated[
+        str | None,
+        Field(description="Optional avatar image URL (e.g. '/personas/Man1-Happy.svg')."),
+    ] = None,
+    filter_codebundle_task_tags: Annotated[
+        list[str] | None,
+        Field(
+            description="Only surface tasks tagged with these (e.g. ['azure', 'devops']). "
+            "Empty/omitted means no tag filter."
+        ),
+    ] = None,
+    filter_stop_words: Annotated[
+        list[str] | None,
+        Field(description="Words stripped from search queries before matching."),
+    ] = None,
+    filter_scope: Annotated[
+        str | None, Field(description="Optional scope filter for results (advanced).")
+    ] = None,
+    search_filters: Annotated[
+        dict[str, Any] | None,
+        Field(
+            description="Vector-search filter operators "
+            "(e.g. {'codebundleTaskTags': ['kubernetes'], 'slxGroup': ['my-group']})."
+        ),
+    ] = None,
+    filter_confidence_threshold: float = Field(
+        default=0.5, description="Confidence threshold for filtering results (0-1)."
+    ),
+    filter_issue_selection_strategy: str = Field(
+        default="MOST_SEVERE", description="Issue selection strategy (e.g. 'MOST_SEVERE')."
+    ),
+    run_confidence_threshold: float = Field(
+        default=0.95, description="Confidence threshold for automatic task runs (0-1)."
+    ),
+    run_config: Annotated[
+        dict[str, Any] | None,
+        Field(description="Run configuration: allow/disallow/budget settings (advanced)."),
+    ] = None,
+) -> str:
+    """Create a new AI assistant (persona) in a workspace.
+
+    An assistant is a persona that tailors how the RunWhen AI investigates and
+    acts — e.g. an "Azure DevOps Helper" focused on a specific tech stack. The
+    ``short_name`` you choose becomes the ``persona_name`` for ``workspace_chat``.
+
+    After creating the assistant, shape its behavior by attaching
+    persona-scoped rules and commands:
+
+        create_chat_rule(scope_type="persona", scope_id=short_name, ...)
+        create_chat_command(scope_type="persona", scope_id=short_name, ...)
+
+    This is an UPSERT — calling it again with an existing short_name REPLACES
+    the assistant's full configuration (omitted fields reset to defaults). To
+    change a few fields on an existing assistant, use ``update_assistant``.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        short = _resolve_assistant_short_name(ws, short_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
+    full_name = _form_persona_full_name(ws, short)
+
+    payload = _build_persona_payload(
+        full_name=full_name,
+        description=description,
+        display_name=display_name or short,
+        avatar_url=avatar_url,
+        filter_confidence_threshold=filter_confidence_threshold,
+        filter_issue_selection_strategy=filter_issue_selection_strategy,
+        filter_codebundle_task_tags=filter_codebundle_task_tags,
+        filter_stop_words=filter_stop_words,
+        filter_scope=filter_scope,
+        search_filters=search_filters,
+        run_confidence_threshold=run_confidence_threshold,
+        run_config=run_config,
+    )
+    try:
+        _, data = await _papi_post(
+            f"/api/v4/workspaces/{ws}/personas/sync-typed", {"payload": payload}
+        )
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def update_assistant(
+    workspace_name: str = Field(description="The workspace the assistant belongs to."),
+    assistant_name: str = Field(
+        description="Assistant short name to update (e.g. 'azure-devops'). "
+        "Workspace prefix optional."
+    ),
+    display_name: Annotated[str | None, Field(description="New display name.")] = None,
+    description: Annotated[str | None, Field(description="New description.")] = None,
+    avatar_url: Annotated[str | None, Field(description="New avatar image URL.")] = None,
+    filter_codebundle_task_tags: Annotated[
+        list[str] | None, Field(description="Replace the task-tag filter list.")
+    ] = None,
+    filter_stop_words: Annotated[
+        list[str] | None, Field(description="Replace the stop-words list.")
+    ] = None,
+    filter_scope: Annotated[str | None, Field(description="New scope filter.")] = None,
+    search_filters: Annotated[
+        dict[str, Any] | None, Field(description="Replace the vector-search filters.")
+    ] = None,
+    filter_confidence_threshold: Annotated[
+        float | None, Field(description="New filter confidence threshold (0-1).")
+    ] = None,
+    filter_issue_selection_strategy: Annotated[
+        str | None, Field(description="New issue selection strategy.")
+    ] = None,
+    run_confidence_threshold: Annotated[
+        float | None, Field(description="New run confidence threshold (0-1).")
+    ] = None,
+    run_config: Annotated[
+        dict[str, Any] | None, Field(description="Replace the run configuration.")
+    ] = None,
+) -> str:
+    """Partially update an existing AI assistant (persona).
+
+    Fetches the current configuration, applies only the fields you provide
+    (leaving everything else intact), then writes the merged result back.
+    Use this instead of ``create_assistant`` when you only want to change a
+    few settings without resetting the rest.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        short = _resolve_assistant_short_name(ws, assistant_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+    try:
+        existing = await _papi_get(f"/api/v4/workspaces/{ws}/personas/{short}")
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+    def _pick(override: Any, key: str, default: Any) -> Any:
+        if override is not None:
+            return override
+        value = existing.get(key)
+        return default if value is None else value
+
+    payload = _build_persona_payload(
+        full_name=existing.get("name") or _form_persona_full_name(ws, short),
+        description=_pick(description, "description", "") or "",
+        display_name=_pick(display_name, "fullName", short),
+        avatar_url=_pick(avatar_url, "avatarUrl", None),
+        filter_confidence_threshold=_pick(
+            filter_confidence_threshold, "filterConfidenceThreshold", 0.5
+        ),
+        filter_issue_selection_strategy=_pick(
+            filter_issue_selection_strategy, "filterIssueSelectionStrategy", "MOST_SEVERE"
+        ),
+        filter_codebundle_task_tags=_pick(
+            filter_codebundle_task_tags, "filterCodebundleTaskTags", []
+        ),
+        filter_stop_words=_pick(filter_stop_words, "filterStopWords", []),
+        filter_scope=_pick(filter_scope, "filterScope", None),
+        search_filters=_pick(search_filters, "searchFilters", {}),
+        run_confidence_threshold=_pick(run_confidence_threshold, "runConfidenceThreshold", 0.95),
+        run_config=_pick(run_config, "runConfig", {}),
+    )
+    try:
+        _, data = await _papi_post(
+            f"/api/v4/workspaces/{ws}/personas/sync-typed", {"payload": payload}
+        )
+        return _json_response(data)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+
+
+@mcp.tool()
+async def delete_assistant(
+    workspace_name: str = Field(description="The workspace the assistant belongs to."),
+    assistant_name: str = Field(
+        description="Assistant short name to delete (e.g. 'azure-devops'). "
+        "Workspace prefix optional."
+    ),
+) -> str:
+    """Delete (soft-delete) an AI assistant (persona) from a workspace.
+
+    Persona-scoped rules and commands attached to this assistant are not
+    removed automatically — clean them up separately if no longer needed.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    try:
+        short = _resolve_assistant_short_name(ws, assistant_name)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+    try:
+        _, data = await _papi_delete(f"/api/v4/workspaces/{ws}/personas/{short}")
         return _json_response(data)
     except (ValueError, httpx.HTTPStatusError) as e:
         return _json_response({"error": str(e)})
@@ -3674,6 +4265,11 @@ _TOOL_FUNCTIONS = [
     get_chat_command,
     create_chat_command,
     update_chat_command,
+    list_assistants,
+    get_assistant,
+    create_assistant,
+    update_assistant,
+    delete_assistant,
     get_workspace_issues,
     get_workspace_slxs,
     get_run_sessions,

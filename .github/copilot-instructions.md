@@ -32,6 +32,7 @@ templates, and examples.
 | `find-and-deploy-codebundle` | Deploying a pre-built codebundle from the registry |
 | `run-existing-slx` | Running an existing SLX in a workspace |
 | `verify-mcp-setup` | Validating the MCP server is installed and working |
+| `create-ai-assistant` | Creating a new AI assistant (agent/persona) and tailoring it with rules and commands |
 | `manage-rules` | Creating or updating workspace chat rules |
 | `manage-commands` | Creating or updating workspace chat commands |
 | `manage-knowledge` | Creating or updating knowledge base articles |

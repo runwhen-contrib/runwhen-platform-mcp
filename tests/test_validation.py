@@ -5,18 +5,27 @@ import base64
 import json
 from unittest import mock
 
+import httpx
 import pytest
 
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
+    _build_persona_payload,
     _ensure_required_tags,
     _extract_env_vars,
+    _form_persona_full_name,
+    _normalize_chat_persona_scope_id,
+    _persona_short_name,
+    _resolve_assistant_short_name,
+    _resolve_command_assistant_name,
     _resolve_script,
+    _validate_assistant_name,
     _validate_runtime_vars,
     _validate_script,
     _validate_slx_name,
     commit_slx,
     run_script_and_wait,
+    update_chat_command,
 )
 
 
@@ -233,6 +242,184 @@ class TestValidateSlxName:
             _validate_slx_name("my.slx")
 
 
+class TestValidateAssistantName:
+    """Tests for _validate_assistant_name (persona short names)."""
+
+    def test_valid_names(self) -> None:
+        for name in ("azure-devops", "sre", "team-backend-1", "a1"):
+            _validate_assistant_name(name)
+
+    def test_empty_name_rejected(self) -> None:
+        with pytest.raises(ValueError, match="must not be empty"):
+            _validate_assistant_name("")
+
+    def test_too_long_rejected(self) -> None:
+        with pytest.raises(ValueError, match="max allowed is 63"):
+            _validate_assistant_name("a" * 64)
+
+    def test_exactly_63_chars_allowed(self) -> None:
+        _validate_assistant_name("a" * 63)
+
+    def test_uppercase_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_assistant_name("Azure-DevOps")
+
+    def test_double_hyphen_rejected(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            _validate_assistant_name("azure--devops")
+
+    def test_leading_hyphen_rejected(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _validate_assistant_name("-azure")
+
+
+class TestPersonaNameHelpers:
+    """Tests for persona full-name / short-name conversion."""
+
+    def test_form_full_name_adds_prefix(self) -> None:
+        assert _form_persona_full_name("t-oncall", "azure-devops") == "t-oncall--azure-devops"
+
+    def test_form_full_name_idempotent_when_prefixed(self) -> None:
+        assert (
+            _form_persona_full_name("t-oncall", "t-oncall--azure-devops")
+            == "t-oncall--azure-devops"
+        )
+
+    def test_short_name_strips_prefix(self) -> None:
+        assert _persona_short_name("t-oncall", "t-oncall--azure-devops") == "azure-devops"
+
+    def test_short_name_passthrough_when_unprefixed(self) -> None:
+        assert _persona_short_name("t-oncall", "azure-devops") == "azure-devops"
+
+    def test_prefixed_name_valid_after_strip(self) -> None:
+        """Assistant tools strip workspace prefix before -- validation."""
+        ws = "t-oncall"
+        assert _resolve_assistant_short_name(ws, "t-oncall--azure-devops") == "azure-devops"
+        assert _form_persona_full_name(ws, "azure-devops") == "t-oncall--azure-devops"
+
+    def test_resolve_rejects_path_traversal_segments(self) -> None:
+        with pytest.raises(ValueError, match="lowercase kebab-case"):
+            _resolve_assistant_short_name("t-oncall", "..")
+
+    def test_resolve_rejects_unprefixed_double_hyphen(self) -> None:
+        with pytest.raises(ValueError, match="reserved"):
+            _resolve_assistant_short_name("t-oncall", "other--azure-devops")
+
+    def test_normalize_chat_persona_scope_id_strips_prefix(self) -> None:
+        result = _normalize_chat_persona_scope_id("t-oncall", "t-oncall--azure-devops")
+        assert result == "azure-devops"
+
+    def test_command_assistant_name_persona_scope_uses_full_name(self) -> None:
+        result = _resolve_command_assistant_name("t-oncall", "persona", "azure-devops")
+        assert result == "t-oncall--azure-devops"
+
+    def test_command_assistant_name_workspace_scope_uses_short_name(self) -> None:
+        result = _resolve_command_assistant_name("t-oncall", "workspace", "azure-devops")
+        assert result == "azure-devops"
+
+
+class TestBuildPersonaPayload:
+    """Tests for persona sync payload assembly."""
+
+    def test_coalesces_null_collections_to_empty(self) -> None:
+        payload = _build_persona_payload(
+            full_name="t-oncall--azure-devops",
+            description=None,
+            display_name=None,
+            avatar_url=None,
+            filter_confidence_threshold=0.5,
+            filter_issue_selection_strategy="MOST_SEVERE",
+            filter_codebundle_task_tags=None,
+            filter_stop_words=None,
+            filter_scope=None,
+            search_filters=None,
+            run_confidence_threshold=0.95,
+            run_config=None,
+        )
+        assert payload["filterCodebundleTaskTags"] == []
+        assert payload["filterStopWords"] == []
+        assert payload["searchFilters"] == {}
+        assert payload["runConfig"] == {}
+
+
+class TestUpdateChatCommandScopeFetch:
+    """update_chat_command must surface PAPI errors when resolving scope_type."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_scope_fetch_error_returned_when_updating_persona_scope_id(
+        self, mock_get, mock_ws
+    ) -> None:
+        mock_ws.return_value = "t-oncall"
+        request = httpx.Request("GET", "https://papi.example/chat-config/commands/1")
+        response = httpx.Response(404, request=request)
+        mock_get.side_effect = httpx.HTTPStatusError(
+            "not found", request=request, response=response
+        )
+
+        result = self._run(
+            update_chat_command(
+                command_id=1,
+                workspace_name="t-oncall",
+                scope_id="t-oncall--azure-devops",
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+
+    @mock.patch("runwhen_platform_mcp.server._papi_put", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_cron_on_persona_scope_rejects_stale_workspace_scope_id(
+        self, mock_get, mock_ws, mock_put
+    ) -> None:
+        mock_ws.return_value = "t-oncall"
+        mock_get.return_value = {
+            "scope_type": "workspace",
+            "scope_id": "t-oncall",
+        }
+
+        result = self._run(
+            update_chat_command(
+                command_id=1,
+                workspace_name="t-oncall",
+                scope_type="persona",
+                cron_schedule="0 9 * * *",
+            )
+        )
+        data = json.loads(result)
+        assert "assistant_name" in data["error"] or "scope_id" in data["error"]
+        mock_put.assert_not_called()
+
+    @mock.patch("runwhen_platform_mcp.server._papi_put", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_cron_on_existing_persona_command_derives_assistant_name(
+        self, mock_get, mock_ws, mock_put
+    ) -> None:
+        mock_ws.return_value = "t-oncall"
+        mock_get.return_value = {
+            "scope_type": "persona",
+            "scope_id": "t-oncall--azure-devops",
+        }
+        mock_put.return_value = (200, {"id": 1})
+
+        result = self._run(
+            update_chat_command(
+                command_id=1,
+                workspace_name="t-oncall",
+                cron_schedule="0 9 * * *",
+            )
+        )
+        data = json.loads(result)
+        assert "error" not in data
+        body = mock_put.call_args[0][1]
+        assert body["assistant_name"] == "t-oncall--azure-devops"
+
+
 class TestWriteToolsCompleteness:
     """Ensure WRITE_TOOLS includes all mutating tool names."""
 
@@ -247,6 +434,9 @@ class TestWriteToolsCompleteness:
         "update_chat_rule",
         "create_chat_command",
         "update_chat_command",
+        "create_assistant",
+        "update_assistant",
+        "delete_assistant",
         "create_knowledge_base_article",
         "update_knowledge_base_article",
         "delete_knowledge_base_article",

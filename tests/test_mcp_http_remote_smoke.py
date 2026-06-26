@@ -112,6 +112,27 @@ async def _run_remote_smoke() -> None:
         _strict_json(text_issues)
 
 
+def _connect_error(exc: BaseException) -> httpx.ConnectError | None:
+    """Return a ConnectError from *exc* or its nested causes/groups."""
+    if isinstance(exc, httpx.ConnectError):
+        return exc
+    nested = getattr(exc, "exceptions", None)
+    if nested is not None:
+        for sub in nested:
+            found = _connect_error(sub)
+            if found is not None:
+                return found
+    if exc.__cause__ is not None:
+        return _connect_error(exc.__cause__)
+    return None
+
+
 def test_remote_streamable_mcp_smoke() -> None:
     _require_remote_mcp_env()
-    asyncio.run(_run_remote_smoke())
+    try:
+        asyncio.run(_run_remote_smoke())
+    except BaseException as exc:
+        connect_err = _connect_error(exc)
+        if connect_err is not None:
+            pytest.skip(f"Remote MCP endpoint unreachable from this runner: {connect_err}")
+        raise

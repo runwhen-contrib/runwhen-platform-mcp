@@ -383,8 +383,16 @@ The server exposes these tools, grouped by use case.
   - `update_chat_rule` — Update a rule by ID.
   - `list_chat_commands` — List chat commands (slash-commands).
   - `get_chat_command` — Get a command by ID (full content).
-  - `create_chat_command` — Create a command (name, commandContent, scopeType, scopeId).
+  - `create_chat_command` — Create a command (name, commandContent, scopeType, scopeId). Supports scheduling via `cron_schedule`, `sink_configs`, `run_as_user`, and `assistant_name`.
+  - `update_chat_command` — Update a command by ID (including schedule fields).
   - `update_chat_command` — Update a command by ID.
+
+- **AI assistants (personas)** (5 tools)
+  - `list_assistants` — List AI assistants (personas) in a workspace.
+  - `get_assistant` — Get a single assistant's full config by short name.
+  - `create_assistant` — Create an assistant (its `short_name` is the `persona_name` for `workspace_chat`). Upsert.
+  - `update_assistant` — Partially update an existing assistant (fetch-merge-write).
+  - `delete_assistant` — Soft-delete an assistant. Persona-scoped rules/commands are not removed automatically.
 
 - **CodeBundle Registry** (3 tools)
   - `search_registry` — Search the public CodeBundle Registry for reusable automation. **Always check before writing custom scripts.**

@@ -82,6 +82,41 @@ If the namespace is healthy, confirm it explicitly and note any recent recoverie
 
 Use `workspace_chat(workspace_name="my-workspace", message="...")` with the command name to verify it produces the expected investigation flow.
 
+## Scheduled commands (RW-779)
+
+Commands can run on a cron and deliver the session artifact to email or Slack sinks.
+
+```
+create_chat_command(
+    name="daily-health-summary",
+    command_content="Summarize open issues by severity and highlight anything new in the last 24 hours.",
+    scope_type="workspace",
+    scope_id="my-workspace",
+    description="Morning health digest",
+    cron_schedule="0 8 * * 1-5",
+    run_as_user="oncall@example.com",
+    assistant_name="platform-sre",
+    sink_configs=[
+        {"type": "email", "mode": "user", "target": "oncall@example.com"},
+    ],
+    auto_approve_readonly=True,
+)
+```
+
+| Field | Purpose |
+|-------|---------|
+| `cron_schedule` | Cron expression (required to enable scheduling) |
+| `run_as_user` | Workspace member email the session runs as |
+| `assistant_name` | Persona for scheduled runs. For **persona-scoped** commands, stored as full `{workspace}--{short}` to match `scope_id` after PAPI normalization. For workspace-scoped commands, use the persona **short** name (`persona_name` for chat). |
+| `sink_configs` | Where to deliver results (`email` or `slack`) |
+| `max_runs` | Optional run budget (omit for unlimited) |
+| `schedule_paused` | Pause cron without losing schedule config |
+| `auto_approve_readonly` | Auto-run read-only tasks without approval widgets |
+
+Update scheduling with `update_chat_command` (same fields). Use `clear_max_runs=True`
+to remove a run cap, or `reset_runs_completed=True` after raising `max_runs`.
+Pause/resume via `schedule_paused`.
+
 ## Command categories and examples
 
 ### Investigation commands

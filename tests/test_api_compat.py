@@ -289,3 +289,36 @@ class TestRegistrySchema:
         assert "deploy_runbook" in props
         assert "deploy_sli" in props
         assert "location" in props
+
+
+class TestChatCommandScheduleSchema:
+    """Scheduled chat commands (RW-779) expose cron/sink fields in MCP schema."""
+
+    _CREATE_SCHEDULE_PARAMS = (
+        "cron_schedule",
+        "sink_configs",
+        "run_as_user",
+        "assistant_name",
+        "max_runs",
+        "schedule_paused",
+        "auto_approve_readonly",
+    )
+
+    _UPDATE_SCHEDULE_PARAMS = _CREATE_SCHEDULE_PARAMS + (
+        "reset_runs_completed",
+        "clear_max_runs",
+    )
+
+    def test_create_chat_command_has_schedule_params(self, tools) -> None:
+        tool = _find_tool(tools, "create_chat_command")
+        assert tool is not None
+        props = tool.parameters.get("properties", {})
+        for param in self._CREATE_SCHEDULE_PARAMS:
+            assert param in props, f"create_chat_command missing schedule param: {param}"
+
+    def test_update_chat_command_has_schedule_params(self, tools) -> None:
+        tool = _find_tool(tools, "update_chat_command")
+        assert tool is not None
+        props = tool.parameters.get("properties", {})
+        for param in self._UPDATE_SCHEDULE_PARAMS:
+            assert param in props, f"update_chat_command missing schedule param: {param}"
