@@ -1897,11 +1897,17 @@ async def create_chat_rule(
 ) -> str:
     """Create a chat rule. Uses AgentFarm internal API."""
     ws = await _resolve_workspace(workspace_name)
+    resolved_scope_id = scope_id
+    if scope_type == "persona" and scope_id is not None:
+        try:
+            resolved_scope_id = _normalize_chat_persona_scope_id(ws, scope_id)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
     body: dict[str, Any] = {
         "name": name,
         "rule_content": rule_content,
         "scope_type": scope_type,
-        "scope_id": scope_id,
+        "scope_id": resolved_scope_id,
         "is_active": is_active,
     }
     try:
@@ -1931,7 +1937,20 @@ async def update_chat_rule(
     if scope_type is not None:
         body["scope_type"] = scope_type
     if scope_id is not None:
-        body["scope_id"] = scope_id
+        effective_scope_type = scope_type
+        if effective_scope_type is None:
+            try:
+                existing = await _papi_get(f"/api/v3/workspaces/{ws}/chat-config/rules/{rule_id}")
+                effective_scope_type = existing.get("scope_type") or existing.get("scopeType")
+            except (ValueError, httpx.HTTPStatusError) as e:
+                return _json_response({"error": str(e)})
+        if effective_scope_type == "persona":
+            try:
+                body["scope_id"] = _normalize_chat_persona_scope_id(ws, scope_id)
+            except ValueError as exc:
+                return _json_response({"error": str(exc)})
+        else:
+            body["scope_id"] = scope_id
     if is_active is not None:
         body["is_active"] = is_active
     try:
@@ -2028,8 +2047,9 @@ async def create_chat_command(
     assistant_name: Annotated[
         str | None,
         Field(
-            description="Persona short name for scheduled runs (workspace prefix optional). "
-            "Required when cron_schedule is set; for persona-scoped commands must match scope_id."
+            description="Persona for scheduled runs (workspace prefix optional). "
+            "For persona-scoped commands, must match scope_id (full form after PAPI). "
+            "For workspace-scoped commands, use the short name (persona_name for chat)."
         ),
     ] = None,
     max_runs: Annotated[
@@ -2057,11 +2077,17 @@ async def create_chat_command(
     (email or Slack) when the cron fires.
     """
     ws = await _resolve_workspace(workspace_name)
+    resolved_scope_id = scope_id
+    if scope_type == "persona" and scope_id is not None:
+        try:
+            resolved_scope_id = _normalize_chat_persona_scope_id(ws, scope_id)
+        except ValueError as exc:
+            return _json_response({"error": str(exc)})
     body: dict[str, Any] = {
         "name": name,
         "command_content": command_content,
         "scope_type": scope_type,
-        "scope_id": scope_id,
+        "scope_id": resolved_scope_id,
         "is_active": is_active,
     }
     if description is not None:
@@ -2074,9 +2100,11 @@ async def create_chat_command(
         body["run_as_user"] = run_as_user
     if assistant_name is not None:
         try:
-            body["assistant_name"] = _resolve_assistant_short_name(ws, assistant_name)
+            body["assistant_name"] = _resolve_command_assistant_name(ws, scope_type, assistant_name)
         except ValueError as exc:
             return _json_response({"error": str(exc)})
+    elif cron_schedule and scope_type == "persona" and resolved_scope_id is not None:
+        body["assistant_name"] = _form_persona_full_name(ws, resolved_scope_id)
     if max_runs is not None:
         body["max_runs"] = max_runs
     if schedule_paused is not None:
@@ -2146,6 +2174,7 @@ async def update_chat_command(
     ws = await _resolve_workspace(workspace_name)
     if clear_max_runs and max_runs is not None:
         return _json_response({"error": "Cannot set both max_runs and clear_max_runs."})
+    effective_scope_type = await _get_chat_command_scope_type(ws, command_id, scope_type)
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
@@ -2155,8 +2184,15 @@ async def update_chat_command(
         body["description"] = description
     if scope_type is not None:
         body["scope_type"] = scope_type
+        effective_scope_type = scope_type
     if scope_id is not None:
-        body["scope_id"] = scope_id
+        if effective_scope_type == "persona":
+            try:
+                body["scope_id"] = _normalize_chat_persona_scope_id(ws, scope_id)
+            except ValueError as exc:
+                return _json_response({"error": str(exc)})
+        else:
+            body["scope_id"] = scope_id
     if is_active is not None:
         body["is_active"] = is_active
     if cron_schedule is not None:
@@ -2166,10 +2202,30 @@ async def update_chat_command(
     if run_as_user is not None:
         body["run_as_user"] = run_as_user
     if assistant_name is not None:
+        if effective_scope_type is None:
+            return _json_response(
+                {"error": "Could not resolve scope_type to normalize assistant_name."}
+            )
         try:
-            body["assistant_name"] = _resolve_assistant_short_name(ws, assistant_name)
+            body["assistant_name"] = _resolve_command_assistant_name(
+                ws, effective_scope_type, assistant_name
+            )
         except ValueError as exc:
             return _json_response({"error": str(exc)})
+    elif cron_schedule is not None and effective_scope_type == "persona":
+        persona_short = body.get("scope_id")
+        if persona_short is None:
+            try:
+                existing_cmd = await _papi_get(
+                    f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}"
+                )
+                existing_sid = existing_cmd.get("scope_id") or existing_cmd.get("scopeId")
+                if existing_sid:
+                    persona_short = _persona_short_name(ws, existing_sid)
+            except (ValueError, httpx.HTTPStatusError) as e:
+                return _json_response({"error": str(e)})
+        if persona_short is not None:
+            body["assistant_name"] = _form_persona_full_name(ws, persona_short)
     if clear_max_runs:
         body["max_runs"] = None
     elif max_runs is not None:
@@ -2259,6 +2315,43 @@ def _resolve_assistant_short_name(workspace: str, assistant_name: str) -> str:
     short = _persona_short_name(workspace, assistant_name)
     _validate_assistant_name(short)
     return short
+
+
+def _normalize_chat_persona_scope_id(workspace: str, scope_id: str) -> str:
+    """Return validated persona short name for chat rule/command scope_id."""
+    return _resolve_assistant_short_name(workspace, scope_id)
+
+
+def _resolve_command_assistant_name(
+    workspace: str,
+    scope_type: str,
+    assistant_name: str,
+) -> str:
+    """Resolve assistant_name for chat commands.
+
+    Workspace/user-scoped scheduled commands use the persona *short* name.
+    Persona-scoped commands must store assistant_name equal to scope_id after
+    PAPI normalization (full ``{workspace}--{short}`` form).
+    """
+    short = _resolve_assistant_short_name(workspace, assistant_name)
+    if scope_type == "persona":
+        return _form_persona_full_name(workspace, short)
+    return short
+
+
+async def _get_chat_command_scope_type(
+    workspace: str,
+    command_id: int,
+    scope_type: str | None,
+) -> str | None:
+    """Resolve scope_type for partial command updates (fetch when omitted)."""
+    if scope_type is not None:
+        return scope_type
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{workspace}/chat-config/commands/{command_id}")
+    except (ValueError, httpx.HTTPStatusError):
+        return None
+    return data.get("scope_type") or data.get("scopeType")
 
 
 def _build_persona_payload(
@@ -2490,28 +2583,29 @@ async def update_assistant(
     def _pick(override: Any, key: str, default: Any) -> Any:
         if override is not None:
             return override
-        return existing.get(key, default)
+        value = existing.get(key)
+        return default if value is None else value
 
-    payload = {
-        "name": existing.get("name") or _form_persona_full_name(ws, short),
-        "description": _pick(description, "description", "") or "",
-        "fullName": _pick(display_name, "fullName", short),
-        "avatarUrl": _pick(avatar_url, "avatarUrl", None),
-        "filterConfidenceThreshold": _pick(
+    payload = _build_persona_payload(
+        full_name=existing.get("name") or _form_persona_full_name(ws, short),
+        description=_pick(description, "description", "") or "",
+        display_name=_pick(display_name, "fullName", short),
+        avatar_url=_pick(avatar_url, "avatarUrl", None),
+        filter_confidence_threshold=_pick(
             filter_confidence_threshold, "filterConfidenceThreshold", 0.5
         ),
-        "filterIssueSelectionStrategy": _pick(
+        filter_issue_selection_strategy=_pick(
             filter_issue_selection_strategy, "filterIssueSelectionStrategy", "MOST_SEVERE"
         ),
-        "filterCodebundleTaskTags": _pick(
+        filter_codebundle_task_tags=_pick(
             filter_codebundle_task_tags, "filterCodebundleTaskTags", []
         ),
-        "filterStopWords": _pick(filter_stop_words, "filterStopWords", []),
-        "filterScope": _pick(filter_scope, "filterScope", None),
-        "searchFilters": _pick(search_filters, "searchFilters", {}),
-        "runConfidenceThreshold": _pick(run_confidence_threshold, "runConfidenceThreshold", 0.95),
-        "runConfig": _pick(run_config, "runConfig", {}),
-    }
+        filter_stop_words=_pick(filter_stop_words, "filterStopWords", []),
+        filter_scope=_pick(filter_scope, "filterScope", None),
+        search_filters=_pick(search_filters, "searchFilters", {}),
+        run_confidence_threshold=_pick(run_confidence_threshold, "runConfidenceThreshold", 0.95),
+        run_config=_pick(run_config, "runConfig", {}),
+    )
     try:
         _, data = await _papi_post(
             f"/api/v4/workspaces/{ws}/personas/sync-typed", {"payload": payload}

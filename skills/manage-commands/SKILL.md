@@ -107,7 +107,7 @@ create_chat_command(
 |-------|---------|
 | `cron_schedule` | Cron expression (required to enable scheduling) |
 | `run_as_user` | Workspace member email the session runs as |
-| `assistant_name` | Persona short name (`persona_name` for the scheduled chat) |
+| `assistant_name` | Persona for scheduled runs. For **persona-scoped** commands, stored as full `{workspace}--{short}` to match `scope_id` after PAPI normalization. For workspace-scoped commands, use the persona **short** name (`persona_name` for chat). |
 | `sink_configs` | Where to deliver results (`email` or `slack`) |
 | `max_runs` | Optional run budget (omit for unlimited) |
 | `schedule_paused` | Pause cron without losing schedule config |

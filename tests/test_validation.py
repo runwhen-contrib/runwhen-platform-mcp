@@ -9,11 +9,14 @@ import pytest
 
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
+    _build_persona_payload,
     _ensure_required_tags,
     _extract_env_vars,
     _form_persona_full_name,
+    _normalize_chat_persona_scope_id,
     _persona_short_name,
     _resolve_assistant_short_name,
+    _resolve_command_assistant_name,
     _resolve_script,
     _validate_assistant_name,
     _validate_runtime_vars,
@@ -299,6 +302,42 @@ class TestPersonaNameHelpers:
     def test_resolve_rejects_unprefixed_double_hyphen(self) -> None:
         with pytest.raises(ValueError, match="reserved"):
             _resolve_assistant_short_name("t-oncall", "other--azure-devops")
+
+    def test_normalize_chat_persona_scope_id_strips_prefix(self) -> None:
+        result = _normalize_chat_persona_scope_id("t-oncall", "t-oncall--azure-devops")
+        assert result == "azure-devops"
+
+    def test_command_assistant_name_persona_scope_uses_full_name(self) -> None:
+        result = _resolve_command_assistant_name("t-oncall", "persona", "azure-devops")
+        assert result == "t-oncall--azure-devops"
+
+    def test_command_assistant_name_workspace_scope_uses_short_name(self) -> None:
+        result = _resolve_command_assistant_name("t-oncall", "workspace", "azure-devops")
+        assert result == "azure-devops"
+
+
+class TestBuildPersonaPayload:
+    """Tests for persona sync payload assembly."""
+
+    def test_coalesces_null_collections_to_empty(self) -> None:
+        payload = _build_persona_payload(
+            full_name="t-oncall--azure-devops",
+            description=None,
+            display_name=None,
+            avatar_url=None,
+            filter_confidence_threshold=0.5,
+            filter_issue_selection_strategy="MOST_SEVERE",
+            filter_codebundle_task_tags=None,
+            filter_stop_words=None,
+            filter_scope=None,
+            search_filters=None,
+            run_confidence_threshold=0.95,
+            run_config=None,
+        )
+        assert payload["filterCodebundleTaskTags"] == []
+        assert payload["filterStopWords"] == []
+        assert payload["searchFilters"] == {}
+        assert payload["runConfig"] == {}
 
 
 class TestWriteToolsCompleteness:
