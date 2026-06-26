@@ -427,7 +427,16 @@ The server exposes these tools, grouped by use case.
 | `RUNWHEN_AIRGAP` | No | Set to `true` for airgapped environments. `search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call to the registry. |
 | `RUNWHEN_REGISTRY_TIMEOUT_S` | No | HTTP timeout (seconds) for registry calls. Default `10`. Lowered from the PAPI default so an unreachable registry fails fast and is reported gracefully. |
 | `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` | No | Soft warning threshold for script payload size. Default `10240` (10KB). Scripts above this size produce an advisory warning in `validate_script` / `run_script_and_wait` — MCP HTTP intermediaries often truncate base64 payloads above ~13KB. |
-| `RUNWHEN_SCRIPT_HARD_MAX_BYTES` | No | Hard cap for script payload size. Default `65536` (64KB). `commit_slx` / `run_script*` reject scripts above this with an error and suggest using a registry codebundle or `script_path`. |
+| `RUNWHEN_SCRIPT_HARD_MAX_BYTES` | No | Hard cap for script payload size. Default `65536` (64KB). `commit_slx` / `run_script*` reject scripts above this with an error and suggest using a registry codebundle, `script_gzip_base64`, or `script_path`. |
+| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Internal git URL for `rw-generic-codecollection` (airgap). Shared default for Tool Builder runbook + SLI bundles. |
+| `MCP_GENERIC_CODECOLLECTION_REF` | No | Git ref for the generic codecollection mirror (default: `main`). |
+| `MCP_TOOL_BUILDER_RUNBOOK_*` | No | Override Tool Builder runbook code bundle (`REPO_URL`, `REF`, `PATH`). |
+| `MCP_TOOL_BUILDER_SLI_*` | No | Override Tool Builder SLI code bundle (`REPO_URL`, `REF`, `PATH`). |
+| `MCP_CRON_SLI_*` | No | Override cron-scheduler SLI code bundle (`REPO_URL`, `REF`, `PATH`; default repo: `rw-workspace-utils`). |
+| `MCP_POLL_INTERVAL_S` | No | Seconds between script run status polls (default: `5`). |
+| `MCP_MAX_POLL_DURATION_S` | No | Max seconds to wait for a script run (default: `300`). |
+| `MCP_ARTIFACT_SETTLE_DELAY_S` | No | Delay before fetching run artifacts (default: `2`). |
+| `MCP_GENERIC_SLX_ICON` | No | Default SLX icon URL when none is provided at commit time. |
 
 **HTTP / OAuth only** (when `MCP_TRANSPORT=http`; see [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments)):
 

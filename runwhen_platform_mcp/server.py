@@ -435,34 +435,131 @@ _SKILL_RESOURCE_COUNT = _register_skill_resources()
 
 
 # ---------------------------------------------------------------------------
-# Tool Builder constants
+# Tool Builder constants (override via env for airgap / internal git mirrors)
 # ---------------------------------------------------------------------------
 
-RB_CODE_BUNDLE = {
-    "repoUrl": "https://github.com/runwhen-contrib/rw-generic-codecollection.git",
-    "ref": "main",
-    "pathToRobot": "codebundles/tool-builder/runbook.robot",
-}
-
-SLI_CODE_BUNDLE = {
-    "repoUrl": "https://github.com/runwhen-contrib/rw-generic-codecollection.git",
-    "ref": "main",
-    "pathToRobot": "codebundles/tool-builder/sli.robot",
-}
-
-CRON_SLI_CODE_BUNDLE = {
-    "repoUrl": "https://github.com/runwhen-contrib/rw-workspace-utils.git",
-    "ref": "main",
-    "pathToRobot": "codebundles/cron-scheduler-sli/sli.robot",
-}
-
-POLL_INTERVAL_S = 5
-MAX_POLL_DURATION_S = 300
-ARTIFACT_SETTLE_DELAY_S = 2
-
-GENERIC_SLX_ICON = (
+_DEFAULT_GENERIC_CODECOLLECTION_REPO = (
+    "https://github.com/runwhen-contrib/rw-generic-codecollection.git"
+)
+_DEFAULT_WORKSPACE_UTILS_REPO = "https://github.com/runwhen-contrib/rw-workspace-utils.git"
+_DEFAULT_CODE_BUNDLE_REF = "main"
+_DEFAULT_GENERIC_SLX_ICON = (
     "https://storage.googleapis.com/runwhen-nonprod-shared-images/icons/prompt_suggestion.svg"
 )
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if minimum is not None and value < minimum:
+        return default
+    return value
+
+
+def _next_poll_sleep_s(elapsed: int, poll_interval_s: int, max_duration_s: int) -> int:
+    """Return sleep duration for the next poll, capped by remaining max wait."""
+    remaining = max_duration_s - elapsed
+    if remaining <= 0:
+        return 0
+    return min(poll_interval_s, remaining)
+
+
+def _env_str(name: str, default: str) -> str:
+    """Return env var value, treating unset or blank as *default*."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    stripped = raw.strip()
+    return stripped if stripped else default
+
+
+def _env_str_optional(name: str) -> str | None:
+    """Return env var value, treating unset or blank as missing."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped if stripped else None
+
+
+def _code_bundle_from_env(
+    *,
+    repo_url_var: str,
+    ref_var: str,
+    path_var: str,
+    default_repo_url: str,
+    default_ref: str,
+    default_path: str,
+    repo_url_fallback: str | None = None,
+    ref_fallback: str | None = None,
+) -> dict[str, str]:
+    """Build a codeBundle dict from env vars with optional shared fallbacks."""
+    repo_url = _env_str_optional(repo_url_var)
+    if repo_url is None and repo_url_fallback:
+        repo_url = repo_url_fallback
+    if repo_url is None:
+        repo_url = default_repo_url
+
+    ref = _env_str_optional(ref_var)
+    if ref is None and ref_fallback:
+        ref = ref_fallback
+    if ref is None:
+        ref = default_ref
+
+    path = _env_str(path_var, default_path)
+    return {"repoUrl": repo_url, "ref": ref, "pathToRobot": path}
+
+
+_GENERIC_CODECOLLECTION_REPO_URL = _env_str(
+    "MCP_GENERIC_CODECOLLECTION_REPO_URL",
+    _DEFAULT_GENERIC_CODECOLLECTION_REPO,
+)
+_GENERIC_CODECOLLECTION_REF = _env_str(
+    "MCP_GENERIC_CODECOLLECTION_REF",
+    _DEFAULT_CODE_BUNDLE_REF,
+)
+
+RB_CODE_BUNDLE = _code_bundle_from_env(
+    repo_url_var="MCP_TOOL_BUILDER_RUNBOOK_REPO_URL",
+    ref_var="MCP_TOOL_BUILDER_RUNBOOK_REF",
+    path_var="MCP_TOOL_BUILDER_RUNBOOK_PATH",
+    default_repo_url=_DEFAULT_GENERIC_CODECOLLECTION_REPO,
+    default_ref=_DEFAULT_CODE_BUNDLE_REF,
+    default_path="codebundles/tool-builder/runbook.robot",
+    repo_url_fallback=_GENERIC_CODECOLLECTION_REPO_URL,
+    ref_fallback=_GENERIC_CODECOLLECTION_REF,
+)
+
+SLI_CODE_BUNDLE = _code_bundle_from_env(
+    repo_url_var="MCP_TOOL_BUILDER_SLI_REPO_URL",
+    ref_var="MCP_TOOL_BUILDER_SLI_REF",
+    path_var="MCP_TOOL_BUILDER_SLI_PATH",
+    default_repo_url=_DEFAULT_GENERIC_CODECOLLECTION_REPO,
+    default_ref=_DEFAULT_CODE_BUNDLE_REF,
+    default_path="codebundles/tool-builder/sli.robot",
+    repo_url_fallback=_GENERIC_CODECOLLECTION_REPO_URL,
+    ref_fallback=_GENERIC_CODECOLLECTION_REF,
+)
+
+CRON_SLI_CODE_BUNDLE = _code_bundle_from_env(
+    repo_url_var="MCP_CRON_SLI_REPO_URL",
+    ref_var="MCP_CRON_SLI_REF",
+    path_var="MCP_CRON_SLI_PATH",
+    default_repo_url=_DEFAULT_WORKSPACE_UTILS_REPO,
+    default_ref=_DEFAULT_CODE_BUNDLE_REF,
+    default_path="codebundles/cron-scheduler-sli/sli.robot",
+)
+
+MAX_POLL_DURATION_S = _env_int("MCP_MAX_POLL_DURATION_S", 300, minimum=1)
+POLL_INTERVAL_S = min(_env_int("MCP_POLL_INTERVAL_S", 5, minimum=1), MAX_POLL_DURATION_S)
+ARTIFACT_SETTLE_DELAY_S = _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2, minimum=0)
+
+GENERIC_SLX_ICON = _env_str("MCP_GENERIC_SLX_ICON", _DEFAULT_GENERIC_SLX_ICON)
 
 
 async def _fetch_artifact_content(signed_url: str) -> str | None:
@@ -5333,8 +5430,11 @@ async def run_script_and_wait(
     elapsed = 0
     status = "RUNNING"
     while status == "RUNNING" and elapsed < MAX_POLL_DURATION_S:
-        await asyncio.sleep(POLL_INTERVAL_S)
-        elapsed += POLL_INTERVAL_S
+        sleep_s = _next_poll_sleep_s(elapsed, POLL_INTERVAL_S, MAX_POLL_DURATION_S)
+        if sleep_s <= 0:
+            break
+        await asyncio.sleep(sleep_s)
+        elapsed += sleep_s
         status_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
         status = status_data.get("status", "UNKNOWN")
 
@@ -5504,8 +5604,11 @@ async def run_slx(
     run_status = "running"
     session_data = {}
     while run_status != "completed" and elapsed < SLX_RUN_MAX_POLL_S:
-        await asyncio.sleep(SLX_RUN_POLL_INTERVAL_S)
-        elapsed += SLX_RUN_POLL_INTERVAL_S
+        sleep_s = _next_poll_sleep_s(elapsed, SLX_RUN_POLL_INTERVAL_S, SLX_RUN_MAX_POLL_S)
+        if sleep_s <= 0:
+            break
+        await asyncio.sleep(sleep_s)
+        elapsed += sleep_s
         try:
             session_data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/{session_id}")
             run_requests = session_data.get("run_requests", [])
