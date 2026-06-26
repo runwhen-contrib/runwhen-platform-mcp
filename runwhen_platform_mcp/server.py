@@ -1106,6 +1106,48 @@ _BASH_MAIN_INVOKE_RE = re.compile(
 )
 
 
+def _python_string_literal_line_set(script: str) -> set[int]:
+    """Return the 1-indexed line numbers that live *inside* a multi-line string.
+
+    Used by :func:`_strip_python_main_guards` to skip any guard-shaped lines
+    that live inside a docstring or a multi-line string. Without this, a
+    regex pass would happily mutilate scripts that *document* the
+    ``if __name__ == "__main__":`` pattern in a docstring or example block.
+
+    Only **interior** lines of multi-line string tokens are returned — i.e.
+    for a string spanning lines ``[start, end]`` (``start < end``), the
+    interior is ``(start, end)``. The opening and closing lines are NOT
+    included because they typically contain code (the leading variable
+    assignment / function call, or the closing quote followed by more code)
+    and may legitimately also carry a guard match somewhere else on the
+    line. The common false-positive case — a guard whose own line contains
+    the ``"__main__"`` literal — has ``start == end`` and so is never
+    flagged here, which is the correct outcome.
+
+    Returns an empty set when the script doesn't tokenize cleanly (e.g. it
+    is bash, or syntactically invalid Python) — the caller then falls back
+    to the original line-by-line behaviour, which is no worse than before.
+    """
+    import tokenize
+    from io import BytesIO
+
+    try:
+        tokens = tokenize.tokenize(BytesIO(script.encode("utf-8")).readline)
+        lines: set[int] = set()
+        for tok in tokens:
+            if tok.type != tokenize.STRING:
+                continue
+            start_line = tok.start[0]
+            end_line = tok.end[0]
+            if end_line > start_line:
+                # Interior lines only: range(start + 1, end) excludes both
+                # endpoints. A docstring on lines 3-7 yields {4, 5, 6}.
+                lines.update(range(start_line + 1, end_line))
+        return lines
+    except (tokenize.TokenError, SyntaxError, IndentationError, UnicodeDecodeError):
+        return set()
+
+
 def _strip_python_main_guards(script: str) -> tuple[str, int, int]:
     """Remove ``if __name__ == "__main__":`` blocks from a Python script.
 
@@ -1114,14 +1156,24 @@ def _strip_python_main_guards(script: str) -> tuple[str, int, int]:
     indentation, because dropping the ``if`` alone would leave invalid Python
     (orphan ``else:``). For skipped guards the caller should keep the warning
     blocking so the agent fixes the structure manually.
+
+    Guard-shaped lines that appear *inside* a string literal (docstrings,
+    examples in triple-quoted strings, etc.) are left untouched — see
+    :func:`_python_string_literal_line_set`.
     """
     lines = script.splitlines(keepends=True)
+    string_lines = _python_string_literal_line_set(script)
     output: list[str] = []
     removed = 0
     skipped = 0
     i = 0
     while i < len(lines):
         line = lines[i]
+        # ``i`` is 0-indexed; tokenize line numbers are 1-indexed.
+        if (i + 1) in string_lines:
+            output.append(line)
+            i += 1
+            continue
         match = _PY_MAIN_GUARD_HEAD_RE.match(line.rstrip("\n").rstrip("\r"))
         if not match:
             output.append(line)
@@ -4693,39 +4745,74 @@ async def get_workspace_secrets(
 
     platform_groups: dict[str, list[str]] = {}
     recommended_secret_vars: dict[str, dict[str, str]] = {}
+    # Track env-var collisions so we never silently drop a workspace key.
+    # Two keys can classify to the same env var (e.g. two GitHub PATs both
+    # mapped to ``GITHUB_TOKEN``): the first gets the canonical name, the
+    # rest get numeric suffixes (``GITHUB_TOKEN_2`` …), and the collision
+    # is surfaced in the response so the agent can pick consciously.
+    secret_var_collisions: dict[str, dict[str, list[str]]] = {}
     for key in sorted(set(keys)):
         platform, env_var = _classify_secret(key)
         platform_groups.setdefault(platform, []).append(key)
-        recommended_secret_vars.setdefault(platform, {})[env_var] = key
+        bucket = recommended_secret_vars.setdefault(platform, {})
 
-    return _json_response(
-        {
-            "workspace": ws,
-            "secrets": keys,
-            "platform_groups": platform_groups,
-            "recommended_secret_vars": recommended_secret_vars,
-            "runtime_semantics": (
-                "Workspace secrets are injected into scripts as FILE PATHS, "
-                "not literal values. Read them with: "
-                "`v = os.environ.get('NAME'); open(v).read().strip() if os.path.isfile(v) else v`. "
-                "See the discover-secrets skill for the full read_secret helper."
-            ),
-            "common_pitfalls": [
-                "Treating secret env vars as literal values instead of file paths.",
-                "Using uppercase 'KUBECONFIG' as the env-var name — by convention "
-                "it stays lowercase 'kubeconfig' to match the workspace key.",
-                "Forgetting azure_credentials (or the 4-tuple "
-                "clientId/clientSecret/tenantId/subscriptionId) on Azure tasks — "
-                "commit_slx will reject the SLX with a hint.",
-            ],
-            "skill_reference": f"{SKILL_URI_SCHEME}discover-secrets",
-            "next_step_hint": (
-                "Pick the entry under recommended_secret_vars that matches your "
-                "task's target platform and pass it as secret_vars= to commit_slx "
-                "or run_script. Merge multiple groups for multi-cloud tasks."
-            ),
-        }
-    )
+        if env_var not in bucket:
+            bucket[env_var] = key
+            continue
+
+        # Collision — disambiguate with a numeric suffix. Walk forward
+        # until we find an unused name (defensive: tolerates a key that
+        # was *itself* classified to ``ENV_VAR_2`` from somewhere else).
+        n = 2
+        while f"{env_var}_{n}" in bucket:
+            n += 1
+        disambiguated = f"{env_var}_{n}"
+        bucket[disambiguated] = key
+
+        # Record both the canonical and disambiguated keys grouped by the
+        # collision env var so the agent sees every candidate at a glance.
+        platform_collisions = secret_var_collisions.setdefault(platform, {})
+        if env_var not in platform_collisions:
+            platform_collisions[env_var] = [bucket[env_var]]
+        platform_collisions[env_var].append(key)
+
+    response: dict[str, Any] = {
+        "workspace": ws,
+        "secrets": keys,
+        "platform_groups": platform_groups,
+        "recommended_secret_vars": recommended_secret_vars,
+        "runtime_semantics": (
+            "Workspace secrets are injected into scripts as FILE PATHS, "
+            "not literal values. Read them with: "
+            "`v = os.environ.get('NAME'); open(v).read().strip() if os.path.isfile(v) else v`. "
+            "See the discover-secrets skill for the full read_secret helper."
+        ),
+        "common_pitfalls": [
+            "Treating secret env vars as literal values instead of file paths.",
+            "Using uppercase 'KUBECONFIG' as the env-var name — by convention "
+            "it stays lowercase 'kubeconfig' to match the workspace key.",
+            "Forgetting azure_credentials (or the 4-tuple "
+            "clientId/clientSecret/tenantId/subscriptionId) on Azure tasks — "
+            "commit_slx will reject the SLX with a hint.",
+        ],
+        "skill_reference": f"{SKILL_URI_SCHEME}discover-secrets",
+        "next_step_hint": (
+            "Pick the entry under recommended_secret_vars that matches your "
+            "task's target platform and pass it as secret_vars= to commit_slx "
+            "or run_script. Merge multiple groups for multi-cloud tasks."
+        ),
+    }
+    if secret_var_collisions:
+        # Only include the field when collisions exist — keeps the
+        # response shape clean for the common single-secret case.
+        response["secret_var_collisions"] = secret_var_collisions
+        response["common_pitfalls"].append(
+            "Multiple workspace keys map to the same recommended env var "
+            "(see secret_var_collisions). The first key gets the canonical "
+            "name; subsequent keys get a numeric suffix. Pick the entry "
+            "that matches your environment (e.g. prod vs test)."
+        )
+    return _json_response(response)
 
 
 def _summarise_location(loc: dict[str, Any]) -> dict[str, Any]:
@@ -4849,11 +4936,49 @@ async def get_workspace_locations(
 
 
 def _decode_script_base64(data: str, *, label: str = "script_base64") -> str:
-    """Decode standard base64 of UTF-8 text. Raises ValueError on failure."""
+    """Decode standard base64 of UTF-8 text. Raises ValueError on failure.
+
+    The decoded payload is bounded by :data:`SCRIPT_HARD_MAX_BYTES` so an
+    abusively large ``script_base64`` argument cannot allocate gigabytes
+    of memory before the downstream :func:`_assess_script_size` check
+    runs. The cap is enforced *before* decoding by checking the encoded
+    length (base64 expands by 4/3, so the encoded budget is bounded), and
+    *after* decoding as defence-in-depth.
+    """
+    stripped = data.strip()
+
+    # Encoded budget: base64 expands payload bytes by ceil(n*4/3) and
+    # pads to a multiple of 4, so the encoded form of a maximally-sized
+    # payload is at most this many characters. Reject before allocating.
+    max_encoded = ((SCRIPT_HARD_MAX_BYTES + 2) // 3) * 4 + 4
+    if len(stripped) > max_encoded:
+        raise ValueError(
+            f"Invalid {label}: encoded payload is {len(stripped)} bytes, "
+            f"which decodes to more than the hard cap of "
+            f"{SCRIPT_HARD_MAX_BYTES} bytes (RUNWHEN_SCRIPT_HARD_MAX_BYTES). "
+            "If the script is genuinely this large, deploy it as a registry "
+            "codebundle (search_registry + deploy_registry_codebundle) or "
+            "split the work into multiple SLXs."
+        )
+
     try:
-        raw = base64.b64decode(data.strip().encode("ascii"), validate=True)
-        return raw.decode("utf-8")
+        raw = base64.b64decode(stripped.encode("ascii"), validate=True)
     except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"Invalid {label}: must be valid standard base64 encoding UTF-8 text."
+        ) from exc
+
+    if len(raw) > SCRIPT_HARD_MAX_BYTES:
+        raise ValueError(
+            f"Invalid {label}: decoded payload is {len(raw)} bytes, "
+            f"which exceeds the hard cap of {SCRIPT_HARD_MAX_BYTES} bytes "
+            "(RUNWHEN_SCRIPT_HARD_MAX_BYTES). Deploy as a registry codebundle "
+            "or split into multiple SLXs."
+        )
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
         raise ValueError(
             f"Invalid {label}: must be valid standard base64 encoding UTF-8 text."
         ) from exc

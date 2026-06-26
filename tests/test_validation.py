@@ -22,6 +22,7 @@ from runwhen_platform_mcp.server import (
     _azure_credentials_hint,
     _build_persona_payload,
     _classify_secret,
+    _decode_script_base64,
     _decode_script_gzip_base64,
     _detect_unresolved_placeholders,
     _discover_skills,
@@ -3131,3 +3132,241 @@ class TestRunSlxRejectsEmptyTaskTitles:
                 # the guard either — both paths confirm the guard let it
                 # through.
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Bugbot regression — round 5 (post-merge commit 5ecb01a)
+# ---------------------------------------------------------------------------
+
+
+class TestStripMainGuardSkipsStringLiterals:
+    """``_strip_python_main_guards`` must not mutate docstring contents.
+
+    Regression for Bugbot MEDIUM ("Main guard strip corrupts strings").
+    Previously the regex pass scanned every line and would happily strip
+    a guard-shaped line that lived inside a triple-quoted docstring or
+    example block.
+    """
+
+    def test_guard_inside_docstring_is_preserved(self) -> None:
+        src = (
+            "def f():\n"
+            '    """\n'
+            "    Example usage:\n"
+            '    if __name__ == "__main__":\n'
+            "        f()\n"
+            '    """\n'
+            "    return 1\n"
+        )
+        cleaned, removed, skipped = _strip_python_main_guards(src)
+        assert removed == 0
+        assert skipped == 0
+        # The docstring content must come through verbatim — the example
+        # would be useless if the stripper rewrote it.
+        assert 'if __name__ == "__main__":' in cleaned
+        assert cleaned == src
+
+    def test_module_level_docstring_guard_preserved(self) -> None:
+        # A module-level docstring at the top of the file is the most
+        # common case for guard-shaped lines that must NOT be stripped.
+        src = (
+            '"""Module docs.\n'
+            "\n"
+            "Run this directly:\n"
+            "\n"
+            '    if __name__ == "__main__":\n'
+            "        main()\n"
+            '"""\n'
+            "def main():\n"
+            "    return []\n"
+        )
+        cleaned, removed, skipped = _strip_python_main_guards(src)
+        assert removed == 0
+        assert skipped == 0
+        assert 'if __name__ == "__main__":' in cleaned
+
+    def test_real_guard_after_string_literal_still_stripped(self) -> None:
+        # A real guard following an unrelated multi-line string must
+        # still be stripped — the heuristic only protects *interior* lines
+        # of a multi-line string, not lines that come after one.
+        src = 'BANNER = """\nHello\nWorld\n"""\nif __name__ == "__main__":\n    print(BANNER)\n'
+        cleaned, removed, skipped = _strip_python_main_guards(src)
+        assert removed == 1
+        assert "pass" in cleaned
+        assert "print(BANNER)" not in cleaned
+
+    def test_guard_on_its_own_line_with_main_string_still_stripped(self) -> None:
+        # The classic single-line guard has its ``"__main__"`` literal on
+        # the same line as the ``if``. That literal must NOT cause the
+        # heuristic to mark the guard's own line as "inside a string"
+        # (a previous over-broad implementation did exactly that).
+        src = 'def main():\n    return []\n\nif __name__ == "__main__":\n    main()\n'
+        cleaned, removed, skipped = _strip_python_main_guards(src)
+        assert removed == 1
+
+    def test_tokenize_failure_falls_back_to_legacy_behaviour(self) -> None:
+        # Syntactically invalid Python (e.g. an unclosed string) makes the
+        # tokenizer raise. The helper must degrade gracefully — refuse to
+        # mark anything as "inside a string" and let the line-based
+        # parser proceed as before.
+        src = 'x = \'unterminated\nif __name__ == "__main__":\n    main()\n'
+        cleaned, removed, _ = _strip_python_main_guards(src)
+        # The guard is at module indent; legacy behaviour strips it. The
+        # important assertion is that we DIDN'T crash on the tokenizer
+        # exception.
+        assert removed == 1
+
+
+class TestDecodeScriptBase64SizeCap:
+    """``_decode_script_base64`` must enforce ``SCRIPT_HARD_MAX_BYTES``.
+
+    Regression for Bugbot MEDIUM ("Base64 decode lacks size cap"). The
+    gzip path got a cap in the previous round; the plain base64 path was
+    the symmetric weak link.
+    """
+
+    def test_oversize_payload_rejected_before_decode(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024):
+            # 4 KB of raw data → ~5.5 KB encoded, well over the 1 KB cap.
+            payload = b"x" * 4096
+            encoded = base64.b64encode(payload).decode("ascii")
+            try:
+                _decode_script_base64(encoded)
+            except ValueError as exc:
+                msg = str(exc).lower()
+                assert "exceeds" in msg or "more than the hard cap" in msg
+                # The error guides the agent toward the right fix.
+                assert "registry codebundle" in msg or "split" in msg
+            else:
+                raise AssertionError("expected ValueError for oversize base64")
+
+    def test_payload_under_cap_decodes_cleanly(self) -> None:
+        src = "def main():\n    return [{'issue title': 'x', 'issue severity': 4}]\n"
+        encoded = base64.b64encode(src.encode("utf-8")).decode("ascii")
+        assert _decode_script_base64(encoded) == src
+
+    def test_rejection_predates_decode_allocation(self) -> None:
+        # The encoded-length check fires before ``base64.b64decode`` is
+        # called, so a deliberately huge encoded blob is rejected without
+        # allocating the decoded bytes. We assert by mocking out
+        # ``base64.b64decode`` and confirming it never runs.
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024),
+            mock.patch(
+                "runwhen_platform_mcp.server.base64.b64decode",
+                side_effect=AssertionError("decode must not run"),
+            ),
+        ):
+            huge = "A" * 100_000
+            try:
+                _decode_script_base64(huge)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("expected pre-decode rejection")
+
+    def test_symmetric_with_gzip_helper(self) -> None:
+        # Both decoders must enforce the same cap. With the cap pinned
+        # small, an identical raw payload is rejected by BOTH helpers.
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 256):
+            payload_bytes = ("x" * 1024).encode("utf-8")
+            b64 = base64.b64encode(payload_bytes).decode("ascii")
+            gz_b64 = base64.b64encode(gzip.compress(payload_bytes)).decode("ascii")
+
+            for fn, arg in ((_decode_script_base64, b64), (_decode_script_gzip_base64, gz_b64)):
+                try:
+                    fn(arg)
+                except ValueError:
+                    continue
+                raise AssertionError(f"{fn.__name__} accepted oversize payload")
+
+
+class TestGetWorkspaceSecretsHandlesEnvVarCollisions:
+    """Two keys mapped to the same env var must both surface.
+
+    Regression for Bugbot LOW ("Secret map drops duplicate env vars").
+    Previously ``recommended_secret_vars[platform][env_var] = key`` blindly
+    overwrote, so duplicate-classification keys were silently dropped.
+
+    Real-world collisions: the secret classifier accepts case-insensitive
+    and separator-insensitive forms (``aws-access-key-id``,
+    ``aws_access_key_id``, ``AWS_ACCESS_KEY_ID``), so the same workspace
+    can legitimately carry several keys that classify to the same env var
+    after the runner reformats them.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_duplicate_slack_tokens_both_listed(self) -> None:
+        # ``slack-token`` and ``slack_token`` both classify as
+        # ``(slack, SLACK_TOKEN)``. After the fix the second key gets a
+        # numeric suffix and the collision is surfaced in the response.
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.server._resolve_workspace",
+                new=mock.AsyncMock(return_value="ws"),
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server._papi_get",
+                new=mock.AsyncMock(return_value=["slack-token", "slack_token"]),
+            ),
+        ):
+            result = json.loads(self._run(get_workspace_secrets(workspace_name="ws")))
+
+        slack = result["recommended_secret_vars"].get("slack", {})
+        # Both keys are present — neither silently dropped.
+        assert set(slack.values()) == {"slack-token", "slack_token"}
+        # One canonical entry plus a disambiguated one.
+        assert "SLACK_TOKEN" in slack
+        assert any(k.startswith("SLACK_TOKEN_") and k != "SLACK_TOKEN" for k in slack)
+        # The collision is surfaced explicitly so agents can choose.
+        assert "secret_var_collisions" in result
+        assert "slack" in result["secret_var_collisions"]
+        collided = result["secret_var_collisions"]["slack"]["SLACK_TOKEN"]
+        assert sorted(collided) == ["slack-token", "slack_token"]
+
+    def test_no_collision_no_field_emitted(self) -> None:
+        # The clean single-secret case must not gain noise in the response.
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.server._resolve_workspace",
+                new=mock.AsyncMock(return_value="ws"),
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server._papi_get",
+                new=mock.AsyncMock(return_value=["kubeconfig"]),
+            ),
+        ):
+            result = json.loads(self._run(get_workspace_secrets(workspace_name="ws")))
+        assert "secret_var_collisions" not in result
+
+    def test_three_way_aws_access_key_collision(self) -> None:
+        # All three forms of an AWS access-key-id classify identically.
+        # The first wins the canonical name; the other two get suffixes.
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.server._resolve_workspace",
+                new=mock.AsyncMock(return_value="ws"),
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server._papi_get",
+                new=mock.AsyncMock(
+                    return_value=[
+                        "aws-access-key-id",
+                        "aws_access_key_id",
+                        "AWS_ACCESS_KEY_ID",
+                    ]
+                ),
+            ),
+        ):
+            result = json.loads(self._run(get_workspace_secrets(workspace_name="ws")))
+        aws = result["recommended_secret_vars"]["aws"]
+        # All three keys are present and uniquely addressed.
+        assert sorted(aws.values()) == sorted(
+            ["aws-access-key-id", "aws_access_key_id", "AWS_ACCESS_KEY_ID"]
+        )
+        names = set(aws.keys())
+        assert "AWS_ACCESS_KEY_ID" in names
+        assert "AWS_ACCESS_KEY_ID_2" in names
+        assert "AWS_ACCESS_KEY_ID_3" in names
