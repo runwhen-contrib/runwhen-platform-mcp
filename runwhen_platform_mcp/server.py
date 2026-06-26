@@ -259,6 +259,14 @@ def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
     return value
 
 
+def _next_poll_sleep_s(elapsed: int, poll_interval_s: int, max_duration_s: int) -> int:
+    """Return sleep duration for the next poll, capped by remaining max wait."""
+    remaining = max_duration_s - elapsed
+    if remaining <= 0:
+        return 0
+    return min(poll_interval_s, remaining)
+
+
 def _env_str(name: str, default: str) -> str:
     """Return env var value, treating unset or blank as *default*."""
     raw = os.environ.get(name)
@@ -345,8 +353,8 @@ CRON_SLI_CODE_BUNDLE = _code_bundle_from_env(
     default_path="codebundles/cron-scheduler-sli/sli.robot",
 )
 
-POLL_INTERVAL_S = _env_int("MCP_POLL_INTERVAL_S", 5, minimum=1)
 MAX_POLL_DURATION_S = _env_int("MCP_MAX_POLL_DURATION_S", 300, minimum=1)
+POLL_INTERVAL_S = min(_env_int("MCP_POLL_INTERVAL_S", 5, minimum=1), MAX_POLL_DURATION_S)
 ARTIFACT_SETTLE_DELAY_S = _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2, minimum=0)
 
 GENERIC_SLX_ICON = _env_str("MCP_GENERIC_SLX_ICON", _DEFAULT_GENERIC_SLX_ICON)
@@ -3805,8 +3813,11 @@ async def run_script_and_wait(
     elapsed = 0
     status = "RUNNING"
     while status == "RUNNING" and elapsed < MAX_POLL_DURATION_S:
-        await asyncio.sleep(POLL_INTERVAL_S)
-        elapsed += POLL_INTERVAL_S
+        sleep_s = _next_poll_sleep_s(elapsed, POLL_INTERVAL_S, MAX_POLL_DURATION_S)
+        if sleep_s <= 0:
+            break
+        await asyncio.sleep(sleep_s)
+        elapsed += sleep_s
         status_data = await _papi_get(f"/api/v3/workspaces/{ws}/author/run/{run_id}/status")
         status = status_data.get("status", "UNKNOWN")
 
@@ -3912,8 +3923,11 @@ async def run_slx(
     run_status = "running"
     session_data = {}
     while run_status != "completed" and elapsed < SLX_RUN_MAX_POLL_S:
-        await asyncio.sleep(SLX_RUN_POLL_INTERVAL_S)
-        elapsed += SLX_RUN_POLL_INTERVAL_S
+        sleep_s = _next_poll_sleep_s(elapsed, SLX_RUN_POLL_INTERVAL_S, SLX_RUN_MAX_POLL_S)
+        if sleep_s <= 0:
+            break
+        await asyncio.sleep(sleep_s)
+        elapsed += sleep_s
         try:
             session_data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/{session_id}")
             run_requests = session_data.get("run_requests", [])

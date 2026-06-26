@@ -8,6 +8,7 @@ from runwhen_platform_mcp.server import (
     _env_int,
     _env_str,
     _env_str_optional,
+    _next_poll_sleep_s,
 )
 
 
@@ -35,6 +36,17 @@ class TestEnvInt:
     def test_minimum_allows_zero_when_configured(self) -> None:
         with patch.dict(os.environ, {"MCP_ARTIFACT_SETTLE_DELAY_S": "0"}, clear=True):
             assert _env_int("MCP_ARTIFACT_SETTLE_DELAY_S", 2, minimum=0) == 0
+
+
+class TestNextPollSleep:
+    def test_uses_full_interval_when_time_remains(self) -> None:
+        assert _next_poll_sleep_s(elapsed=0, poll_interval_s=5, max_duration_s=300) == 5
+
+    def test_caps_sleep_to_remaining_max(self) -> None:
+        assert _next_poll_sleep_s(elapsed=8, poll_interval_s=10, max_duration_s=10) == 2
+
+    def test_returns_zero_when_max_reached(self) -> None:
+        assert _next_poll_sleep_s(elapsed=10, poll_interval_s=5, max_duration_s=10) == 0
 
 
 class TestCodeBundleFromEnv:
