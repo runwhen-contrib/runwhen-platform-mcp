@@ -10,21 +10,28 @@ import pytest
 
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
+    _azure_credentials_hint,
     _build_persona_payload,
+    _detect_unresolved_placeholders,
     _ensure_required_tags,
     _extract_env_vars,
     _form_persona_full_name,
+    _is_blocking_warning,
     _normalize_chat_persona_scope_id,
     _persona_short_name,
     _resolve_assistant_short_name,
     _resolve_command_assistant_name,
     _resolve_script,
+    _strip_runner_unsafe_blocks,
     _validate_assistant_name,
     _validate_runtime_vars,
     _validate_script,
     _validate_slx_name,
     commit_slx,
+    get_registry_codebundle,
     run_script_and_wait,
+    run_slx,
+    search_registry,
     update_chat_command,
 )
 
@@ -785,3 +792,366 @@ class TestCommitSlxRunTimeVarsCollisions:
         assert "error" in data
         assert "LOG_QUERY" in data["error"]
         assert "secret_vars" in data["error"]
+
+
+class TestStripRunnerUnsafeBlocks:
+    """Tests for auto-stripping ``__main__`` guards and ``main "$@"``."""
+
+    def test_python_main_guard_stripped(self) -> None:
+        script = 'def main():\n    return []\n\nif __name__ == "__main__":\n    main()\n'
+        cleaned, notes = _strip_runner_unsafe_blocks(script, "python")
+        assert "__name__" not in cleaned
+        assert "if __name__" not in cleaned
+        assert len(notes) == 1
+        assert "__main__" in notes[0]
+
+    def test_python_no_guard_unchanged(self) -> None:
+        script = "def main():\n    return []\n"
+        cleaned, notes = _strip_runner_unsafe_blocks(script, "python")
+        assert cleaned == script
+        assert notes == []
+
+    def test_bash_trailing_main_stripped(self) -> None:
+        script = 'main() {\n  echo "[]" >&3\n}\n\nmain "$@"\n'
+        cleaned, notes = _strip_runner_unsafe_blocks(script, "bash")
+        assert 'main "$@"' not in cleaned
+        assert "main()" in cleaned
+        assert len(notes) == 1
+
+    def test_bash_main_dollar_at_unquoted_stripped(self) -> None:
+        script = "main() {\n  : ;\n}\n\nmain $@\n"
+        cleaned, notes = _strip_runner_unsafe_blocks(script, "bash")
+        assert "main $@" not in cleaned
+        assert notes
+
+    def test_bash_no_trailing_invoke_unchanged(self) -> None:
+        script = "main() {\n  : ;\n}\n"
+        cleaned, notes = _strip_runner_unsafe_blocks(script, "bash")
+        assert cleaned == script
+        assert notes == []
+
+    def test_validate_marks_main_guard_as_auto_fixable(self) -> None:
+        script = 'def main():\n    return []\n\nif __name__ == "__main__":\n    main()\n'
+        warnings = _validate_script(script, "python", "task")
+        non_blocking = [w for w in warnings if not _is_blocking_warning(w)]
+        assert any("__main__" in w for w in non_blocking)
+
+    def test_validate_marks_missing_main_as_blocking(self) -> None:
+        warnings = _validate_script('print("nope")', "python", "task")
+        blocking = [w for w in warnings if _is_blocking_warning(w)]
+        assert any("main()" in w for w in blocking)
+
+
+class TestDetectUnresolvedPlaceholders:
+    """Tests for ``_detect_unresolved_placeholders`` (Issue #5)."""
+
+    def test_empty_title_ok(self) -> None:
+        assert _detect_unresolved_placeholders("") is None
+
+    def test_literal_title_ok(self) -> None:
+        assert _detect_unresolved_placeholders("Check Storage Account Health") is None
+
+    def test_robot_placeholder_rejected(self) -> None:
+        err = _detect_unresolved_placeholders("Analyze ${NAMESPACE} pods")
+        assert err is not None
+        assert "${" in err
+
+    def test_robot_placeholder_only_rejected(self) -> None:
+        err = _detect_unresolved_placeholders("${TASK_TITLE}")
+        assert err is not None
+
+    def test_dollar_sign_alone_ok(self) -> None:
+        assert _detect_unresolved_placeholders("Cost analysis $100/month") is None
+
+
+class TestAzureCredentialsHint:
+    """Tests for ``_azure_credentials_hint`` (Issue #11)."""
+
+    AZURE_SCRIPT = (
+        "import os\nfrom azure.identity import DefaultAzureCredential\ndef main():\n    return []\n"
+    )
+
+    NON_AZURE_SCRIPT = "def main():\n    return []\n"
+
+    def test_azure_without_secret_returns_hint(self) -> None:
+        hint = _azure_credentials_hint(self.AZURE_SCRIPT, None, {})
+        assert hint is not None
+        assert "azure_credentials" in hint
+
+    def test_azure_with_secret_returns_none(self) -> None:
+        hint = _azure_credentials_hint(
+            self.AZURE_SCRIPT,
+            None,
+            {"azure_credentials": "azure:sp@cli"},
+        )
+        assert hint is None
+
+    def test_non_azure_returns_none(self) -> None:
+        hint = _azure_credentials_hint(self.NON_AZURE_SCRIPT, None, {})
+        assert hint is None
+
+    def test_azure_in_sli_only_detected(self) -> None:
+        hint = _azure_credentials_hint(self.NON_AZURE_SCRIPT, self.AZURE_SCRIPT, {})
+        assert hint is not None
+
+    def test_camelcase_secret_key_accepted(self) -> None:
+        hint = _azure_credentials_hint(
+            self.AZURE_SCRIPT,
+            None,
+            {"azureCredentials": "azure:sp@cli"},
+        )
+        assert hint is None
+
+
+class TestCommitSlxAirgapAndAzureGuards:
+    """Integration: commit_slx surfaces the new validation hints."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_commit_rejects_task_title_with_placeholder(self) -> None:
+        result = self._run(
+            commit_slx(
+                slx_name="my-task",
+                alias="My Task",
+                statement="Things should work",
+                workspace_name="test-ws",
+                script="def main(): return []",
+                interpreter="python",
+                task_type="task",
+                task_title="Analyze ${RESOURCE} health",
+                access="read-write",
+                data="logs-bulk",
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "task_title" in data["error"].lower()
+        assert "${" in data["message"]
+
+    def test_commit_rejects_azure_without_credentials(self) -> None:
+        result = self._run(
+            commit_slx(
+                slx_name="azure-task",
+                alias="Azure Task",
+                statement="Things should work",
+                workspace_name="test-ws",
+                script=(
+                    "import os\n"
+                    "from azure.identity import DefaultAzureCredential\n"
+                    "def main():\n"
+                    "    return []\n"
+                ),
+                interpreter="python",
+                task_type="task",
+                task_title="Check Azure",
+                secret_vars={},
+                access="read-write",
+                data="logs-bulk",
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "azure" in data["error"].lower()
+        assert "azure_credentials" in data["message"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._get_user_email", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._get_codebundle_ref", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    def test_commit_strips_main_guard_before_sending(
+        self,
+        mock_post,
+        mock_ref,
+        mock_email,
+        mock_location,
+        mock_ws,
+    ) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_location.return_value = "runner-1"
+        mock_email.return_value = "u@example.com"
+        mock_ref.return_value = "main"
+        mock_post.return_value = (200, {"ok": True})
+
+        script = 'def main():\n    return []\n\nif __name__ == "__main__":\n    main()\n'
+
+        self._run(
+            commit_slx(
+                slx_name="my-task",
+                alias="My Task",
+                statement="Things should work",
+                workspace_name="test-ws",
+                script=script,
+                interpreter="python",
+                task_type="task",
+                task_title="My Task",
+                access="read-write",
+                data="logs-bulk",
+            )
+        )
+
+        sent_payloads = [c[0][1] for c in mock_post.call_args_list]
+        assert sent_payloads, "commit_slx should have called PAPI at least once"
+
+        for payload in sent_payloads:
+            payload_str = json.dumps(payload)
+            assert "__main__" not in payload_str, (
+                "Auto-strip should have removed the __main__ guard before sending"
+            )
+
+
+class TestSearchRegistryAirgap:
+    """``search_registry`` and ``get_registry_codebundle`` honor ``RUNWHEN_AIRGAP``."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_search_registry_airgap_returns_disabled(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.RUNWHEN_AIRGAP", True):
+            result = self._run(search_registry(search="anything"))
+        data = json.loads(result)
+        assert data["registry_available"] is False
+        assert data["airgap"] is True
+        assert "RUNWHEN_AIRGAP" in data["hint"]
+
+    def test_get_registry_codebundle_airgap_returns_disabled(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.RUNWHEN_AIRGAP", True):
+            result = self._run(
+                get_registry_codebundle(
+                    collection_slug="x",
+                    codebundle_slug="y",
+                )
+            )
+        data = json.loads(result)
+        assert data["registry_available"] is False
+        assert data["airgap"] is True
+
+    def test_search_registry_connect_error_returns_unavailable(self) -> None:
+        def boom(*args, **kwargs):  # noqa: ARG001
+            raise httpx.ConnectError("DNS failure")
+
+        with (
+            mock.patch("runwhen_platform_mcp.server.RUNWHEN_AIRGAP", False),
+            mock.patch(
+                "runwhen_platform_mcp.server.httpx.AsyncClient",
+                side_effect=boom,
+            ),
+        ):
+            result = self._run(search_registry(search="anything"))
+        data = json.loads(result)
+        assert data["registry_available"] is False
+        assert data["airgap"] is False
+        assert "RUNWHEN_AIRGAP" in data["message"]
+
+
+class TestRunSlxTaskTitlesLiteralRejected:
+    """``run_slx`` rejects literal resolved titles with a helpful hint (Issue #6)."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    def test_literal_resolved_title_rejected(self, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="Analyze Storage Auth Type Metrics",
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert "task_titles" in data["error"].lower()
+        assert "${TASK_TITLE}" in data["message"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server.asyncio.sleep",
+        new=mock.AsyncMock(),
+    )
+    def test_wildcard_passes_through(self, mock_get, mock_post, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_post.return_value = (200, {"id": "sess-1"})
+        mock_get.return_value = {
+            "run_requests": [
+                {
+                    "id": "rr-1",
+                    "response_time": "2026-06-25T20:00:00Z",
+                    "passed_titles": "x",
+                    "issues": [],
+                }
+            ],
+        }
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="*",
+            )
+        )
+        data = json.loads(result)
+        assert data["status"] == "completed"
+        sent_body = mock_post.call_args[0][1]
+        assert sent_body["runRequests"][0]["taskTitles"] == ["*"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server.asyncio.sleep",
+        new=mock.AsyncMock(),
+    )
+    def test_explicit_task_title_variable_allowed(self, mock_get, mock_post, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_post.return_value = (200, {"id": "sess-1"})
+        mock_get.return_value = {
+            "run_requests": [
+                {
+                    "id": "rr-1",
+                    "response_time": "2026-06-25T20:00:00Z",
+                    "passed_titles": "x",
+                    "issues": [],
+                }
+            ],
+        }
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="${TASK_TITLE}",
+            )
+        )
+        data = json.loads(result)
+        assert data["status"] == "completed"
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_known_runtime_vars",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    def test_unknown_runtime_var_override_lists_known_vars(
+        self, mock_post, mock_ws, mock_fetch
+    ) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_post.side_effect = ValueError(
+            "PAPI returned 400 for /runsessions: {'detail': 'unknown runtime_var'}"
+        )
+        mock_fetch.return_value = ["LOG_QUERY", "TIME_WINDOW"]
+
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="*",
+                runtime_var_overrides={"BOGUS": "value"},
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        assert data["known_runtime_vars"] == ["LOG_QUERY", "TIME_WINDOW"]
+        assert data["submitted_override_keys"] == ["BOGUS"]

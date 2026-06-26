@@ -60,6 +60,52 @@ Read these files for complete, contract-compliant script templates:
 - Set `data` tag: `logs-bulk` | `config` | `logs-stacktrace`
 - **`resource_path` MUST start with `custom/`** — the server enforces this automatically. Never place custom tasks under an existing platform resource path (see configure-resource-path skill)
 - **`hierarchy` MUST start with `platform=custom`** — always include `{"name": "platform", "value": "custom"}` as the first tag and `"platform"` as the first hierarchy entry (see configure-hierarchy skill)
+- **`task_title` MUST be a static literal string** — never use `${VAR}` placeholders.
+  Robot Framework resolves `${...}` at suite-parse time, before env vars are injected,
+  which crashes suite setup. The MCP rejects placeholder titles at commit time.
+- **Bash: do not append `main "$@"`** and **Python: do not include `if __name__ == "__main__":`** —
+  the runner sources the file and calls `main()` directly. Both constructs are now
+  auto-stripped before submission, but include neither in source for clarity.
+
+## Always emit a summary issue (severity 4)
+
+Investigation tasks that only raise issues on threshold failures are invisible
+in `workspace_chat` and run-session search when everything looks healthy — stdout
+is not indexed. **Always emit one final severity-4 "Summary" issue unconditionally**
+at the end of the task with the actual numbers (counts, breakdowns, p99s, etc.).
+
+```python
+def main():
+    issues = []
+    # ... investigation logic that may append severity 1-3 issues ...
+    issues.append({
+        "issue title": f"{TASK_TITLE} — Summary",
+        "issue description": (
+            f"Examined {total} resources; {failed} failed; "
+            f"top callers: {top_callers}; lookback={LOOKBACK_DAYS}d."
+        ),
+        "issue severity": 4,
+        "issue next steps": "Informational. Review numbers in description.",
+    })
+    return issues
+```
+
+## Cloud-specific secret requirements
+
+Some cloud platforms require a canonical secret name in `secret_vars` for the
+runner's suite-setup step to succeed. Missing it causes the task to pass with
+0 issues in ~5 seconds (because suite setup short-circuits).
+
+| Platform | Required `secret_vars` entry |
+|----------|-------------------------------|
+| Azure    | `{"azure_credentials": "azure:sp@cli"}` (or your workspace's Azure SP secret key) |
+| GCP      | `{"gcp_credentials_json": "<workspace-gcp-key>"}` for service-account auth |
+| AWS      | `{"aws_credentials": "<workspace-aws-creds-key>"}` for CLI auth |
+| Kubernetes | `{"kubeconfig": "kubeconfig"}` |
+
+The MCP server now refuses to commit an Azure-flavored SLX without
+`azure_credentials` in `secret_vars` (with an explanatory error). See
+`discover-secrets` skill to find the right key names for your workspace.
 
 ## Runtime Variables (Tasks only — never SLIs)
 

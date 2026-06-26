@@ -424,6 +424,8 @@ The server exposes these tools, grouped by use case.
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
+| `RUNWHEN_AIRGAP` | No | Set to `true` for airgapped environments. `search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call to the registry. |
+| `RUNWHEN_REGISTRY_TIMEOUT_S` | No | HTTP timeout (seconds) for registry calls. Default `10`. Lowered from the PAPI default so an unreachable registry fails fast and is reported gracefully. |
 
 **HTTP / OAuth only** (when `MCP_TRANSPORT=http`; see [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments)):
 

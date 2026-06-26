@@ -61,6 +61,26 @@ DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
 MCP_SERVER_LABEL = os.environ.get("MCP_SERVER_LABEL", "")
 REGISTRY_URL = os.environ.get("RUNWHEN_REGISTRY_URL", "https://registry.runwhen.com").rstrip("/")
+
+
+def _env_truthy(value: str | None) -> bool:
+    """Parse common truthy env-var values (``1``, ``true``, ``yes``, ``on``)."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Airgap mode. When enabled, the CodeBundle Registry tools return a clear,
+# non-fatal "registry disabled" response instead of attempting a network call
+# to ``REGISTRY_URL`` (which is unreachable from airgapped customer environments).
+RUNWHEN_AIRGAP = _env_truthy(os.environ.get("RUNWHEN_AIRGAP"))
+
+# Default timeout for registry HTTP requests. Lower than PAPI because the
+# registry is a stateless catalog and an unreachable endpoint should fail fast.
+try:
+    REGISTRY_TIMEOUT_S = float(os.environ.get("RUNWHEN_REGISTRY_TIMEOUT_S", "10"))
+except ValueError:
+    REGISTRY_TIMEOUT_S = 10.0
 # Browser UI base (e.g. https://app.test.runwhen.com). If unset, derived from RW_API_URL
 # by swapping ``papi`` → ``app`` (same pattern as AgentFarm). Required for correct
 # ``chatUrl`` when RW_API_URL is an internal cluster URL.
@@ -744,6 +764,50 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_PY_MAIN_GUARD_RE = re.compile(
+    r"^[ \t]*if\s+__name__\s*==\s*['\"]__main__['\"]\s*:.*?(?=^\S|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_BASH_MAIN_INVOKE_RE = re.compile(
+    r'^[ \t]*main\s+(?:"\$@"|\$@|\$\*|"\$\*")\s*(?:#.*)?$',
+    re.MULTILINE,
+)
+
+
+def _strip_runner_unsafe_blocks(script: str, interpreter: str) -> tuple[str, list[str]]:
+    """Remove constructs that break the RunWhen runner contract.
+
+    Returns the cleaned script and a list of human-readable notes describing
+    what was stripped. Non-destructive when nothing matches.
+
+    Python: ``if __name__ == "__main__":`` guards cause the runner to fire a
+    second ``main()`` invocation during import (see ``.issues`` #8). Stripping
+    is safe — the runner always calls ``main()`` directly.
+
+    Bash: ``main "$@"`` at the bottom triggers a preflight invocation with
+    FD 3 read-only ("Bad file descriptor"). Strip it.
+    """
+    notes: list[str] = []
+    cleaned = script
+    if interpreter == "python":
+        new_cleaned, n = _PY_MAIN_GUARD_RE.subn("", cleaned)
+        if n:
+            notes.append(
+                f'Removed {n} `if __name__ == "__main__":` block(s) — the runner '
+                "always invokes main() directly; the guard fires a duplicate run."
+            )
+            cleaned = new_cleaned
+    elif interpreter == "bash":
+        new_cleaned, n = _BASH_MAIN_INVOKE_RE.subn("", cleaned)
+        if n:
+            notes.append(
+                f'Removed {n} trailing `main "$@"` invocation(s) — the runner '
+                "sources the file and calls main() with FD 3 already wired."
+            )
+            cleaned = new_cleaned
+    return cleaned, notes
+
+
 def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]:
     """Validate a script against the RunWhen contract. Returns a list of warnings."""
     warnings: list[str] = []
@@ -754,18 +818,113 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
         if re.search(r"^main\s*\(", script, re.MULTILINE):
             warnings.append("Do not call main() directly — the runner invokes it.")
         if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', script):
-            warnings.append('Do not use if __name__ == "__main__" — the runner invokes main().')
+            warnings.append(
+                'Do not use if __name__ == "__main__" — the runner invokes main(). '
+                "Auto-stripped at run/commit time, but please remove from the source."
+            )
         if task_type == "sli" and "return" in script and not re.search(r"return\s+[\d.]", script):
             warnings.append("SLI main() should return a float between 0 and 1.")
     elif interpreter == "bash":
         if not re.search(r"^main\s*\(\s*\)", script, re.MULTILINE):
             warnings.append("Script must define a main() function.")
+        if _BASH_MAIN_INVOKE_RE.search(script):
+            warnings.append(
+                'Do not include `main "$@"` at the bottom — the runner invokes main() '
+                "with FD 3 already wired. Auto-stripped at run/commit time."
+            )
         if task_type == "task" and ">&3" not in script and "> /dev/fd/3" not in script:
             warnings.append("Bash task should write issue JSON to file descriptor 3 (>&3).")
         if task_type == "sli" and ">&3" not in script and "> /dev/fd/3" not in script:
             warnings.append("Bash SLI should write metric value to file descriptor 3 (>&3).")
 
     return warnings
+
+
+# Matches Robot/shell-style ${VAR} placeholders (with optional surrounding text).
+_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _detect_unresolved_placeholders(task_title: str) -> str | None:
+    """Return a user-facing error when ``task_title`` contains ``${...}``.
+
+    Robot Framework resolves ``${...}`` at parse time as suite variables, before
+    any env-var injection. Embedding a placeholder in ``task_title`` causes
+    suite-setup failures (see ``.issues`` #5). Static literal titles are the
+    only safe option.
+    """
+    if not task_title:
+        return None
+    if _PLACEHOLDER_RE.search(task_title):
+        return (
+            f"task_title contains a ${'{...}'} placeholder: {task_title!r}. "
+            "Robot Framework resolves these at suite-parse time, before env vars "
+            "are injected, which crashes the suite. Use a literal string instead "
+            "(e.g. 'Check Storage Account Health')."
+        )
+    return None
+
+
+def _looks_like_azure_script(script: str | None) -> bool:
+    """Heuristic: detect scripts that need ``azure_credentials`` on the runner."""
+    if not script:
+        return False
+    haystack = script.lower()
+    markers = (
+        "az ",
+        "azurerm",
+        "from azure.",
+        "import azure",
+        "azure_subscription",
+        "azure_tenant",
+        "azure_credentials",
+        ".blob.core.windows.net",
+        "az.identity",
+    )
+    return any(marker in haystack for marker in markers)
+
+
+_AZURE_CREDENTIAL_SECRET_KEYS = ("azure_credentials", "azureCredentials")
+
+
+def _azure_credentials_hint(
+    script: str | None,
+    sli_script: str | None,
+    secret_vars: dict[str, str] | None,
+) -> str | None:
+    """Warn when an Azure SLX is being committed without ``azure_credentials``.
+
+    The runner expects ``azure_credentials`` in ``SECRET_ENV_MAP`` to drive the
+    ``RW.Core.Import Secret azure_credentials`` step in the Azure suite
+    bootstrap. Without it the task silently passes with 0 issues (see
+    ``.issues`` #11).
+    """
+    if not (_looks_like_azure_script(script) or _looks_like_azure_script(sli_script)):
+        return None
+    keys = set((secret_vars or {}).keys())
+    if any(k in keys for k in _AZURE_CREDENTIAL_SECRET_KEYS):
+        return None
+    return (
+        "This script looks Azure-flavored but secret_vars is missing "
+        "'azure_credentials'. Without it the runner's Azure suite-setup step "
+        "(`RW.Core.Import Secret azure_credentials`) fails silently and the "
+        "task returns 0 issues in ~5 seconds. Add "
+        "secret_vars={'azure_credentials': 'azure:sp@cli'} (or your workspace's "
+        "Azure service-principal secret key) before committing. "
+        "Pass an empty placeholder value if you are intentionally bypassing this."
+    )
+
+
+def _is_blocking_warning(warning: str) -> bool:
+    """True when a validation warning indicates a real contract violation.
+
+    Some warnings (``__name__`` guard, trailing ``main "$@"``) flag constructs
+    that are auto-stripped before submission; those should not block
+    ``run_script_and_wait`` or ``commit_slx`` from proceeding. Other warnings
+    (missing ``main()``, wrong return type, missing FD-3 writes) indicate the
+    script will not function on the runner and must stop the call.
+    """
+    auto_fixed = ("Auto-stripped at run/commit time",)
+    return not any(marker in warning for marker in auto_fixed)
 
 
 def _extract_env_vars(script: str, interpreter: str) -> list[str]:
@@ -2783,6 +2942,39 @@ async def get_slx_runbook(
     return _json_response(data)
 
 
+async def _fetch_known_runtime_vars(workspace: str, full_slx_name: str) -> list[str] | None:
+    """Best-effort fetch of the declared ``runtime_vars`` for an SLX runbook.
+
+    Used to enrich ``run_slx`` error responses when ``runtime_var_overrides``
+    contains unknown keys (see ``.issues`` #4). Returns ``None`` if the
+    runbook cannot be retrieved or the response shape is unexpected.
+    """
+    short = full_slx_name.split("--", 1)[-1] if "--" in full_slx_name else full_slx_name
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/{short}/runbook")
+    except (ValueError, httpx.HTTPStatusError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates: list[Any] = []
+    candidates.append(data.get("runtime_vars_provided"))
+    candidates.append(data.get("runtimeVarsProvided"))
+    spec = data.get("spec") or {}
+    if isinstance(spec, dict):
+        candidates.append(spec.get("runtimeVarsProvided"))
+        candidates.append(spec.get("runtime_vars_provided"))
+    for value in candidates:
+        if isinstance(value, list):
+            names: list[str] = []
+            for entry in value:
+                if isinstance(entry, dict) and entry.get("name"):
+                    names.append(str(entry["name"]))
+                elif isinstance(entry, str):
+                    names.append(entry)
+            return sorted(set(names))
+    return None
+
+
 @mcp.tool()
 async def search_workspace(
     query: str = Field(description="Search query string."),
@@ -2963,11 +3155,60 @@ async def delete_knowledge_base_article(
 # ---------------------------------------------------------------------------
 
 
+class RegistryUnavailable(Exception):
+    """Raised when the CodeBundle Registry is disabled or unreachable.
+
+    Callers should turn this into a structured, non-fatal MCP response (rather
+    than letting the request bubble up as a generic transport error) so that
+    airgapped customers can keep working with the rest of the MCP toolset.
+    """
+
+    def __init__(self, message: str, *, airgap: bool = False) -> None:
+        super().__init__(message)
+        self.airgap = airgap
+
+
+def _registry_unavailable_response(message: str, *, airgap: bool) -> str:
+    """Render the standard 'registry unavailable' response for MCP clients."""
+    return _json_response(
+        {
+            "registry_available": False,
+            "airgap": airgap,
+            "registry_url": REGISTRY_URL,
+            "message": message,
+            "hint": (
+                "Set RUNWHEN_AIRGAP=true to silence this warning, or build the "
+                "task locally with commit_slx instead of deploy_registry_codebundle."
+            ),
+        }
+    )
+
+
 async def _registry_get(path: str, params: dict | None = None) -> httpx.Response:
-    """GET against the public CodeBundle Registry API (no auth needed)."""
+    """GET against the public CodeBundle Registry API (no auth needed).
+
+    Raises :class:`RegistryUnavailable` when airgap mode is enabled or the
+    registry endpoint cannot be reached. Callers should convert that exception
+    into a graceful response via :func:`_registry_unavailable_response`.
+    """
+    if RUNWHEN_AIRGAP:
+        raise RegistryUnavailable(
+            "RunWhen CodeBundle Registry access is disabled (RUNWHEN_AIRGAP=true).",
+            airgap=True,
+        )
     url = f"{REGISTRY_URL}{path}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await client.get(url, params=params)
+    try:
+        async with httpx.AsyncClient(timeout=REGISTRY_TIMEOUT_S) as client:
+            return await client.get(url, params=params)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+        raise RegistryUnavailable(
+            f"CodeBundle Registry unreachable ({type(exc).__name__}): {exc}. "
+            f"Set RUNWHEN_AIRGAP=true to suppress this warning in airgapped environments."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise RegistryUnavailable(
+            f"CodeBundle Registry request failed ({type(exc).__name__}): {exc}."
+        ) from exc
 
 
 @mcp.tool()
@@ -2995,7 +3236,10 @@ async def search_registry(
     if tags:
         params["tags"] = tags
 
-    resp = await _registry_get("/api/v1/codebundles", params=params)
+    try:
+        resp = await _registry_get("/api/v1/codebundles", params=params)
+    except RegistryUnavailable as exc:
+        return _registry_unavailable_response(str(exc), airgap=exc.airgap)
     if resp.status_code != 200:
         return _json_response(
             {"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]}
@@ -3050,9 +3294,12 @@ async def get_registry_codebundle(
     Use after search_registry to get complete information including
     configuration templates, environment variables, and deployment instructions.
     """
-    resp = await _registry_get(
-        f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
-    )
+    try:
+        resp = await _registry_get(
+            f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
+        )
+    except RegistryUnavailable as exc:
+        return _registry_unavailable_response(str(exc), airgap=exc.airgap)
     if resp.status_code == 404:
         return _json_response(
             {
@@ -3461,19 +3708,31 @@ async def validate_script(
     warnings = _validate_script(script_resolved, interpreter, task_type)
     env_vars = _extract_env_vars(script_resolved, interpreter)
 
+    _, auto_fix_notes = _strip_runner_unsafe_blocks(script_resolved, interpreter)
+    blocking = [w for w in warnings if _is_blocking_warning(w)]
+    auto_fixable = [w for w in warnings if not _is_blocking_warning(w)]
+
     result: dict[str, Any] = {
-        "valid": len(warnings) == 0,
+        "valid": len(blocking) == 0,
         "warnings": warnings,
+        "blocking_warnings": blocking,
+        "auto_fixable_warnings": auto_fixable,
+        "auto_fixes_applied_on_run": auto_fix_notes,
         "detected_env_vars": env_vars,
         "interpreter": interpreter,
         "task_type": task_type,
     }
 
-    if not warnings:
+    if not blocking and not auto_fixable:
         result["message"] = "Script passes RunWhen contract validation."
+    elif not blocking:
+        result["message"] = (
+            f"Script has {len(auto_fixable)} auto-fixable warning(s); MCP will clean "
+            "the script before sending it to the runner. Safe to run/commit."
+        )
     else:
         result["message"] = (
-            f"Script has {len(warnings)} contract warning(s). "
+            f"Script has {len(blocking)} blocking warning(s). "
             "Fix these before running or committing."
         )
 
@@ -3536,14 +3795,17 @@ async def run_script(
     ws = await _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
-    if warnings:
+    blocking = [w for w in warnings if _is_blocking_warning(w)]
+    if blocking:
         return _json_response(
             {
                 "error": "Script validation failed",
                 "warnings": warnings,
+                "blocking_warnings": blocking,
                 "message": "Fix the warnings and try again. Use validate_script for details.",
             }
         )
+    script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
 
     try:
         location = await _resolve_location(ws, location)
@@ -3685,13 +3947,16 @@ async def run_script_and_wait(
     ws = await _resolve_workspace(workspace_name)
 
     warnings = _validate_script(script, interpreter, run_type)
-    if warnings:
+    blocking = [w for w in warnings if _is_blocking_warning(w)]
+    if blocking:
         return _json_response(
             {
                 "error": "Script validation failed",
                 "warnings": warnings,
+                "blocking_warnings": blocking,
             }
         )
+    script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
 
     try:
         location = await _resolve_location(ws, location)
@@ -3793,8 +4058,33 @@ async def run_slx(
     # Full SLX name expected by the runsessions API: workspace--slx-short-name
     full_slx_name = slx_name if "--" in slx_name else f"{ws}--{slx_name}"
 
-    # task_titles is a '||'-separated string or '*'; API expects a list
-    task_titles_list = [t.strip() for t in task_titles.split("||")] if task_titles != "*" else ["*"]
+    # task_titles is a '||'-separated string or '*'; API expects a list.
+    # SLX runbooks store the task name as the literal Robot variable
+    # ``${TASK_TITLE}`` (resolved at runtime), so a resolved title (e.g.
+    # "Analyze Storage Auth Type Metrics") never matches and yields empty
+    # passed_titles (see ``.issues`` #6). When the caller passes a literal
+    # human-readable title, hint them to use ``*``.
+    if task_titles != "*":
+        task_titles_list = [t.strip() for t in task_titles.split("||")]
+        suspicious = [
+            t for t in task_titles_list if t and not t.startswith("${") and not t.startswith("*")
+        ]
+        if suspicious:
+            return _json_response(
+                {
+                    "error": "Unsupported task_titles value",
+                    "message": (
+                        "SLX runbooks register task names as the literal Robot "
+                        "variable ${TASK_TITLE}, not the resolved string. Passing "
+                        f"{suspicious!r} will produce empty passed_titles. Use "
+                        "task_titles='*' to run all tasks (the platform expands "
+                        "'*' to ['${TASK_TITLE}'] which Robot resolves correctly), "
+                        "or pass '${TASK_TITLE}' explicitly."
+                    ),
+                }
+            )
+    else:
+        task_titles_list = ["*"]
 
     # Build the run request dict (camelCase keys for JSON payload)
     run_request: dict[str, Any] = {
@@ -3812,7 +4102,25 @@ async def run_slx(
             {"source": "direct", "runRequests": [run_request]},
         )
     except ValueError as exc:
-        return _json_response({"error": f"Failed to create RunSession: {exc}"})
+        error_msg = str(exc)
+        # Issue #4: surface known runtime_vars when the runner rejects unknown
+        # override keys so the agent can self-correct without a separate
+        # discovery step.
+        if runtime_var_overrides and ("runtime" in error_msg.lower() or "400" in error_msg):
+            known = await _fetch_known_runtime_vars(ws, full_slx_name)
+            if known is not None:
+                return _json_response(
+                    {
+                        "error": f"Failed to create RunSession: {error_msg}",
+                        "hint": (
+                            "runtime_var_overrides must only contain variables "
+                            "declared in the runbook's runtime_vars schema."
+                        ),
+                        "known_runtime_vars": known,
+                        "submitted_override_keys": sorted(runtime_var_overrides),
+                    }
+                )
+        return _json_response({"error": f"Failed to create RunSession: {error_msg}"})
 
     session_id = session_data.get("id")
     if not session_id:
@@ -4069,6 +4377,51 @@ async def commit_slx(
             sli_script = _resolve_script(sli_script, sli_script_path, sli_script_base64)
         except (ValueError, FileNotFoundError) as exc:
             return _json_response({"error": f"SLI script: {exc}"})
+
+    main_warnings = _validate_script(script, interpreter, task_type)
+    blocking = [w for w in main_warnings if _is_blocking_warning(w)]
+    if blocking:
+        return _json_response(
+            {
+                "error": "Script validation failed",
+                "warnings": main_warnings,
+                "blocking_warnings": blocking,
+                "message": "Fix the warnings before committing. Use validate_script for details.",
+            }
+        )
+    script, _script_fixes = _strip_runner_unsafe_blocks(script, interpreter)
+
+    if sli_script:
+        sli_interp = sli_interpreter or interpreter
+        sli_warnings = _validate_script(sli_script, sli_interp, "sli")
+        sli_blocking = [w for w in sli_warnings if _is_blocking_warning(w)]
+        if sli_blocking:
+            return _json_response(
+                {
+                    "error": "SLI script validation failed",
+                    "warnings": sli_warnings,
+                    "blocking_warnings": sli_blocking,
+                }
+            )
+        sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
+
+    task_title_issue = _detect_unresolved_placeholders(task_title)
+    if task_title_issue:
+        return _json_response(
+            {
+                "error": "Invalid task_title",
+                "message": task_title_issue,
+            }
+        )
+
+    azure_hint = _azure_credentials_hint(script, sli_script, secret_vars)
+    if azure_hint:
+        return _json_response(
+            {
+                "error": "Azure SLX missing azure_credentials secret",
+                "message": azure_hint,
+            }
+        )
 
     ws = await _resolve_workspace(workspace_name)
 
