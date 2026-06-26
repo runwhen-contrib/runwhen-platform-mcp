@@ -2215,20 +2215,31 @@ async def update_chat_command(
             )
         except ValueError as exc:
             return _json_response({"error": str(exc)})
-    elif cron_schedule is not None and effective_scope_type == "persona":
-        persona_short = body.get("scope_id")
+    elif cron_schedule and effective_scope_type == "persona":
+        persona_short: str | None = body.get("scope_id")
         if persona_short is None:
             try:
                 existing_cmd = await _papi_get(
                     f"/api/v3/workspaces/{ws}/chat-config/commands/{command_id}"
                 )
-                existing_sid = existing_cmd.get("scope_id") or existing_cmd.get("scopeId")
-                if existing_sid:
-                    persona_short = _persona_short_name(ws, existing_sid)
             except (ValueError, httpx.HTTPStatusError) as e:
                 return _json_response({"error": str(e)})
+            existing_type = existing_cmd.get("scope_type") or existing_cmd.get("scopeType")
+            existing_sid = existing_cmd.get("scope_id") or existing_cmd.get("scopeId")
+            if existing_type == "persona" and existing_sid:
+                try:
+                    persona_short = _normalize_chat_persona_scope_id(ws, existing_sid)
+                except ValueError as exc:
+                    return _json_response({"error": str(exc)})
         if persona_short is not None:
             body["assistant_name"] = _form_persona_full_name(ws, persona_short)
+        else:
+            return _json_response(
+                {
+                    "error": "Persona-scoped scheduled commands require assistant_name or "
+                    "scope_id when the persona cannot be inferred from the existing command."
+                }
+            )
     if clear_max_runs:
         body["max_runs"] = None
     elif max_runs is not None:

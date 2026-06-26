@@ -370,6 +370,55 @@ class TestUpdateChatCommandScopeFetch:
         data = json.loads(result)
         assert "error" in data
 
+    @mock.patch("runwhen_platform_mcp.server._papi_put", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_cron_on_persona_scope_rejects_stale_workspace_scope_id(
+        self, mock_get, mock_ws, mock_put
+    ) -> None:
+        mock_ws.return_value = "t-oncall"
+        mock_get.return_value = {
+            "scope_type": "workspace",
+            "scope_id": "t-oncall",
+        }
+
+        result = self._run(
+            update_chat_command(
+                command_id=1,
+                workspace_name="t-oncall",
+                scope_type="persona",
+                cron_schedule="0 9 * * *",
+            )
+        )
+        data = json.loads(result)
+        assert "assistant_name" in data["error"] or "scope_id" in data["error"]
+        mock_put.assert_not_called()
+
+    @mock.patch("runwhen_platform_mcp.server._papi_put", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_cron_on_existing_persona_command_derives_assistant_name(
+        self, mock_get, mock_ws, mock_put
+    ) -> None:
+        mock_ws.return_value = "t-oncall"
+        mock_get.return_value = {
+            "scope_type": "persona",
+            "scope_id": "t-oncall--azure-devops",
+        }
+        mock_put.return_value = (200, {"id": 1})
+
+        result = self._run(
+            update_chat_command(
+                command_id=1,
+                workspace_name="t-oncall",
+                cron_schedule="0 9 * * *",
+            )
+        )
+        data = json.loads(result)
+        assert "error" not in data
+        body = mock_put.call_args[0][1]
+        assert body["assistant_name"] == "t-oncall--azure-devops"
+
 
 class TestWriteToolsCompleteness:
     """Ensure WRITE_TOOLS includes all mutating tool names."""
