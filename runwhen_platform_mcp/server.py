@@ -4144,11 +4144,17 @@ async def validate_script(
     warnings = _validate_script(script_resolved, interpreter, task_type)
     env_vars = _extract_env_vars(script_resolved, interpreter)
 
-    _, auto_fix_notes = _strip_runner_unsafe_blocks(script_resolved, interpreter)
+    # Strip first, then measure size against the SAME payload that the
+    # run_script / run_script_and_wait / commit_slx tools will actually
+    # submit. Measuring the un-stripped source here can produce a
+    # ``valid: false`` / ``size_error`` for a script those tools accept
+    # (and vice versa), because they strip ``__main__`` guards and trailing
+    # ``main "$@"`` invocations before checking the cap.
+    stripped_script, auto_fix_notes = _strip_runner_unsafe_blocks(script_resolved, interpreter)
     blocking = [w for w in warnings if _is_blocking_warning(w)]
     auto_fixable = [w for w in warnings if not _is_blocking_warning(w)]
     quality_notes = _assess_issue_quality_static(script_resolved, interpreter, task_type)
-    size_warning, size_error = _assess_script_size(script_resolved)
+    size_warning, size_error = _assess_script_size(stripped_script)
 
     result: dict[str, Any] = {
         "valid": len(blocking) == 0 and size_error is None,
@@ -4160,8 +4166,13 @@ async def validate_script(
         "detected_env_vars": env_vars,
         "interpreter": interpreter,
         "task_type": task_type,
-        "script_bytes": len(script_resolved.encode("utf-8")),
+        "script_bytes": len(stripped_script.encode("utf-8")),
     }
+    # When auto-stripping changed the payload size, surface the original
+    # size too so the agent understands why a "10KB" script reports a
+    # smaller byte count.
+    if stripped_script != script_resolved:
+        result["original_script_bytes"] = len(script_resolved.encode("utf-8"))
     if size_warning:
         result["size_warning"] = size_warning
     if size_error:

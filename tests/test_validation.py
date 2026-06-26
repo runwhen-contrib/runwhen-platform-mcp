@@ -1860,6 +1860,103 @@ class TestSizeWarningSurfacing:
         assert data["script_bytes"] == len(script.encode("utf-8"))
 
 
+class TestValidateScriptSizeMatchesRunSubmission:
+    """``validate_script`` must measure size on the same payload run_* submits.
+
+    Regression: previously ``validate_script`` measured the original source
+    while ``run_script`` / ``run_script_and_wait`` / ``commit_slx`` stripped
+    first and measured the stripped payload, so the two could disagree.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _padding_lines(self, n: int) -> str:
+        return "".join("    # padding-line\n" for _ in range(n))
+
+    def test_validate_strips_before_measuring(self) -> None:
+        # A script whose un-stripped size is over the hard cap but whose
+        # stripped size is under should validate cleanly — matching the
+        # behaviour of run_script / commit_slx.
+        guard_block = 'if __name__ == "__main__":\n' + "".join(
+            "    print('big-guard-body')\n" for _ in range(50)
+        )
+        script = (
+            "def main():\n"
+            "    cnt = 0\n"
+            "    return [{'issue title': f't {cnt}',\n"
+            "             'issue description': f'desc with detail {cnt}',\n"
+            "             'issue severity': 4,\n"
+            "             'issue next steps': f'next {cnt}'}]\n" + guard_block
+        )
+        # Pick a hard cap that the un-stripped script overflows but the
+        # stripped version fits within.
+        stripped_size = len(script.encode("utf-8")) - len(guard_block.encode("utf-8"))
+        original_size = len(script.encode("utf-8"))
+        cap = stripped_size + 100
+        assert cap < original_size, "cap must straddle the guard size"
+
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", cap),
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_SOFT_MAX_BYTES", cap // 2),
+        ):
+            result = self._run(
+                validate_script(script=script, interpreter="python", task_type="task")
+            )
+            data = json.loads(result)
+
+        assert data["valid"] is True, data
+        assert "size_error" not in data
+        # script_bytes reflects the stripped payload (what actually ships)
+        # and the response surfaces the original size for transparency.
+        assert data["script_bytes"] < original_size
+        assert data["original_script_bytes"] == original_size
+
+    def test_validate_and_run_script_agree_on_size_error(self) -> None:
+        # When the script is over the cap even after stripping, both
+        # validate_script and run_script_and_wait must reject it.
+        script = (
+            "def main():\n"
+            "    cnt = 0\n"
+            "    return [{'issue title': f't {cnt}',\n"
+            "             'issue description': f'desc {cnt}',\n"
+            "             'issue severity': 4,\n"
+            "             'issue next steps': f'next {cnt}'}]\n" + self._padding_lines(5000)
+        )
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024):
+            vresult = self._run(
+                validate_script(script=script, interpreter="python", task_type="task")
+            )
+            rresult = self._run(
+                run_script_and_wait(
+                    workspace_name="test-ws",
+                    script=script,
+                    interpreter="python",
+                )
+            )
+        vdata = json.loads(vresult)
+        rdata = json.loads(rresult)
+        assert vdata["valid"] is False
+        assert "size_error" in vdata
+        assert rdata["error"] == "Script too large for transport"
+
+    def test_no_strip_changes_no_original_field(self) -> None:
+        # A clean script (no auto-fixable constructs) must not surface
+        # original_script_bytes, since stripping was a no-op.
+        script = (
+            "def main():\n"
+            "    cnt = 0\n"
+            "    return [{'issue title': f't {cnt}',\n"
+            "             'issue description': f'descriptive details {cnt}',\n"
+            "             'issue severity': 2,\n"
+            "             'issue next steps': f'next {cnt}'}]\n"
+        )
+        result = self._run(validate_script(script=script, interpreter="python", task_type="task"))
+        data = json.loads(result)
+        assert data["valid"] is True
+        assert "original_script_bytes" not in data
+
+
 class TestIssueSeverityRegex:
     """``_PY_ISSUE_SEVERITY_INVALID_RE`` must not flag valid quoted severities."""
 
