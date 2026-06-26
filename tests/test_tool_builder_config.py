@@ -143,10 +143,13 @@ class TestEnvStr:
 
     def test_whitespace_env_uses_default(self) -> None:
         with patch.dict(os.environ, {"MCP_GENERIC_CODECOLLECTION_REPO_URL": "  "}, clear=True):
-            assert _env_str(
-                "MCP_GENERIC_CODECOLLECTION_REPO_URL",
-                "https://github.com/runwhen-contrib/rw-generic-codecollection.git",
-            ) == "https://github.com/runwhen-contrib/rw-generic-codecollection.git"
+            assert (
+                _env_str(
+                    "MCP_GENERIC_CODECOLLECTION_REPO_URL",
+                    "https://github.com/runwhen-contrib/rw-generic-codecollection.git",
+                )
+                == "https://github.com/runwhen-contrib/rw-generic-codecollection.git"
+            )
 
     def test_optional_blank_returns_none(self) -> None:
         with patch.dict(os.environ, {"MCP_TOOL_BUILDER_RUNBOOK_REF": ""}, clear=True):
