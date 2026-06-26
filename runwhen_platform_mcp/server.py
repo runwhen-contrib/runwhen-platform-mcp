@@ -592,11 +592,15 @@ def _get_token() -> str:
 
 
 def _headers() -> dict[str, str]:
-    return {
+    from runwhen_platform_mcp.tool_trace import trace_headers
+
+    headers = {
         "Authorization": f"Bearer {_get_token()}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    headers.update(trace_headers())
+    return headers
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
@@ -6246,6 +6250,13 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
     return check
 
 
+def _install_tool_tracing(server: FastMCP) -> None:
+    """Register tool-call tracing middleware on an MCP server instance."""
+    from runwhen_platform_mcp.tool_trace import ToolTraceMiddleware
+
+    server.add_middleware(ToolTraceMiddleware())
+
+
 def _build_http_server() -> FastMCP:
     """Build an HTTP-mode MCP server with authentication and health checks.
 
@@ -6288,6 +6299,7 @@ def _build_http_server() -> FastMCP:
 
         return JSONResponse({"status": "alive"})
 
+    _install_tool_tracing(http_mcp)
     return http_mcp
 
 
@@ -6314,6 +6326,9 @@ def main() -> None:
         http_mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
     else:
         mcp.run()
+
+
+_install_tool_tracing(mcp)
 
 
 if __name__ == "__main__":
