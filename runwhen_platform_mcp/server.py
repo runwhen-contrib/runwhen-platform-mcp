@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -1193,6 +1194,52 @@ def _azure_credentials_hint(
     )
 
 
+def _scripts_have_identical_content(task_script: str, sli_script: str | None) -> bool:
+    """Return True iff task and SLI scripts have the same logical content.
+
+    Task and SLI runbooks have *fundamentally different contracts*:
+
+    - **Task** returns/writes a List[Dict] of issues with keys ``issue title``,
+      ``issue description``, ``issue severity`` (1-4), ``issue next steps``.
+    - **SLI** returns/writes a single float between 0 and 1.
+
+    Submitting identical content for both is almost always an anti-pattern
+    (a single binary hacked to branch on an env var like ``RW_RFNS``), and
+    it's the primary way agents balloon ``commit_slx`` envelopes past the
+    transport budget (see the cursor-scratch transcript in
+    ``.issues/06-25-2026.md``).
+
+    The comparison normalises trailing whitespace and CRLFs so that an
+    intentional re-encode round-trip doesn't get a false negative.
+    """
+    if not task_script or not sli_script:
+        return False
+
+    def _norm(s: str) -> str:
+        return "\n".join(line.rstrip() for line in s.replace("\r\n", "\n").split("\n")).strip()
+
+    return _norm(task_script) == _norm(sli_script)
+
+
+_IDENTICAL_TASK_SLI_MSG = (
+    "The provided 'script' (task) and 'sli_script' (SLI) have identical "
+    "content. This is an anti-pattern: task and SLI runbooks have different "
+    "contracts and cannot share the same body.\n"
+    "  • Task  → returns a List[Dict] of issues "
+    "(title/description/severity 1-4/next steps).\n"
+    "  • SLI   → returns a single float between 0 and 1.\n"
+    "Options:\n"
+    "  1. If you only need an SLI: commit with task_type='sli' and NO 'script' "
+    "field; provide sli_script alone.\n"
+    "  2. If you only need a task: omit sli_script entirely (or use "
+    "cron_schedule='*/N * * * *' to trigger the runbook on a schedule).\n"
+    "  3. If you need BOTH: write a separate, lightweight sli_script that "
+    "emits one float metric (e.g. count of failing pods / total pods). "
+    "Do not duplicate the task body. See "
+    "runwhen-skill://build-runwhen-task for the SLI contract."
+)
+
+
 # ---------------------------------------------------------------------------
 # Script size + transport guards
 # ---------------------------------------------------------------------------
@@ -1885,16 +1932,31 @@ def _validate_slx_name(slx_name: str) -> None:
 
 
 def _validate_runtime_vars(runtime_vars: list[dict] | None) -> list[str]:
-    """Validate runtime_vars list. Returns list of error strings (empty = valid)."""
+    """Validate runtime_vars list. Returns list of error strings (empty = valid).
+
+    ``default`` must be *present* but may be the empty string — this is the
+    legitimate "optional override with no preset" pattern (e.g.
+    ``SCAN_KUBE_CONTEXT`` where in-cluster runners need no kubectl context).
+    The runner treats empty defaults as "leave unset".
+    """
     if not runtime_vars:
         return []
     errors: list[str] = []
     seen: set[str] = set()
     for i, var in enumerate(runtime_vars):
         prefix = f"runtime_vars[{i}]"
-        for field in ("name", "description", "default"):
+        for field in ("name", "description"):
             if not var.get(field):
                 errors.append(f"{prefix}: '{field}' is required and must be non-empty")
+        if "default" not in var:
+            errors.append(
+                f"{prefix}: 'default' is required (empty string '' is OK for "
+                "optional-override vars with no preset)"
+            )
+        elif not isinstance(var.get("default"), str):
+            errors.append(
+                f"{prefix}: 'default' must be a string (got {type(var['default']).__name__})"
+            )
         name = var.get("name")
         if name:
             if name in seen:
@@ -3470,15 +3532,23 @@ async def get_workspace_issues(
 async def get_workspace_slxs(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List SLXs (Service Level eXperiences) in a workspace (structured JSON).
+    """List ALL SLXs in a workspace (structured JSON). No filtering.
 
     SLXs are the fundamental unit of work in RunWhen — each represents a
     health check, task, or automation runbook for a piece of infrastructure.
 
-    NOTE: For questions like "which SLXs monitor neo4j?" or "find health
-    checks for namespace X", prefer `workspace_chat` — it can search and
-    correlate SLXs with resources semantically. Use this tool only when you
-    need raw JSON for programmatic processing.
+    This tool returns the **full list** for the workspace and accepts only
+    ``workspace_name``. It does NOT accept ``slx_name``, ``filter``,
+    ``alias``, ``tag``, or any other filtering parameter — those would
+    fail with ``unexpected_keyword_argument``.
+
+    For other shapes:
+    - **One specific SLX (runbook detail)**: ``get_slx_runbook(workspace_name=..., slx_name=...)``
+    - **Search / filter by topic** (e.g. "neo4j health checks"): ``workspace_chat``
+    - **Search by resource** (e.g. "what monitors namespace X"): ``workspace_chat``
+
+    Use this raw-list tool only when you need to enumerate every SLX for
+    programmatic processing (counting, batch operations, etc).
     """
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
@@ -4627,37 +4697,118 @@ async def get_workspace_locations(
     )
 
 
+def _decode_script_base64(data: str, *, label: str = "script_base64") -> str:
+    """Decode standard base64 of UTF-8 text. Raises ValueError on failure."""
+    try:
+        raw = base64.b64decode(data.strip().encode("ascii"), validate=True)
+        return raw.decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"Invalid {label}: must be valid standard base64 encoding UTF-8 text."
+        ) from exc
+
+
+def _decode_script_gzip_base64(data: str, *, label: str = "script_gzip_base64") -> str:
+    """Decode standard base64 of gzip-compressed UTF-8 text. Raises ValueError on failure.
+
+    This is the highest-density inline transport: a typical Python or bash
+    script compresses 3-5x before base64 expansion, giving an effective
+    capacity of ~40-50KB raw script per ~13KB transport budget.
+
+    Encode with:
+        import base64, gzip
+        base64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")
+    """
+    try:
+        raw = base64.b64decode(data.strip().encode("ascii"), validate=True)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {label}: outer base64 layer failed to decode. "
+            "Encode as: base64.b64encode(gzip.compress(script.encode('utf-8'))).decode('ascii')"
+        ) from exc
+    try:
+        decompressed = gzip.decompress(raw)
+    except (OSError, gzip.BadGzipFile) as exc:
+        raise ValueError(
+            f"Invalid {label}: gzip decompression failed (was the value not gzipped?). "
+            "Encode as: base64.b64encode(gzip.compress(script.encode('utf-8'))).decode('ascii')"
+        ) from exc
+    try:
+        return decompressed.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Invalid {label}: decompressed bytes are not valid UTF-8.") from exc
+
+
 def _resolve_script(
     script: str | None,
     script_path: str | None,
     script_base64: str | None = None,
+    script_gzip_base64: str | None = None,
+    script_base64_path: str | None = None,
+    *,
+    label: str = "script",
 ) -> str:
-    """Return script content from inline text, base64, or a local file path.
+    """Return script content from one of five mutually-exclusive sources.
 
-    Exactly one of *script*, *script_path*, or *script_base64* must be provided.
-    *script_base64* is standard base64 of UTF-8 text — use when MCP clients
-    struggle to JSON-escape multiline scripts (e.g. ``def main():``).
-    *script_path* reads the file on the MCP server host (Tool Builder / stdio).
+    Exactly one of these must be provided:
+    - **script**: inline raw text (best for small scripts <~5KB; readable).
+    - **script_base64**: standard base64 of UTF-8 text (use when JSON-escaping
+      multiline scripts is error-prone). Costs +33% transport overhead.
+    - **script_gzip_base64**: base64(gzip(utf-8 script)). 3-5x more capacity
+      than ``script_base64`` for typical whitespace-heavy scripts. Strongly
+      preferred for scripts >5KB inline. Encode:
+      ``base64.b64encode(gzip.compress(s.encode())).decode()``.
+    - **script_path**: local file path to the *raw* script. **stdio mode only.**
+    - **script_base64_path**: local file path to a file containing a base64
+      blob of the script. **stdio mode only.** Useful when the agent has
+      already written the encoded script to a scratch file and wants the
+      server to read+decode rather than re-inlining it.
+
+    HTTP/remote MCP mode rejects both path-based variants because the server
+    cannot read the client's filesystem — use ``script_base64`` or
+    ``script_gzip_base64`` instead.
     """
     has_script = script is not None and script != ""
     has_path = bool(script_path)
     has_b64 = bool(script_base64 and script_base64.strip())
-    chosen = sum(1 for x in (has_script, has_path, has_b64) if x)
+    has_gz = bool(script_gzip_base64 and script_gzip_base64.strip())
+    has_b64_path = bool(script_base64_path)
+    chosen = sum(1 for x in (has_script, has_path, has_b64, has_gz, has_b64_path) if x)
     if chosen != 1:
-        raise ValueError("Provide exactly one of 'script', 'script_path', or 'script_base64'.")
-    if script_base64:
-        try:
-            raw = base64.b64decode(script_base64.strip().encode("ascii"), validate=True)
-            return raw.decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise ValueError(
-                "Invalid script_base64: must be valid base64 encoding UTF-8 text."
-            ) from exc
-    if script_path:
+        raise ValueError(
+            f"Provide exactly one source for {label}: 'script', 'script_path', "
+            "'script_base64', 'script_gzip_base64', or 'script_base64_path'."
+        )
+    if has_b64 and script_base64:
+        return _decode_script_base64(script_base64, label=label + "_base64")
+    if has_gz and script_gzip_base64:
+        return _decode_script_gzip_base64(script_gzip_base64, label=label + "_gzip_base64")
+    if has_b64_path and script_base64_path:
         if MCP_TRANSPORT == "http":
             raise ValueError(
-                "script_path is not supported in HTTP mode. "
-                "Use 'script' (inline) or 'script_base64' instead."
+                f"{label}_base64_path is not supported in HTTP mode (the MCP server "
+                "cannot read your local filesystem). Encode the script and pass it "
+                "inline instead:\n"
+                "  • Best (3-5x capacity): script_gzip_base64 = "
+                "base64.b64encode(gzip.compress(s.encode('utf-8'))).decode('ascii')\n"
+                "  • Standard: script_base64 = "
+                "base64.b64encode(s.encode('utf-8')).decode('ascii')\n"
+                "If the script is too large for either, deploy it as a registry "
+                "codebundle (see search_registry + deploy_registry_codebundle)."
+            )
+        path = os.path.expanduser(script_base64_path)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{label}_base64_path file not found: {path}")
+        with open(path) as f:
+            return _decode_script_base64(f.read(), label=label + "_base64_path")
+    if has_path and script_path:
+        if MCP_TRANSPORT == "http":
+            raise ValueError(
+                f"{label}_path is not supported in HTTP mode (the MCP server cannot "
+                "read your local filesystem). Use one of these inline alternatives:\n"
+                "  • Best (3-5x capacity): script_gzip_base64\n"
+                "  • Standard:             script_base64\n"
+                "  • Small scripts:        script (raw inline)"
             )
         path = os.path.expanduser(script_path)
         if not os.path.isfile(path):
@@ -4665,6 +4816,54 @@ def _resolve_script(
         with open(path) as f:
             return f.read()
     return script or ""
+
+
+def _assess_combined_script_size(
+    *scripts: tuple[str, str],
+) -> tuple[str | None, str | None]:
+    """Inspect the combined size of multiple scripts in one tool envelope.
+
+    *scripts* is a sequence of ``(content, label)`` pairs. Returns
+    ``(warning, error)`` for the *sum*; either can be ``None``. This catches
+    the common ``commit_slx(script=..., sli_script=...)`` shape where each
+    individual script is under the soft cap but their sum exceeds the
+    transport budget for a single JSON-RPC envelope.
+    """
+    pairs = [(content, label) for content, label in scripts if content]
+    if len(pairs) < 2:
+        return (None, None)
+    total = sum(len(content.encode("utf-8")) for content, _ in pairs)
+    b64_total = (total + 2) // 3 * 4
+    breakdown = ", ".join(f"{label}={len(content.encode('utf-8'))}B" for content, label in pairs)
+    if total > SCRIPT_HARD_MAX_BYTES:
+        return (
+            None,
+            (
+                f"Combined scripts ({breakdown}) total {total} bytes "
+                f"(~{b64_total} bytes base64), exceeding the hard cap of "
+                f"{SCRIPT_HARD_MAX_BYTES} bytes per tool call. MCP HTTP "
+                "intermediaries truncate or 413 envelopes that bundle "
+                "multiple large script fields. Options:\n"
+                "  1. Use 'script_gzip_base64' (and 'sli_script_gzip_base64') "
+                "to compress before transport — typical 3-5x reduction.\n"
+                "  2. Deploy as a registry codebundle (search_registry + "
+                "deploy_registry_codebundle) and skip inline scripts.\n"
+                "  3. Raise RUNWHEN_SCRIPT_HARD_MAX_BYTES on the server if "
+                "your transport supports larger envelopes."
+            ),
+        )
+    if total > SCRIPT_SOFT_MAX_BYTES:
+        return (
+            (
+                f"Combined scripts ({breakdown}) total {total} bytes "
+                f"(~{b64_total} bytes base64). The sum approaches the "
+                "transport budget for one MCP envelope even though each "
+                "individual script is under the cap. If this call fails or "
+                "times out, prefer 'script_gzip_base64' for both fields."
+            ),
+            None,
+        )
+    return (None, None)
 
 
 @mcp.tool()
@@ -4677,16 +4876,37 @@ async def validate_script(
         str | None,
         Field(
             default=None,
-            description="Local file path to read the script from. "
-            "Mutually exclusive with 'script' and 'script_base64'.",
+            description="Local file path to read the script from. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params.",
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 script as standard base64. Prefer when JSON-escaping "
-            "multiline scripts is error-prone. Mutually exclusive with 'script'.",
+            description="UTF-8 script as standard base64. Prefer over inline 'script' "
+            "when JSON-escaping multiline content is error-prone. Mutually exclusive "
+            "with the other script_* params.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as base64(gzip(...)). Best inline option for "
+            "scripts >5KB — typically 3-5x denser than 'script_base64'. Encode with: "
+            "base64.b64encode(gzip.compress(script.encode())).decode(). Mutually "
+            "exclusive with the other script_* params.",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded "
+            "script. **stdio mode only.** Convenient when the agent has already "
+            "written the encoded script to a scratch file. Mutually exclusive with "
+            "the other script_* params.",
         ),
     ] = None,
     interpreter: str = Field(default="bash", description="'bash' or 'python'."),
@@ -4703,11 +4923,27 @@ async def validate_script(
     'issue description', 'issue severity' (1-4), 'issue next steps',
     and optionally 'issue observed at'.
 
+    Script-source parameter matrix (provide exactly one):
+
+    | Variant              | Best for                          | Mode      |
+    |----------------------|-----------------------------------|-----------|
+    | script               | Small scripts <~5KB, readable     | any       |
+    | script_base64        | Any size; safe JSON escaping      | any       |
+    | script_gzip_base64   | >5KB; 3-5x denser than b64        | any       |
+    | script_path          | Local file, raw text              | stdio only|
+    | script_base64_path   | Local file containing base64 blob | stdio only|
+
     Skill: runwhen-skill://build-runwhen-task (full authoring workflow).
     """
     try:
-        script_resolved = _resolve_script(script, script_path, script_base64)
-    except ValueError as exc:
+        script_resolved = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+        )
+    except (ValueError, FileNotFoundError) as exc:
         return _json_response({"valid": False, "error": str(exc), "warnings": []})
     warnings = _validate_script(script_resolved, interpreter, task_type)
     env_vars = _extract_env_vars(script_resolved, interpreter)
@@ -4794,16 +5030,33 @@ async def run_script(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path to read the script from. Mutually exclusive with "
-            "'script' and 'script_base64'."
+            description="Local file path to read the script from. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params."
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 script as standard base64. Prefer when JSON-escaping multiline "
-            "scripts is error-prone.",
+            description="UTF-8 script as standard base64. Prefer over inline 'script' "
+            "when JSON-escaping multiline content is error-prone.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as base64(gzip(...)). Best inline option for "
+            "scripts >5KB — 3-5x denser than 'script_base64'. Encode with: "
+            "base64.b64encode(gzip.compress(script.encode())).decode().",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded "
+            "script. **stdio mode only.**",
         ),
     ] = None,
 ) -> str:
@@ -4820,10 +5073,20 @@ async def run_script(
     - Bash task: define main() writing issue JSON array to FD 3 (>&3).
     - Bash SLI: define main() writing a metric float to FD 3.
 
+    Provide exactly one of: script | script_base64 | script_gzip_base64 |
+    script_path (stdio) | script_base64_path (stdio). Use script_gzip_base64
+    for scripts >5KB to maximise transport headroom.
+
     Use validate_script first to check compliance.
     """
     try:
-        script = _resolve_script(script, script_path, script_base64)
+        script = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+        )
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
@@ -4940,16 +5203,32 @@ async def run_script_and_wait(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path to read the script from. Mutually exclusive with "
-            "'script' and 'script_base64'."
+            description="Local file path to read the script from. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params."
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 script as standard base64. Prefer when JSON-escaping multiline "
-            "scripts is error-prone.",
+            description="UTF-8 script as standard base64. Prefer over inline 'script' "
+            "when JSON-escaping multiline content is error-prone.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as base64(gzip(...)). Best inline option for "
+            "scripts >5KB — 3-5x denser than 'script_base64'.",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded "
+            "script. **stdio mode only.**",
         ),
     ] = None,
     runtime_var_overrides: Annotated[
@@ -4976,6 +5255,10 @@ async def run_script_and_wait(
     - Bash task: define main() writing issue JSON array to FD 3 (>&3).
     - Bash SLI: define main() writing a metric float to FD 3.
 
+    Provide exactly one of: script | script_base64 | script_gzip_base64 |
+    script_path (stdio) | script_base64_path (stdio). Use script_gzip_base64
+    for scripts >5KB to maximise transport headroom.
+
     Bash scripts must NOT include `main "$@"` at the bottom. The runner
     sources the script and invokes `main()` itself with FD 3 wired to a
     run_output.json file. A trailing `main "$@"` triggers a preflight
@@ -4989,7 +5272,13 @@ async def run_script_and_wait(
     `open(os.environ["VAR"]).read()` (python) to get the actual value.
     """
     try:
-        script = _resolve_script(script, script_path, script_base64)
+        script = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+        )
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
@@ -5311,31 +5600,61 @@ async def commit_slx(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path for main script. Mutually exclusive with 'script' "
-            "and 'script_base64'."
+            description="Local file path for main script. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params."
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 main script as standard base64. Mutually exclusive with "
-            "'script' and 'script_path'.",
+            description="UTF-8 main script as standard base64.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 main script as base64(gzip(...)). Best inline option "
+            "for scripts >5KB — 3-5x denser than 'script_base64'.",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded main "
+            "script. **stdio mode only.**",
         ),
     ] = None,
     sli_script_path: Annotated[
         str | None,
         Field(
-            description="Local file path for SLI script. Mutually exclusive with "
-            "'sli_script' and 'sli_script_base64'."
+            description="Local file path for SLI script. **stdio mode only.** "
+            "Mutually exclusive with the other sli_script_* params."
         ),
     ] = None,
     sli_script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 SLI script as standard base64. Mutually exclusive with "
-            "'sli_script' and 'sli_script_path'.",
+            description="UTF-8 SLI script as standard base64.",
+        ),
+    ] = None,
+    sli_script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 SLI script as base64(gzip(...)). Best inline option "
+            "for SLI scripts that exceed simple-metric size.",
+        ),
+    ] = None,
+    sli_script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded SLI "
+            "script. **stdio mode only.**",
         ),
     ] = None,
     runtime_vars: Annotated[
@@ -5369,16 +5688,41 @@ async def commit_slx(
     This writes slx.yaml + runbook.yaml (for tasks) or slx.yaml + sli.yaml
     (for SLIs) to the workspace repository.
 
-    To commit BOTH a task AND an SLI on the same SLX, use one of these approaches:
+    Script-source parameter matrix (provide exactly one task variant; SLI
+    variants mirror the names):
 
-    1. Custom SLI script: set task_type="task" and provide sli_script with
-       a script that returns a 0-1 metric. Generates both runbook.yaml and sli.yaml.
+    | Variant                | Best for                          | Mode      |
+    |------------------------|-----------------------------------|-----------|
+    | script                 | Small scripts <~5KB, readable     | any       |
+    | script_base64          | Any size; safe JSON escaping      | any       |
+    | script_gzip_base64     | >5KB; 3-5x denser than b64        | any       |
+    | script_path            | Local file, raw text              | stdio only|
+    | script_base64_path     | Local file with base64 blob       | stdio only|
 
-    2. Cron-scheduler SLI: set task_type="task" and provide cron_schedule with
-       a cron expression (e.g. "0 */2 * * *"). The SLI will trigger the task's
-       runbook on that schedule.
+    For very large scripts (combined task+SLI >~50KB) prefer publishing as a
+    registry codebundle and using deploy_registry_codebundle.
 
-    Script-content contract (the two most common footguns):
+    To commit BOTH a task AND an SLI on the same SLX:
+
+    1. **Custom SLI script** (preferred): set task_type="task" and provide a
+       separate lightweight sli_script that emits ONE float between 0 and 1
+       (e.g. failing_pods / total_pods). The SLI script MUST be its own
+       small probe — DO NOT duplicate the task body. The server rejects
+       identical task+SLI content.
+
+    2. **Cron-scheduler SLI**: set task_type="task" and provide cron_schedule
+       with a cron expression (e.g. "0 */2 * * *"). The SLI will trigger the
+       task's runbook on that schedule. No sli_script needed.
+
+    Output contracts (the two scripts are NOT interchangeable):
+
+    - **Task** (interpreter, task_type='task'): returns/writes a List[Dict] of
+      issues with keys 'issue title', 'issue description', 'issue severity'
+      (1-4), 'issue next steps'.
+    - **SLI** (sli_interpreter, implied task_type='sli'): returns/writes ONE
+      float between 0 and 1.
+
+    Script-content footguns:
 
     - Bash scripts must NOT include `main "$@"` at the bottom. The runner
       sources the script and invokes `main()` itself with FD 3 wired to a
@@ -5454,15 +5798,49 @@ async def commit_slx(
         return _json_response({"error": f"Invalid data tag '{data}'. Must be one of: {valid}"})
 
     try:
-        script = _resolve_script(script, script_path, script_base64)
+        script = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+            label="script",
+        )
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    if sli_script_path or sli_script is not None or sli_script_base64:
+    sli_source_provided = bool(
+        sli_script_path
+        or sli_script is not None
+        or sli_script_base64
+        or sli_script_gzip_base64
+        or sli_script_base64_path
+    )
+    if sli_source_provided:
         try:
-            sli_script = _resolve_script(sli_script, sli_script_path, sli_script_base64)
+            sli_script = _resolve_script(
+                sli_script,
+                sli_script_path,
+                sli_script_base64,
+                sli_script_gzip_base64,
+                sli_script_base64_path,
+                label="sli_script",
+            )
         except (ValueError, FileNotFoundError) as exc:
             return _json_response({"error": f"SLI script: {exc}"})
+
+    # Reject identical task+SLI content BEFORE doing any further work. This
+    # is the agent anti-pattern that ballooned commit_slx envelopes in the
+    # cursor-scratch transcript: one big script branching on RW_RFNS shipped
+    # as both 'script' and 'sli_script'. Task and SLI have different output
+    # contracts and cannot share the same body.
+    if _scripts_have_identical_content(script, sli_script):
+        return _json_response(
+            {
+                "error": "Identical task and SLI script content",
+                "message": _IDENTICAL_TASK_SLI_MSG,
+            }
+        )
 
     main_warnings = _validate_script(script, interpreter, task_type)
     blocking = [w for w in main_warnings if _is_blocking_warning(w)]
@@ -5510,6 +5888,20 @@ async def commit_slx(
                     "sli_script_bytes": len(sli_script.encode("utf-8")),
                 }
             )
+
+    combined_size_warning, combined_size_error = _assess_combined_script_size(
+        (script, "script"),
+        (sli_script or "", "sli_script"),
+    )
+    if combined_size_error:
+        return _json_response(
+            {
+                "error": "Combined task+SLI scripts too large for one tool envelope",
+                "message": combined_size_error,
+                "script_bytes": len(script.encode("utf-8")),
+                "sli_script_bytes": len((sli_script or "").encode("utf-8")),
+            }
+        )
 
     task_title_issue = _detect_unresolved_placeholders(task_title)
     if task_title_issue:
@@ -5679,6 +6071,8 @@ async def commit_slx(
         size_warnings.append(script_size_warning)
     if sli_size_warning:
         size_warnings.append(sli_size_warning)
+    if combined_size_warning:
+        size_warnings.append(combined_size_warning)
     if size_warnings:
         result["size_warnings"] = size_warnings
         result["script_bytes"] = len(script.encode("utf-8"))

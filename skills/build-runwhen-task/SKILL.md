@@ -143,23 +143,76 @@ issues.append({
 })
 ```
 
+## Task vs SLI — different output contracts, different scripts
+
+Task runbooks and SLI scripts have **fundamentally different output shapes**
+and **must not share the same body**. The MCP rejects `commit_slx` when
+`script` and `sli_script` have identical content.
+
+| Concept | Task (`task_type='task'`) | SLI (`sli_interpreter` script) |
+|---|---|---|
+| What it returns | `List[Dict]` of issues | One `float` between 0 and 1 |
+| Cardinality | 0..N findings per run | Exactly 1 metric per run |
+| Audience | Operators reading workspace_chat | SLO dashboards, alert evaluators |
+| Typical size | Multi-KB; explanatory | Often <1KB; just a probe |
+
+If you only need an SLI, commit with `task_type='sli'` and omit `script`/
+`sli_script` duplication. If you need both, write the SLI as a *separate*
+lightweight probe that extracts a single number (e.g. failing_pods /
+total_pods) — never copy the task body.
+
+If you want the SLI to simply *run the task on a schedule*, set
+`cron_schedule='*/15 * * * *'` on the task instead — no `sli_script`
+needed.
+
 ## Script size and transport limits
 
 MCP HTTP intermediaries impose payload limits (~13KB base64 observed in the
-wild). The MCP now applies size guards:
+wild). The MCP now applies size guards on both individual scripts AND on
+the *sum* of `script` + `sli_script` in one `commit_slx` envelope.
 
 | Threshold | Behavior |
 |---|---|
 | ≤ `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` (10KB default) | Silent — ship it |
-| Soft threshold to hard cap | Advisory warning surfaced in `validate_script` and `run_script_and_wait` |
+| Soft threshold to hard cap | Advisory warning surfaced on the response |
 | > `RUNWHEN_SCRIPT_HARD_MAX_BYTES` (64KB default) | Hard reject — `commit_slx` / `run_script*` return an error |
+| Sum of task + SLI over soft/hard cap | Cumulative warning / reject |
 
-If you hit the soft warning or hard cap, prefer:
+### Choose the right script-source parameter
 
-1. **Use a registry codebundle** — search with `search_registry` first.
-2. **Split into a custom codebundle** in a git repo and deploy with `deploy_registry_codebundle` (no inline script needed).
-3. **In stdio mode**, pass `script_path=/local/path/to/script.py` instead of inline `script` / `script_base64`.
-4. **Raise the cap** with `RUNWHEN_SCRIPT_HARD_MAX_BYTES` if your transport is known-good.
+All script-taking tools (`validate_script`, `run_script`,
+`run_script_and_wait`, `commit_slx`) accept the same matrix. SLI variants
+mirror the names (`sli_script`, `sli_script_base64`, `sli_script_gzip_base64`,
+`sli_script_path`, `sli_script_base64_path`).
+
+| Variant | Best for | Mode |
+|---|---|---|
+| `script` | Small scripts <~5KB, readable | any |
+| `script_base64` | Any size; safe JSON escaping | any |
+| **`script_gzip_base64`** | **>5KB; 3-5x denser than b64 — preferred for large scripts** | **any** |
+| `script_path` | Local file, raw text | stdio only |
+| `script_base64_path` | Local file with base64 blob | stdio only |
+
+Encode `script_gzip_base64` as:
+
+```python
+import base64, gzip
+script_gzip_base64 = base64.b64encode(
+    gzip.compress(script.encode("utf-8"))
+).decode("ascii")
+```
+
+If you hit the soft warning or hard cap, prefer in order:
+
+1. **Compress first** — re-encode with `script_gzip_base64` (and `sli_script_gzip_base64`).
+   A 30KB Python script typically lands at ~7-9KB after gzip+base64.
+2. **Use a registry codebundle** — search with `search_registry` first.
+3. **Split into a custom codebundle** in a git repo and deploy with
+   `deploy_registry_codebundle` (no inline script needed).
+4. **stdio mode escape hatches**: `script_path=/local/file.py` (raw) or
+   `script_base64_path=/local/file.b64` (encoded blob on disk).
+5. **Raise the cap** with `RUNWHEN_SCRIPT_HARD_MAX_BYTES` if your
+   transport is known-good.
 
 ## Cloud-specific secret requirements
 
@@ -210,7 +263,10 @@ run_script_and_wait(
 
 ### Using runtime vars in `commit_slx`
 
-Pass the full schema via `runtime_vars`. All four fields are **required**:
+Pass the full schema via `runtime_vars`. All four fields are **required**.
+`default` must be *present* but may be the empty string `""` — that's the
+correct shape for an optional override with no preset (e.g.
+`SCAN_KUBE_CONTEXT` where in-cluster runners need no kubectl context):
 
 ```python
 commit_slx(

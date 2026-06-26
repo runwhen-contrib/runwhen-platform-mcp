@@ -2,7 +2,10 @@
 
 import asyncio
 import base64
+import gzip
 import json
+import os
+import tempfile
 from unittest import mock
 
 import httpx
@@ -11,12 +14,14 @@ import pytest
 from runwhen_platform_mcp.authorization import WRITE_TOOLS
 from runwhen_platform_mcp.server import (
     SKILL_URI_SCHEME,
+    _assess_combined_script_size,
     _assess_issue_quality_static,
     _assess_run_output_quality,
     _assess_script_size,
     _azure_credentials_hint,
     _build_persona_payload,
     _classify_secret,
+    _decode_script_gzip_base64,
     _detect_unresolved_placeholders,
     _discover_skills,
     _ensure_required_tags,
@@ -33,6 +38,7 @@ from runwhen_platform_mcp.server import (
     _resolve_assistant_short_name,
     _resolve_command_assistant_name,
     _resolve_script,
+    _scripts_have_identical_content,
     _strip_python_main_guards,
     _strip_runner_unsafe_blocks,
     _validate_assistant_name,
@@ -2566,3 +2572,298 @@ class TestHasDynamicNarrowedPlusCheck:
         assert not any("f-strings" in n.lower() for n in notes), (
             f"f-strings should still suppress the warning: {notes!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Layered transport + parameter-shape fixes (PR #14 follow-up)
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeScriptGzipBase64:
+    """Tests for _decode_script_gzip_base64 (gzip+base64 round-trip)."""
+
+    def test_roundtrip(self) -> None:
+        src = "def main():\n    return [{'issue title': 'x'}]\n"
+        encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+        assert _decode_script_gzip_base64(encoded) == src
+
+    def test_compression_ratio_typical_python(self) -> None:
+        """Sanity: typical Python script gzip+b64 is materially smaller than b64."""
+        src = (
+            "import os\nimport json\n\n"
+            + "def main():\n    issues = []\n"
+            + "    " * 50  # whitespace pad
+            + "    return issues\n"
+        )
+        raw = src.encode("utf-8")
+        b64_len = len(base64.b64encode(raw))
+        gz_len = len(base64.b64encode(gzip.compress(raw)))
+        # whitespace-heavy code compresses well — expect at least 2x reduction.
+        assert gz_len < b64_len / 2, (
+            f"gzip+b64={gz_len} should be <50% of b64={b64_len} for whitespace-heavy code"
+        )
+
+    def test_invalid_outer_base64_raises(self) -> None:
+        with pytest.raises(ValueError, match="outer base64"):
+            _decode_script_gzip_base64("!!!not-base64!!!")
+
+    def test_not_gzipped_raises(self) -> None:
+        raw_b64 = base64.b64encode(b"plain text, not gzipped").decode("ascii")
+        with pytest.raises(ValueError, match="gzip decompression failed"):
+            _decode_script_gzip_base64(raw_b64)
+
+    def test_not_utf8_raises(self) -> None:
+        bad = base64.b64encode(gzip.compress(b"\xff\xfe\xfd")).decode("ascii")
+        with pytest.raises(ValueError, match="UTF-8"):
+            _decode_script_gzip_base64(bad)
+
+
+class TestResolveScriptGzipBase64:
+    """Tests for _resolve_script with the new script_gzip_base64 variant."""
+
+    def test_gzip_b64_alone_is_valid(self) -> None:
+        src = "def main():\n    return []\n"
+        encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+        assert _resolve_script(None, None, None, encoded, None) == src
+
+    def test_gzip_b64_mutually_exclusive_with_b64(self) -> None:
+        src = "def main():\n    return []\n"
+        encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+        b64 = base64.b64encode(src.encode("utf-8")).decode("ascii")
+        with pytest.raises(ValueError, match="exactly one"):
+            _resolve_script(None, None, b64, encoded, None)
+
+    def test_gzip_b64_mutually_exclusive_with_inline(self) -> None:
+        encoded = base64.b64encode(gzip.compress(b"x")).decode("ascii")
+        with pytest.raises(ValueError, match="exactly one"):
+            _resolve_script("inline", None, None, encoded, None)
+
+
+class TestResolveScriptBase64Path:
+    """Tests for the new script_base64_path variant."""
+
+    def test_base64_path_in_stdio_reads_and_decodes(self) -> None:
+        src = "def main():\n    return []\n"
+        encoded = base64.b64encode(src.encode("utf-8")).decode("ascii")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".b64", delete=False) as f:
+            f.write(encoded)
+            f.flush()
+            path = f.name
+        try:
+            with mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "stdio"):
+                assert _resolve_script(None, None, None, None, path) == src
+        finally:
+            os.unlink(path)
+
+    def test_base64_path_rejected_in_http_mode_with_hint(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "http"):
+            with pytest.raises(ValueError) as excinfo:
+                _resolve_script(None, None, None, None, "/some/path.b64")
+            msg = str(excinfo.value)
+            assert "HTTP mode" in msg
+            assert "script_gzip_base64" in msg
+            assert "script_base64" in msg
+
+    def test_base64_path_missing_file_raises(self) -> None:
+        with (
+            mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "stdio"),
+            pytest.raises(FileNotFoundError, match="base64_path"),
+        ):
+            _resolve_script(None, None, None, None, "/nonexistent/scratch.b64")
+
+    def test_base64_path_mutually_exclusive_with_others(self) -> None:
+        with pytest.raises(ValueError, match="exactly one"):
+            _resolve_script(None, None, "eA==", None, "/tmp/x.b64")
+
+
+class TestResolveScriptHTTPRefusalHints:
+    """script_path / script_base64_path in HTTP mode must include actionable hints."""
+
+    def test_script_path_http_refusal_mentions_gzip(self) -> None:
+        with mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "http"):
+            with pytest.raises(ValueError) as excinfo:
+                _resolve_script(None, "/tmp/a.py", None, None, None)
+            msg = str(excinfo.value)
+            assert "HTTP mode" in msg
+            assert "script_gzip_base64" in msg
+
+
+class TestValidateRunTimeVarsEmptyDefault:
+    """Empty-string default is a legitimate optional-override pattern."""
+
+    def test_empty_string_default_is_valid(self) -> None:
+        errors = _validate_runtime_vars(
+            [
+                {
+                    "name": "SCAN_KUBE_CONTEXT",
+                    "description": "Optional kubectl context",
+                    "default": "",
+                    "validation": {"type": "regex", "pattern": "^.*$"},
+                }
+            ]
+        )
+        assert errors == []
+
+    def test_missing_default_key_still_rejected(self) -> None:
+        errors = _validate_runtime_vars(
+            [
+                {
+                    "name": "FOO",
+                    "description": "x",
+                    "validation": {"type": "enum", "values": ["a"]},
+                }
+            ]
+        )
+        assert any("default" in e for e in errors)
+
+    def test_non_string_default_rejected(self) -> None:
+        errors = _validate_runtime_vars(
+            [
+                {
+                    "name": "FOO",
+                    "description": "x",
+                    "default": 42,
+                    "validation": {"type": "regex", "pattern": "^.+$"},
+                }
+            ]
+        )
+        assert any("default" in e and "string" in e for e in errors)
+
+
+class TestScriptsHaveIdenticalContent:
+    """Tests for _scripts_have_identical_content."""
+
+    def test_identical_returns_true(self) -> None:
+        s = "def main():\n    return []\n"
+        assert _scripts_have_identical_content(s, s) is True
+
+    def test_trailing_whitespace_normalised(self) -> None:
+        a = "def main():   \n    return []\n"
+        b = "def main():\n    return []\n"
+        assert _scripts_have_identical_content(a, b) is True
+
+    def test_crlf_normalised(self) -> None:
+        a = "def main():\r\n    return []\r\n"
+        b = "def main():\n    return []\n"
+        assert _scripts_have_identical_content(a, b) is True
+
+    def test_different_returns_false(self) -> None:
+        a = "def main():\n    return []\n"
+        b = "def main():\n    return 0.5\n"
+        assert _scripts_have_identical_content(a, b) is False
+
+    def test_empty_or_none_returns_false(self) -> None:
+        assert _scripts_have_identical_content("", "") is False
+        assert _scripts_have_identical_content(None, "") is False
+        assert _scripts_have_identical_content("x", None) is False
+
+
+class TestAssessCombinedScriptSize:
+    """Tests for _assess_combined_script_size (sum-of-fields envelope check)."""
+
+    def test_below_soft_no_warning(self) -> None:
+        warn, err = _assess_combined_script_size(("a" * 100, "script"), ("b" * 100, "sli"))
+        assert warn is None
+        assert err is None
+
+    def test_single_field_returns_nothing(self) -> None:
+        # Only one non-empty script; combined check is N/A.
+        warn, err = _assess_combined_script_size(("a" * 100, "script"), ("", "sli"))
+        assert warn is None
+        assert err is None
+
+    def test_combined_over_soft_warns(self) -> None:
+        # Each below soft cap, sum exceeds it.
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_SOFT_MAX_BYTES", 1000),
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 10000),
+        ):
+            warn, err = _assess_combined_script_size(
+                ("a" * 600, "script"), ("b" * 600, "sli_script")
+            )
+            assert warn is not None
+            assert "script=600B" in warn
+            assert "sli_script=600B" in warn
+            assert err is None
+
+    def test_combined_over_hard_errors(self) -> None:
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1000),
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_SOFT_MAX_BYTES", 500),
+        ):
+            warn, err = _assess_combined_script_size(
+                ("a" * 600, "script"), ("b" * 600, "sli_script")
+            )
+            assert err is not None
+            assert "script_gzip_base64" in err
+
+
+class TestCommitSlxRejectsIdenticalTaskAndSli:
+    """commit_slx must reject identical script+sli_script with SLI contract hint."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_identical_python_scripts_rejected(self) -> None:
+        s = (
+            "def main():\n"
+            "    return [{'issue title': 'ok 12345', 'issue description':"
+            " 'd' * 60, 'issue severity': 4, 'issue next steps':"
+            " 'check stuff for things and ensure'}]\n"
+        )
+        result = self._run(
+            commit_slx(
+                slx_name="dup-task",
+                alias="Dup",
+                statement="Dup test",
+                workspace_name="test-ws",
+                script=s,
+                sli_script=s,
+                interpreter="python",
+                task_type="task",
+                access="read-only",
+                data="logs-bulk",
+            )
+        )
+        data = json.loads(result)
+        assert data.get("error") == "Identical task and SLI script content"
+        assert "different contracts" in data.get("message", "")
+        assert "float" in data.get("message", "").lower()
+
+    def test_different_scripts_dont_trigger_identical_check(self) -> None:
+        # Unit-level confirmation that the helper doesn't false-positive on
+        # distinct scripts. The full end-to-end commit_slx integration test
+        # for the success path lives in tests that mock PAPI; this guard is
+        # a direct check on the predicate the route uses.
+        task = "def main():\n    return [{'issue title': 'x'}]\n"
+        sli = "def main():\n    return 1.0\n"
+        assert _scripts_have_identical_content(task, sli) is False
+
+
+class TestCommitSlxAcceptsNewScriptSourceVariants:
+    """commit_slx must accept script_gzip_base64 and (in stdio) script_base64_path."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_gzip_b64_resolves_via_helper(self) -> None:
+        # Verify the script_gzip_base64 parameter properly plumbs through
+        # _resolve_script. The end-to-end commit_slx code path uses the
+        # same call form, so this is the meaningful coverage.
+        src = "def main():\n    return 1.0\n"
+        encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+        assert _resolve_script(None, None, None, encoded, None) == src
+
+    def test_base64_path_resolves_via_helper_in_stdio(self) -> None:
+        # Mirror of the above for script_base64_path.
+        src = "def main():\n    return [{'issue title': 'x'}]\n"
+        encoded = base64.b64encode(src.encode("utf-8")).decode("ascii")
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".b64", delete=False) as f:
+            f.write(encoded)
+            f.flush()
+            path = f.name
+        try:
+            with mock.patch("runwhen_platform_mcp.server.MCP_TRANSPORT", "stdio"):
+                assert _resolve_script(None, None, None, None, path) == src
+        finally:
+            os.unlink(path)
