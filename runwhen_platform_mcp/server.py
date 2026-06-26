@@ -764,14 +764,77 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-_PY_MAIN_GUARD_RE = re.compile(
-    r"^[ \t]*if\s+__name__\s*==\s*['\"]__main__['\"]\s*:.*?(?=^\S|\Z)",
-    re.MULTILINE | re.DOTALL,
+_PY_MAIN_GUARD_HEAD_RE = re.compile(
+    r"^([ \t]*)if\s+__name__\s*==\s*['\"]__main__['\"]\s*:\s*(?:#.*)?$",
 )
 _BASH_MAIN_INVOKE_RE = re.compile(
     r'^[ \t]*main\s+(?:"\$@"|\$@|\$\*|"\$\*")\s*(?:#.*)?$',
     re.MULTILINE,
 )
+
+
+def _strip_python_main_guards(script: str) -> tuple[str, int, int]:
+    """Remove ``if __name__ == "__main__":`` blocks from a Python script.
+
+    Returns ``(cleaned_script, num_removed, num_skipped_paired)``. A guard is
+    *skipped* when followed by a paired ``elif``/``else:`` clause at the same
+    indentation, because dropping the ``if`` alone would leave invalid Python
+    (orphan ``else:``). For skipped guards the caller should keep the warning
+    blocking so the agent fixes the structure manually.
+    """
+    lines = script.splitlines(keepends=True)
+    output: list[str] = []
+    removed = 0
+    skipped = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = _PY_MAIN_GUARD_HEAD_RE.match(line.rstrip("\n").rstrip("\r"))
+        if not match:
+            output.append(line)
+            i += 1
+            continue
+        guard_indent = match.group(1)
+        # Walk the body: every line until we hit a non-blank line whose
+        # leading whitespace is ≤ guard_indent (i.e. dedent to the guard's
+        # level or lower). Blank/comment-only lines at any indent are part
+        # of the body.
+        body_end = i + 1
+        while body_end < len(lines):
+            body_line = lines[body_end]
+            stripped = body_line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                body_end += 1
+                continue
+            line_indent = body_line[: len(body_line) - len(stripped)]
+            # A line at the same indent as the guard ends the body.
+            if len(line_indent) <= len(guard_indent):
+                break
+            body_end += 1
+        # Check whether the line that ended the body is a paired clause
+        # belonging to the same ``if``.
+        paired = False
+        if body_end < len(lines):
+            tail = lines[body_end].lstrip()
+            tail_indent = lines[body_end][: len(lines[body_end]) - len(tail)]
+            if tail_indent == guard_indent and (
+                tail.startswith("else:")
+                or tail.startswith("else ")
+                or tail.startswith("elif ")
+                or tail.startswith("elif(")
+            ):
+                paired = True
+        if paired:
+            # Refuse to strip — would orphan the else/elif clause. Keep the
+            # original lines verbatim and let validate_script surface the
+            # blocking warning so the agent fixes it.
+            output.extend(lines[i:body_end])
+            skipped += 1
+            i = body_end
+        else:
+            removed += 1
+            i = body_end
+    return "".join(output), removed, skipped
 
 
 def _strip_runner_unsafe_blocks(script: str, interpreter: str) -> tuple[str, list[str]]:
@@ -782,7 +845,9 @@ def _strip_runner_unsafe_blocks(script: str, interpreter: str) -> tuple[str, lis
 
     Python: ``if __name__ == "__main__":`` guards cause the runner to fire a
     second ``main()`` invocation during import (see ``.issues`` #8). Stripping
-    is safe — the runner always calls ``main()`` directly.
+    is safe — the runner always calls ``main()`` directly — *except* when the
+    guard has a paired ``else:`` / ``elif`` clause; those scripts must be
+    fixed by the author to avoid orphan ``else:`` syntax errors.
 
     Bash: ``main "$@"`` at the bottom triggers a preflight invocation with
     FD 3 read-only ("Bad file descriptor"). Strip it.
@@ -790,13 +855,19 @@ def _strip_runner_unsafe_blocks(script: str, interpreter: str) -> tuple[str, lis
     notes: list[str] = []
     cleaned = script
     if interpreter == "python":
-        new_cleaned, n = _PY_MAIN_GUARD_RE.subn("", cleaned)
-        if n:
+        cleaned, removed, skipped = _strip_python_main_guards(cleaned)
+        if removed:
             notes.append(
-                f'Removed {n} `if __name__ == "__main__":` block(s) — the runner '
-                "always invokes main() directly; the guard fires a duplicate run."
+                f'Removed {removed} `if __name__ == "__main__":` block(s) — the '
+                "runner always invokes main() directly; the guard fires a "
+                "duplicate run."
             )
-            cleaned = new_cleaned
+        if skipped:
+            notes.append(
+                f'Left {skipped} `if __name__ == "__main__":` block(s) intact '
+                "because they have a paired else/elif clause that would become "
+                "orphan code. Refactor by removing the conditional manually."
+            )
     elif interpreter == "bash":
         new_cleaned, n = _BASH_MAIN_INVOKE_RE.subn("", cleaned)
         if n:
@@ -806,6 +877,16 @@ def _strip_runner_unsafe_blocks(script: str, interpreter: str) -> tuple[str, lis
             )
             cleaned = new_cleaned
     return cleaned, notes
+
+
+def _python_main_guard_has_paired_clause(script: str) -> bool:
+    """True when at least one ``__main__`` guard has a paired else/elif.
+
+    Used to decide whether to keep the ``__main__`` warning blocking — paired
+    guards cannot be auto-stripped without producing invalid Python.
+    """
+    _, _, skipped = _strip_python_main_guards(script)
+    return skipped > 0
 
 
 def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]:
@@ -818,10 +899,19 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
         if re.search(r"^main\s*\(", script, re.MULTILINE):
             warnings.append("Do not call main() directly — the runner invokes it.")
         if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', script):
-            warnings.append(
-                'Do not use if __name__ == "__main__" — the runner invokes main(). '
-                "Auto-stripped at run/commit time, but please remove from the source."
-            )
+            if _python_main_guard_has_paired_clause(script):
+                warnings.append(
+                    'Do not use if __name__ == "__main__" — the runner invokes '
+                    "main(). This guard has a paired else/elif clause that "
+                    "cannot be auto-stripped safely (would leave orphan code). "
+                    "Refactor by removing the conditional manually."
+                )
+            else:
+                warnings.append(
+                    'Do not use if __name__ == "__main__" — the runner invokes '
+                    "main(). Auto-stripped at run/commit time, but please "
+                    "remove from the source."
+                )
         if task_type == "sli" and "return" in script and not re.search(r"return\s+[\d.]", script):
             warnings.append("SLI main() should return a float between 0 and 1.")
     elif interpreter == "bash":
@@ -1016,8 +1106,24 @@ _PY_ISSUE_NEXT_STEPS_EMPTY_RE = re.compile(
 _PY_ISSUE_TITLE_EMPTY_RE = re.compile(
     r'["\']issue title["\']\s*:\s*["\']\s*["\']',
 )
+# Detect ``"issue severity": <value>`` where ``<value>`` is NOT one of the
+# valid integers 1..4 (bare or quoted). Valid: ``1``, ``2``, ``3``, ``4``,
+# ``"1"``, ``"2"``, ``"3"``, ``"4"``. Everything else (``0``, ``5..9``,
+# ``10``+, ``"0"``, ``"5"``+, negatives, multi-digit quoted strings, etc.)
+# is flagged. The ``[05-9]`` character class deliberately omits ``1-4`` so
+# valid bare or quoted severities never match; ``\d{2,}`` covers any
+# multi-digit value (always invalid since severity is single-digit 1-4).
 _PY_ISSUE_SEVERITY_INVALID_RE = re.compile(
-    r'["\']issue severity["\']\s*:\s*(?:[05-9]|10|"0"|"5"|"\d+")',
+    r'["\']issue severity["\']\s*:\s*'
+    r"(?:"
+    # Bare invalid number (optionally negative).
+    r"-?(?:[05-9]|\d{2,})"
+    r"|"
+    # Quoted invalid number wrapped in matching quotes.
+    r'"-?(?:[05-9]|\d{2,})"'
+    r"|"
+    r"'-?(?:[05-9]|\d{2,})'"
+    r")",
 )
 _BASH_ISSUE_DESC_EMPTY_RE = re.compile(
     r'--arg\s+description\s+["\']\s*["\']',
@@ -1185,13 +1291,13 @@ def _assess_run_output_quality(parsed: dict[str, Any]) -> list[str]:
             notes.append(f"{prefix}: severity {sev_str!r} is out of contract; use 1-4.")
         if 1 <= sev_int <= 3:
             has_high_severity = True
+        # The contract from .issues/06-25-2026.md #10: every investigation
+        # task must emit at least one severity-4 informational summary so
+        # workspace_chat has something to surface even when nothing is wrong.
+        # Treat *any* severity-4 issue as the required summary; also accept
+        # titles that explicitly say "summary" regardless of severity.
         title_lower = title.lower()
-        if (
-            "summary" in title_lower
-            or "data summary" in title_lower
-            or sev_int == 4
-            and ("found" in title_lower or "observed" in title_lower or "total" in title_lower)
-        ):
+        if sev_int == 4 or "summary" in title_lower:
             has_summary = True
 
     if issues and not has_high_severity and not has_summary:
@@ -3239,6 +3345,32 @@ async def get_slx_runbook(
     return _json_response(data)
 
 
+# Keywords that strongly indicate a PAPI 400 was actually rejecting the
+# runtime_var_overrides shape — used by run_slx to decide whether the
+# "known_runtime_vars" enrichment path applies. We require a substantive
+# token, not just the bare HTTP status, so unrelated 400s don't get a
+# misleading runtime-var hint.
+_RUNTIME_VAR_ERROR_TOKENS = (
+    "runtime_var",
+    "runtime var",
+    "runtimevar",
+    "runtime_vars_provided",
+    "runtimevarsprovided",
+    "runtime_var_overrides",
+    "runtimevaroverrides",
+    "unknown runtime",
+    "invalid runtime",
+)
+
+
+def _looks_like_runtime_var_error(error_message: str) -> bool:
+    """True when a PAPI error message references runtime-var-shaped validation."""
+    if not error_message:
+        return False
+    low = error_message.lower()
+    return any(tok in low for tok in _RUNTIME_VAR_ERROR_TOKENS)
+
+
 async def _fetch_known_runtime_vars(workspace: str, full_slx_name: str) -> list[str] | None:
     """Best-effort fetch of the declared ``runtime_vars`` for an SLX runbook.
 
@@ -3260,16 +3392,23 @@ async def _fetch_known_runtime_vars(workspace: str, full_slx_name: str) -> list[
     if isinstance(spec, dict):
         candidates.append(spec.get("runtimeVarsProvided"))
         candidates.append(spec.get("runtime_vars_provided"))
+    # Merge across all list candidates rather than short-circuiting on the
+    # first one found. An earlier empty ``runtime_vars_provided`` should not
+    # hide a populated ``spec.runtimeVarsProvided`` later in the response.
+    names: list[str] = []
+    found_any_list = False
     for value in candidates:
-        if isinstance(value, list):
-            names: list[str] = []
-            for entry in value:
-                if isinstance(entry, dict) and entry.get("name"):
-                    names.append(str(entry["name"]))
-                elif isinstance(entry, str):
-                    names.append(entry)
-            return sorted(set(names))
-    return None
+        if not isinstance(value, list):
+            continue
+        found_any_list = True
+        for entry in value:
+            if isinstance(entry, dict) and entry.get("name"):
+                names.append(str(entry["name"]))
+            elif isinstance(entry, str):
+                names.append(entry)
+    if not found_any_list:
+        return None
+    return sorted(set(names))
 
 
 @mcp.tool()
@@ -4121,7 +4260,7 @@ async def run_script(
             }
         )
     script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
-    _size_warning, size_error = _assess_script_size(script)
+    size_warning, size_error = _assess_script_size(script)
     if size_error:
         return _json_response(
             {
@@ -4148,6 +4287,11 @@ async def run_script(
     }
 
     status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
+    # PAPI's response is a dict; surface the soft size advisory alongside the
+    # run_id without clobbering whatever PAPI returned.
+    if size_warning and isinstance(data, dict):
+        data.setdefault("size_warning", size_warning)
+        data.setdefault("script_bytes", len(script.encode("utf-8")))
     return _json_response(data)
 
 
@@ -4281,7 +4425,7 @@ async def run_script_and_wait(
             }
         )
     script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
-    _size_warning, size_error = _assess_script_size(script)
+    size_warning, size_error = _assess_script_size(script)
     if size_error:
         return _json_response(
             {
@@ -4347,6 +4491,9 @@ async def run_script_and_wait(
         "stderr": parsed["stderr"],
         "report": parsed["report"],
     }
+    if size_warning:
+        result["size_warning"] = size_warning
+        result["script_bytes"] = len(script.encode("utf-8"))
     if quality_notes:
         result["issue_quality_notes"] = quality_notes
         result["issue_quality_message"] = (
@@ -4452,8 +4599,12 @@ async def run_slx(
         error_msg = str(exc)
         # Issue #4: surface known runtime_vars when the runner rejects unknown
         # override keys so the agent can self-correct without a separate
-        # discovery step.
-        if runtime_var_overrides and ("runtime" in error_msg.lower() or "400" in error_msg):
+        # discovery step. We require both the override to be present *and* a
+        # real runtime-var signal in the PAPI body — not just any 400 status,
+        # because _raise_for_papi_status always embeds the status code in the
+        # error string and unrelated 400s would otherwise get a misleading
+        # runtime-var hint.
+        if runtime_var_overrides and _looks_like_runtime_var_error(error_msg):
             known = await _fetch_known_runtime_vars(ws, full_slx_name)
             if known is not None:
                 return _json_response(
@@ -4737,7 +4888,7 @@ async def commit_slx(
             }
         )
     script, _script_fixes = _strip_runner_unsafe_blocks(script, interpreter)
-    _size_warning, size_error = _assess_script_size(script, label="script")
+    script_size_warning, size_error = _assess_script_size(script, label="script")
     if size_error:
         return _json_response(
             {
@@ -4748,6 +4899,7 @@ async def commit_slx(
         )
     static_quality_notes = _assess_issue_quality_static(script, interpreter, task_type)
 
+    sli_size_warning: str | None = None
     if sli_script:
         sli_interp = sli_interpreter or interpreter
         sli_warnings = _validate_script(sli_script, sli_interp, "sli")
@@ -4761,7 +4913,7 @@ async def commit_slx(
                 }
             )
         sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
-        _sli_size_warning, sli_size_error = _assess_script_size(sli_script, label="SLI script")
+        sli_size_warning, sli_size_error = _assess_script_size(sli_script, label="SLI script")
         if sli_size_error:
             return _json_response(
                 {
@@ -4934,6 +5086,16 @@ async def commit_slx(
         "committed_types": type_label,
         "response": resp_data,
     }
+    size_warnings: list[str] = []
+    if script_size_warning:
+        size_warnings.append(script_size_warning)
+    if sli_size_warning:
+        size_warnings.append(sli_size_warning)
+    if size_warnings:
+        result["size_warnings"] = size_warnings
+        result["script_bytes"] = len(script.encode("utf-8"))
+        if sli_script:
+            result["sli_script_bytes"] = len(sli_script.encode("utf-8"))
     if static_quality_notes:
         result["issue_quality_notes"] = static_quality_notes
         result["issue_quality_message"] = (

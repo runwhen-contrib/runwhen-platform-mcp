@@ -18,13 +18,17 @@ from runwhen_platform_mcp.server import (
     _detect_unresolved_placeholders,
     _ensure_required_tags,
     _extract_env_vars,
+    _fetch_known_runtime_vars,
     _form_persona_full_name,
     _is_blocking_warning,
+    _looks_like_runtime_var_error,
     _normalize_chat_persona_scope_id,
     _persona_short_name,
+    _python_main_guard_has_paired_clause,
     _resolve_assistant_short_name,
     _resolve_command_assistant_name,
     _resolve_script,
+    _strip_python_main_guards,
     _strip_runner_unsafe_blocks,
     _validate_assistant_name,
     _validate_runtime_vars,
@@ -1468,3 +1472,433 @@ class TestValidateScriptIncludesQualityNotes:
         data = json.loads(result)
         assert data["valid"] is False
         assert "size_error" in data
+
+
+# ---------------------------------------------------------------------------
+# Bugbot regressions for PR #14
+# ---------------------------------------------------------------------------
+
+
+class TestLooksLikeRuntimeVarError:
+    """Tighter 400-detection trigger for run_slx runtime-var enrichment."""
+
+    def test_matches_runtime_var_token(self) -> None:
+        assert _looks_like_runtime_var_error(
+            "PAPI returned 400 for /runsessions: {'detail': 'unknown runtime_var FOO'}"
+        )
+
+    def test_matches_camel_case(self) -> None:
+        assert _looks_like_runtime_var_error(
+            "400 Bad Request: runtimeVarsProvided does not allow extra keys"
+        )
+
+    def test_no_match_on_bare_400(self) -> None:
+        # An unrelated 400 (e.g. invalid location name) must not trigger the
+        # runtime-var hint path.
+        assert not _looks_like_runtime_var_error(
+            "PAPI returned 400 for /runsessions: {'detail': 'invalid location'}"
+        )
+
+    def test_no_match_on_empty(self) -> None:
+        assert not _looks_like_runtime_var_error("")
+
+
+class TestRunSlxRuntimeVarHintScoping:
+    """run_slx must not emit the runtime_var hint on unrelated 400 errors."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_known_runtime_vars",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    def test_unrelated_400_does_not_enrich(self, mock_post, mock_ws, mock_fetch) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_post.side_effect = ValueError(
+            "PAPI returned 400 for /runsessions: {'detail': 'invalid location'}"
+        )
+        mock_fetch.return_value = ["LOG_QUERY"]
+
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="*",
+                runtime_var_overrides={"FOO": "bar"},
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        # Critically: no known_runtime_vars enrichment, because the 400 is
+        # not actually about runtime vars.
+        assert "known_runtime_vars" not in data
+        assert "submitted_override_keys" not in data
+        # And we never went looking for them.
+        mock_fetch.assert_not_called()
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_known_runtime_vars",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    def test_runtime_var_400_enriches(self, mock_post, mock_ws, mock_fetch) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_post.side_effect = ValueError(
+            "PAPI returned 400: {'detail': 'unknown runtime_var BOGUS'}"
+        )
+        mock_fetch.return_value = ["LOG_QUERY"]
+
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="*",
+                runtime_var_overrides={"BOGUS": "x"},
+            )
+        )
+        data = json.loads(result)
+        assert data["known_runtime_vars"] == ["LOG_QUERY"]
+        assert data["submitted_override_keys"] == ["BOGUS"]
+
+
+class TestFetchKnownRuntimeVarsMerging:
+    """``_fetch_known_runtime_vars`` must not short-circuit on empty lists."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_empty_top_level_falls_through_to_spec(self, mock_get) -> None:
+        # First candidate is an empty list — used to short-circuit and
+        # hide the populated spec variant.
+        mock_get.return_value = {
+            "runtime_vars_provided": [],
+            "spec": {
+                "runtimeVarsProvided": [
+                    {"name": "LOG_QUERY"},
+                    {"name": "TIME_WINDOW"},
+                ]
+            },
+        }
+        result = self._run(_fetch_known_runtime_vars("ws", "ws--task"))
+        assert result == ["LOG_QUERY", "TIME_WINDOW"]
+
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_all_empty_returns_empty_list(self, mock_get) -> None:
+        mock_get.return_value = {
+            "runtime_vars_provided": [],
+            "spec": {"runtimeVarsProvided": []},
+        }
+        result = self._run(_fetch_known_runtime_vars("ws", "ws--task"))
+        # Empty but not None — we *did* find the schema, it just has no vars.
+        assert result == []
+
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_no_candidates_returns_none(self, mock_get) -> None:
+        mock_get.return_value = {"unrelated": "shape"}
+        result = self._run(_fetch_known_runtime_vars("ws", "ws--task"))
+        assert result is None
+
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_merges_and_dedups_across_candidates(self, mock_get) -> None:
+        mock_get.return_value = {
+            "runtime_vars_provided": [{"name": "A"}],
+            "spec": {
+                "runtimeVarsProvided": [{"name": "B"}, {"name": "A"}],
+            },
+        }
+        result = self._run(_fetch_known_runtime_vars("ws", "ws--task"))
+        assert result == ["A", "B"]
+
+
+class TestPythonMainGuardPairedClause:
+    """``__main__`` guards with paired else/elif must not be auto-stripped."""
+
+    def test_paired_else_is_not_stripped(self) -> None:
+        script = (
+            "def main():\n"
+            "    return []\n"
+            "\n"
+            'if __name__ == "__main__":\n'
+            "    main()\n"
+            "else:\n"
+            "    print('imported')\n"
+        )
+        cleaned, removed, skipped = _strip_python_main_guards(script)
+        # The original is preserved and the skip counter ticks.
+        assert "if __name__" in cleaned
+        assert "else:" in cleaned
+        assert removed == 0
+        assert skipped == 1
+
+    def test_paired_elif_is_not_stripped(self) -> None:
+        script = (
+            "def main():\n"
+            "    return []\n"
+            "\n"
+            'if __name__ == "__main__":\n'
+            "    main()\n"
+            'elif __name__ == "__test__":\n'
+            "    pass\n"
+        )
+        _, removed, skipped = _strip_python_main_guards(script)
+        assert removed == 0
+        assert skipped == 1
+
+    def test_unpaired_guard_is_stripped(self) -> None:
+        script = 'def main():\n    return []\n\nif __name__ == "__main__":\n    main()\n'
+        cleaned, removed, skipped = _strip_python_main_guards(script)
+        assert "__main__" not in cleaned
+        assert removed == 1
+        assert skipped == 0
+
+    def test_strip_wrapper_marks_paired_clauses(self) -> None:
+        script = (
+            "def main():\n"
+            "    return []\n"
+            "\n"
+            'if __name__ == "__main__":\n'
+            "    main()\n"
+            "else:\n"
+            "    print('x')\n"
+        )
+        cleaned, notes = _strip_runner_unsafe_blocks(script, "python")
+        assert "if __name__" in cleaned  # preserved verbatim
+        assert any("paired else/elif" in n for n in notes)
+
+    def test_validate_flags_paired_guard_as_blocking(self) -> None:
+        script = (
+            "def main():\n"
+            "    return []\n"
+            "\n"
+            'if __name__ == "__main__":\n'
+            "    main()\n"
+            "else:\n"
+            "    print('x')\n"
+        )
+        warnings = _validate_script(script, "python", "task")
+        blocking = [w for w in warnings if _is_blocking_warning(w)]
+        # The paired-clause warning must be blocking — agents need to fix it
+        # by hand.
+        assert any("paired else/elif" in w for w in blocking)
+
+    def test_paired_clause_detector(self) -> None:
+        paired = 'if __name__ == "__main__":\n    pass\nelse:\n    pass\n'
+        plain = 'if __name__ == "__main__":\n    pass\n'
+        assert _python_main_guard_has_paired_clause(paired) is True
+        assert _python_main_guard_has_paired_clause(plain) is False
+
+    def test_guard_followed_by_unrelated_code_at_module_indent(self) -> None:
+        # Sanity: the body ends at the next module-level statement that is
+        # NOT an else/elif — we must strip cleanly.
+        script = 'if __name__ == "__main__":\n    main()\n\ndef helper():\n    return 1\n'
+        cleaned, removed, skipped = _strip_python_main_guards(script)
+        assert "__main__" not in cleaned
+        assert "def helper" in cleaned
+        assert removed == 1
+        assert skipped == 0
+
+
+class TestAssessRunOutputQualitySummaryDetection:
+    """Severity-4 summary detection (operator-precedence bug)."""
+
+    def test_sev4_without_keyword_counts_as_summary(self) -> None:
+        parsed = {
+            "issues": [
+                {
+                    "issue title": "All replicas healthy",
+                    "issue description": "x" * 60,
+                    "issue next steps": "y" * 30,
+                    "issue severity": 4,
+                }
+            ]
+        }
+        notes = _assess_run_output_quality(parsed)
+        # The "no high-severity issues and no severity-4 summary" warning
+        # must NOT fire — this is the contract-compliant case.
+        assert not any("severity-4 summary" in n for n in notes)
+
+    def test_sev1_alone_does_not_count_as_summary(self) -> None:
+        parsed = {
+            "issues": [
+                {
+                    "issue title": "Pod CrashLoopBackOff",
+                    "issue description": "x" * 60,
+                    "issue next steps": "y" * 30,
+                    "issue severity": 1,
+                }
+            ]
+        }
+        notes = _assess_run_output_quality(parsed)
+        # sev-1 is "high severity" so the summary requirement is satisfied
+        # via that branch — no missing-summary warning.
+        assert not any("severity-4 summary" in n for n in notes)
+
+    def test_sev2_alone_missing_summary_warns(self) -> None:
+        parsed = {
+            "issues": [
+                {
+                    "issue title": "Some non-critical thing",
+                    "issue description": "x" * 60,
+                    "issue next steps": "y" * 30,
+                    "issue severity": 2,
+                }
+            ]
+        }
+        notes = _assess_run_output_quality(parsed)
+        # sev-2 is high-severity-ish (1-3) so summary not required.
+        assert not any("severity-4 summary" in n for n in notes)
+
+    def test_no_issues_warns(self) -> None:
+        notes = _assess_run_output_quality({"issues": []})
+        assert any("zero issues" in n for n in notes)
+
+    def test_summary_title_explicit(self) -> None:
+        parsed = {
+            "issues": [
+                {
+                    "issue title": "Cluster health summary",
+                    "issue description": "x" * 60,
+                    "issue next steps": "y" * 30,
+                    "issue severity": 4,
+                }
+            ]
+        }
+        notes = _assess_run_output_quality(parsed)
+        assert not any("severity-4 summary" in n for n in notes)
+
+
+class TestSizeWarningSurfacing:
+    """Soft ``size_warning`` must reach the JSON response (Bugbot #4)."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    def test_run_script_surfaces_size_warning(self, mock_post, mock_loc, mock_ws) -> None:
+        from runwhen_platform_mcp.server import run_script
+
+        mock_ws.return_value = "test-ws"
+        mock_loc.return_value = "loc-1"
+        mock_post.return_value = (200, {"runId": "run-1"})
+        script = "def main():\n    return []\n" + ("    # padding\n" * 200)
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_SOFT_MAX_BYTES", 100),
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 100_000),
+        ):
+            result = self._run(
+                run_script(
+                    workspace_name="test-ws",
+                    script=script,
+                    interpreter="python",
+                )
+            )
+        data = json.loads(result)
+        assert data["runId"] == "run-1"
+        assert "size_warning" in data
+        assert "base64" in data["size_warning"]
+        assert data["script_bytes"] == len(script.encode("utf-8"))
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_and_parse_artifacts",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch(
+        "runwhen_platform_mcp.server.asyncio.sleep",
+        new=mock.AsyncMock(),
+    )
+    def test_run_script_and_wait_surfaces_size_warning(
+        self, mock_parse, mock_get, mock_post, mock_loc, mock_ws
+    ) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_loc.return_value = "loc-1"
+        mock_post.return_value = (200, {"runId": "run-1"})
+        mock_get.return_value = {"status": "SUCCEEDED", "artifacts": []}
+        mock_parse.return_value = {
+            "issues": [
+                {
+                    "issue title": "Cluster healthy summary",
+                    "issue description": "x" * 60,
+                    "issue next steps": "y" * 30,
+                    "issue severity": 4,
+                }
+            ],
+            "stdout": "",
+            "stderr": "",
+            "report": "",
+        }
+        script = (
+            "def main():\n"
+            "    cnt = 0\n"
+            "    return [{'issue title': f't {cnt}', 'issue description': f'd {cnt}',\n"
+            "             'issue severity': 4, 'issue next steps': f'n {cnt}'}]\n"
+        ) + ("    # padding\n" * 200)
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_SOFT_MAX_BYTES", 100),
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 100_000),
+        ):
+            result = self._run(
+                run_script_and_wait(
+                    workspace_name="test-ws",
+                    script=script,
+                    interpreter="python",
+                )
+            )
+        data = json.loads(result)
+        assert "size_warning" in data
+        assert "base64" in data["size_warning"]
+        assert data["script_bytes"] == len(script.encode("utf-8"))
+
+
+class TestIssueSeverityRegex:
+    """``_PY_ISSUE_SEVERITY_INVALID_RE`` must not flag valid quoted severities."""
+
+    def _quality(self, severity_literal: str) -> list[str]:
+        script = (
+            "def main():\n"
+            "    return [{\n"
+            '        "issue title": f"t {x}",\n'
+            '        "issue description": f"d {x} with detail",\n'
+            f'        "issue severity": {severity_literal},\n'
+            '        "issue next steps": f"do {y}"\n'
+            "    }]\n"
+        )
+        return _assess_issue_quality_static(script, "python", "task")
+
+    def test_valid_bare_severities_not_flagged(self) -> None:
+        for valid in ("1", "2", "3", "4"):
+            notes = self._quality(valid)
+            assert not any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"bare severity {valid!r} should not be flagged: {notes!r}"
+            )
+
+    def test_valid_quoted_severities_not_flagged(self) -> None:
+        for valid in ('"1"', '"2"', '"3"', '"4"', "'1'", "'2'", "'3'", "'4'"):
+            notes = self._quality(valid)
+            assert not any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"quoted severity {valid!r} should not be flagged: {notes!r}"
+            )
+
+    def test_invalid_bare_severities_flagged(self) -> None:
+        for invalid in ("0", "5", "6", "9", "10", "42"):
+            notes = self._quality(invalid)
+            assert any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"bare severity {invalid!r} should be flagged: {notes!r}"
+            )
+
+    def test_invalid_quoted_severities_flagged(self) -> None:
+        for invalid in ('"0"', '"5"', '"10"', "'0'", "'9'"):
+            notes = self._quality(invalid)
+            assert any("severity" in n.lower() and "1-4" in n for n in notes), (
+                f"quoted severity {invalid!r} should be flagged: {notes!r}"
+            )
