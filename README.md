@@ -424,6 +424,15 @@ The server exposes these tools, grouped by use case.
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
+| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Internal git URL for `rw-generic-codecollection` (airgap). Shared default for Tool Builder runbook + SLI bundles. |
+| `MCP_GENERIC_CODECOLLECTION_REF` | No | Git ref for the generic codecollection mirror (default: `main`). |
+| `MCP_TOOL_BUILDER_RUNBOOK_*` | No | Override Tool Builder runbook code bundle (`REPO_URL`, `REF`, `PATH`). |
+| `MCP_TOOL_BUILDER_SLI_*` | No | Override Tool Builder SLI code bundle (`REPO_URL`, `REF`, `PATH`). |
+| `MCP_CRON_SLI_*` | No | Override cron-scheduler SLI code bundle (`REPO_URL`, `REF`, `PATH`; default repo: `rw-workspace-utils`). |
+| `MCP_POLL_INTERVAL_S` | No | Seconds between script run status polls (default: `5`). |
+| `MCP_MAX_POLL_DURATION_S` | No | Max seconds to wait for a script run (default: `300`). |
+| `MCP_ARTIFACT_SETTLE_DELAY_S` | No | Delay before fetching run artifacts (default: `2`). |
+| `MCP_GENERIC_SLX_ICON` | No | Default SLX icon URL when none is provided at commit time. |
 
 **HTTP / OAuth only** (when `MCP_TRANSPORT=http`; see [OAuth for remote HTTP deployments](#oauth-for-remote-http-deployments)):
 
