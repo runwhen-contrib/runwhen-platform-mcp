@@ -21,6 +21,8 @@ from runwhen_platform_mcp.server import (
     _assess_script_size,
     _azure_credentials_hint,
     _build_persona_payload,
+    _build_server_instructions,
+    _build_skills_instructions_block,
     _classify_secret,
     _decode_script_base64,
     _decode_script_gzip_base64,
@@ -3542,3 +3544,100 @@ class TestGetWorkspaceSecretsHandlesEnvVarCollisions:
         assert "AWS_ACCESS_KEY_ID" in names
         assert "AWS_ACCESS_KEY_ID_2" in names
         assert "AWS_ACCESS_KEY_ID_3" in names
+
+
+class TestSkillsInstructionsAreDynamic:
+    """Server instructions must derive the SKILLS section from the live index.
+
+    Regression for Bugbot LOW ("Hardcoded skill count in instructions").
+    The skill count and key-skill list were previously hard-coded as
+    string literals in ``_build_server_instructions``, which drifted from
+    reality whenever a skill was added or removed.
+    """
+
+    def test_count_matches_live_skill_index(self) -> None:
+        # The advertised number of skills must match what ``list_skills``
+        # / ``resources/list`` actually expose.
+        import runwhen_platform_mcp.server as srv
+
+        live_count = len(srv._get_skill_index())
+        text = _build_server_instructions()
+        # The instructions either include the SKILLS block (with the
+        # right count) or omit it entirely when zero skills are present.
+        if live_count == 0:
+            assert "SKILL.md" not in text
+        else:
+            assert f"exposes {live_count} SKILL.md " in text
+
+    def test_listed_names_match_live_skill_index(self) -> None:
+        # Every discovered skill must appear in the instructions block.
+        import runwhen_platform_mcp.server as srv
+
+        live_names = sorted(srv._get_skill_index().keys())
+        text = _build_server_instructions()
+        for name in live_names:
+            assert f"`{name}`" in text, (
+                f"Skill {name!r} is not advertised in the instructions block"
+            )
+
+    def test_no_more_hardcoded_count(self) -> None:
+        # Sanity guard: the old "13 SKILL.md" wording must not return
+        # unless it happens to coincide with the live count.
+        import runwhen_platform_mcp.server as srv
+
+        live_count = len(srv._get_skill_index())
+        block = _build_skills_instructions_block()
+        for n in range(0, 100):
+            if n == live_count:
+                continue
+            assert f"exposes {n} SKILL.md" not in block, (
+                f"instructions still claim {n} skills, but live index has {live_count}"
+            )
+
+    def test_zero_skills_omits_section(self) -> None:
+        # When discovery returns nothing (e.g. stripped Docker image),
+        # the SKILLS block is omitted entirely instead of advertising
+        # zero skills.
+        with mock.patch(
+            "runwhen_platform_mcp.server._get_skill_index",
+            return_value={},
+        ):
+            block = _build_skills_instructions_block()
+        assert block == ""
+
+    def test_discovery_failure_omits_section(self) -> None:
+        # Discovery is best-effort: if ``_get_skill_index`` raises (e.g.
+        # filesystem error during a probe), the skills block falls back
+        # to empty rather than crashing server start.
+        with mock.patch(
+            "runwhen_platform_mcp.server._get_skill_index",
+            side_effect=RuntimeError("disk gone"),
+        ):
+            block = _build_skills_instructions_block()
+        assert block == ""
+
+    def test_block_reflects_synthetic_skill_set(self) -> None:
+        # Drive the block with a synthetic skill index and confirm the
+        # count + names render correctly.
+        fake_index = {
+            "alpha": {"name": "alpha", "description": "..."},
+            "bravo": {"name": "bravo", "description": "..."},
+            "charlie": {"name": "charlie", "description": "..."},
+        }
+        with mock.patch(
+            "runwhen_platform_mcp.server._get_skill_index",
+            return_value=fake_index,
+        ):
+            block = _build_skills_instructions_block()
+        assert "exposes 3 SKILL.md guides" in block
+        # Names appear alphabetically.
+        assert "Available skills: `alpha`, `bravo`, `charlie`." in block
+
+    def test_singular_grammar_for_single_skill(self) -> None:
+        with mock.patch(
+            "runwhen_platform_mcp.server._get_skill_index",
+            return_value={"only": {"name": "only", "description": "..."}},
+        ):
+            block = _build_skills_instructions_block()
+        assert "exposes 1 SKILL.md guide " in block
+        assert "guides" not in block.split("exposes 1 SKILL.md guide ", 1)[1].split("\n", 1)[0]

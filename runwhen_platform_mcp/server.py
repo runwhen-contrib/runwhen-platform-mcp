@@ -246,33 +246,64 @@ def _build_server_instructions() -> str:
         "- Python/Bash SLI: `main()` returns/writes float 0-1\n\n"
         "REQUIRED TAGS for `commit_slx`: "
         "access='read-write'|'read-only', "
-        "data='logs-bulk'|'config'|'logs-stacktrace'\n\n"
+        "data='logs-bulk'|'config'|'logs-stacktrace'\n\n" + _build_skills_instructions_block()
         #
         # ── Progressive-disclosure skills ──
         #
+        # Derive the skill count and listed names from the live discovery
+        # index (cached on first call). Previously this section hard-coded
+        # both the count ("13 SKILL.md guides") and the list of names,
+        # which silently drifted whenever a skill was added or removed.
+        # See ``_get_skill_index`` / ``_register_skill_resources``.
+    )
+
+
+def _build_skills_instructions_block() -> str:
+    """Build the SKILLS section of the server instructions dynamically.
+
+    Counts and skill names come from ``_get_skill_index`` so the
+    instructions stay in lockstep with what ``list_skills`` /
+    ``resources/list`` actually expose. If no skills are discovered
+    (e.g. a stripped Docker image), we omit the section entirely
+    rather than misleading the agent with an empty advertisement.
+    """
+    try:
+        index = _get_skill_index()
+    except Exception:
+        # Discovery should be best-effort: if the skills directory is
+        # broken at server start we keep the rest of the instructions
+        # intact rather than crashing import.
+        return ""
+
+    skill_names = sorted(index.keys())
+    count = len(skill_names)
+    if count == 0:
+        return ""
+
+    bullet_list = ", ".join(f"`{n}`" for n in skill_names)
+    return (
         "SKILLS (progressive disclosure for any MCP client):\n"
-        "- This server exposes 13 SKILL.md guides as MCP resources under the "
-        "`runwhen-skill://` URI scheme. Each skill has a short description in "
-        "the resource list and a full body fetchable on demand — the "
+        f"- This server exposes {count} SKILL.md "
+        f"guide{'s' if count != 1 else ''} as MCP resources under the "
+        "`runwhen-skill://` URI scheme. Each skill has a short description "
+        "in the resource list and a full body fetchable on demand — the "
         "standards-correct way to keep your context lean.\n"
         "- Cross-vendor clients can also use the `list_skills` and "
         "`get_skill(name)` tool shims to discover and load skills without "
         "touching MCP resources.\n"
-        "- Key skills: `build-runwhen-task`, `run-existing-slx`, "
-        "`discover-secrets`, `discover-locations`, "
-        "`find-and-deploy-codebundle`, `create-ai-assistant`, "
-        "`manage-rules`, `manage-commands`, `manage-knowledge`, "
-        "`configure-resource-path`, `configure-hierarchy`, "
-        "`build-operational-context`, `verify-mcp-setup`.\n"
+        f"- Available skills: {bullet_list}.\n"
         "- ALWAYS prefer reading the relevant skill over guessing — tool "
         "docstrings cross-link to the skills they pair with."
     )
 
 
-mcp = FastMCP(
-    _build_server_name(),
-    instructions=_build_server_instructions(),
-)
+# NOTE: the module-level FastMCP construction is deliberately deferred
+# until *after* the skill-discovery helpers below are defined (see the
+# ``mcp = FastMCP(...)`` block further down). ``_build_server_instructions``
+# now calls ``_get_skill_index`` to derive the SKILLS block from the live
+# discovery cache, so the helpers must exist at call time. Adding any
+# ``@mcp.tool()`` decorators before that block will raise ``NameError``;
+# instead, add them after ``_register_skill_resources(mcp)`` below.
 
 
 # ---------------------------------------------------------------------------
@@ -477,11 +508,22 @@ def _register_one_skill_resource(server: FastMCP, skill: dict[str, Any]) -> None
         return live["body"]
 
 
-# Build the resource set on the stdio MCP instance at import time. The
-# count is surfaced via the instructions block but we don't fail if
-# discovery is empty. HTTP transport registers its own copy on the
-# ``http_mcp`` instance inside ``_build_http_server``.
-_SKILL_RESOURCE_COUNT = _register_skill_resources(mcp)
+# Construct the stdio MCP server *after* the skill helpers above so the
+# instructions block reflects the actual discovered skill set (count +
+# names) rather than a hard-coded list that drifted whenever skills were
+# added or removed. ``_build_server_instructions`` reads from
+# ``_get_skill_index()`` which is now defined.
+mcp = FastMCP(
+    _build_server_name(),
+    instructions=_build_server_instructions(),
+)
+
+# Register each discovered skill as an MCP resource on the stdio
+# instance. HTTP transport registers its own copy on the ``http_mcp``
+# instance inside ``_build_http_server``. We don't capture the count any
+# more — the live cache is the single source of truth and is consulted
+# both by the instructions block above and by ``list_skills``.
+_register_skill_resources(mcp)
 
 
 # ---------------------------------------------------------------------------
