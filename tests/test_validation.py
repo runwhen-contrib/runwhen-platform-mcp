@@ -3344,6 +3344,115 @@ class TestDecodeScriptGzipBase64PreDecodeCap:
                     )
 
 
+class TestCommitSlxCronVsSliMutualExclusion:
+    """``commit_slx`` must reject cron_schedule + ANY SLI script source.
+
+    Regression for Bugbot MEDIUM ("Cron check ignores alternate SLI
+    sources"). The mutex previously only inspected ``sli_script`` (the
+    inline string variant), so callers could combine ``cron_schedule``
+    with the path / base64 / gzip+base64 / base64+path variants and the
+    cron schedule was silently dropped at commit time.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @pytest.mark.parametrize(
+        "sli_kwargs",
+        [
+            {"sli_script": "def main(): return 0.5\n"},
+            {"sli_script_path": "/tmp/sli.py"},
+            {"sli_script_base64": base64.b64encode(b"def main(): return 0.5\n").decode()},
+            {
+                "sli_script_gzip_base64": base64.b64encode(
+                    gzip.compress(b"def main(): return 0.5\n")
+                ).decode()
+            },
+            {"sli_script_base64_path": "/tmp/sli.b64"},
+        ],
+        ids=[
+            "inline",
+            "path",
+            "base64",
+            "gzip_base64",
+            "base64_path",
+        ],
+    )
+    def test_each_sli_source_blocks_cron_schedule(self, sli_kwargs) -> None:
+        # All five SLI sources must trigger the mutex. None of the path
+        # variants is read off disk (the guard fires before _resolve_script
+        # runs), so the path values don't have to point at real files.
+        result = self._run(
+            commit_slx(
+                slx_name="my-task",
+                alias="My Task",
+                statement="Things should work",
+                workspace_name="test-ws",
+                script="def main():\n    return []\n",
+                interpreter="python",
+                cron_schedule="0 9 * * *",
+                access="read-only",
+                data="logs-bulk",
+                **sli_kwargs,
+            )
+        )
+        data = json.loads(result)
+        assert "error" in data
+        # The error must reference both halves of the mutex so the agent
+        # knows which to drop.
+        assert "cron_schedule" in data["error"].lower()
+        assert "sli" in data["error"].lower()
+        assert "mutually exclusive" in data["error"].lower() or "pick one" in data["error"].lower()
+
+    def test_mutex_does_not_overfire_without_cron(self) -> None:
+        # Sanity: a bare ``sli_script`` (or any SLI source) with NO
+        # ``cron_schedule`` must NOT trigger the mutex. The five
+        # parametrized cases above cover EACH SLI source triggering the
+        # mutex when paired with cron; this case proves the mutex
+        # doesn't false-fire when cron is absent. We avoid the full
+        # commit pipeline (which reaches PAPI) by mocking the workspace
+        # resolver: the error we care about either won't appear or will
+        # appear after the mutex point, but never as the mutex error.
+        with (
+            mock.patch(
+                "runwhen_platform_mcp.server._resolve_workspace",
+                new_callable=mock.AsyncMock,
+                return_value="test-ws",
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server._papi_post",
+                new_callable=mock.AsyncMock,
+                return_value=(400, {"detail": "downstream"}),
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server._get_token",
+                return_value="test-token",
+            ),
+            mock.patch(
+                "runwhen_platform_mcp.server.RUNWHEN_TOKEN",
+                "test-token",
+            ),
+        ):
+            result = self._run(
+                commit_slx(
+                    slx_name="my-task",
+                    alias="My Task",
+                    statement="Things should work",
+                    workspace_name="test-ws",
+                    script="def main():\n    return []\n",
+                    interpreter="python",
+                    sli_script="def main():\n    return 0.5\n",
+                    access="read-only",
+                    data="logs-bulk",
+                    task_title="",
+                )
+            )
+        data = json.loads(result)
+        err = data.get("error", "")
+        # Downstream may surface ANY error, but never the mutex error.
+        assert "Cannot specify both an SLI script and cron_schedule" not in err
+
+
 class TestGetWorkspaceSecretsHandlesEnvVarCollisions:
     """Two keys mapped to the same env var must both surface.
 

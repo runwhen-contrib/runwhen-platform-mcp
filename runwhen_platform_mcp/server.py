@@ -6156,12 +6156,27 @@ async def commit_slx(
                 }
             )
 
-    if sli_script and cron_schedule:
+    # ``sli_script`` is one of FIVE script-source parameters: inline,
+    # path (stdio), base64, gzip+base64, base64+path (stdio). Any of them
+    # commits the SLX to a custom-SLI branch that emits a 0-1 metric, which
+    # is incompatible with cron_schedule (the cron branch instead runs the
+    # task on a schedule and emits no SLI). Only checking ``sli_script``
+    # would let the other four sources silently win and drop the cron
+    # schedule at commit time.
+    if cron_schedule and (
+        sli_script is not None
+        or sli_script_path
+        or sli_script_base64
+        or sli_script_gzip_base64
+        or sli_script_base64_path
+    ):
         return _json_response(
             {
-                "error": "Cannot specify both sli_script and cron_schedule. "
-                "Use sli_script for a custom SLI metric, or cron_schedule "
-                "to trigger the runbook on a schedule.",
+                "error": "Cannot specify both an SLI script and cron_schedule. "
+                "Use any of sli_script / sli_script_path / sli_script_base64 / "
+                "sli_script_gzip_base64 / sli_script_base64_path for a custom "
+                "SLI metric, or cron_schedule to trigger the runbook on a "
+                "schedule. They are mutually exclusive — pick one.",
             }
         )
 
