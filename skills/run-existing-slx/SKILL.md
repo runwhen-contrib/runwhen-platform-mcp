@@ -50,6 +50,14 @@ run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 run_slx(slx_name="k8s-namespace-check", workspace_name="my-workspace", task_titles="Check Pod Status||Check Pod Restarts")
 ```
 
+> **Default to `task_titles="*"`.** SLX runbooks register task names as the
+> literal Robot variable `${TASK_TITLE}` (resolved at runtime), not the
+> resolved string. Passing the literal title (e.g. `"Check Pod Status"`)
+> returns empty `passed_titles`. The MCP now rejects such literals with a
+> hint to use `"*"`, which the platform expands to `["${TASK_TITLE}"]` and
+> Robot resolves correctly. Pass `"${TASK_TITLE}"` explicitly only if you
+> are certain the runbook expects a specific Robot variable name.
+
 ### Full discovery-to-execution flow
 
 ```
