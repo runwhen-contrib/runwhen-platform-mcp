@@ -4995,13 +4995,40 @@ def _decode_script_gzip_base64(data: str, *, label: str = "script_gzip_base64") 
         import base64, gzip
         base64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")
 
-    Decompression is bounded by ``SCRIPT_HARD_MAX_BYTES`` so a small encoded
-    payload that expands to many megabytes (decompression bomb) is rejected
-    before exhausting memory. The full :func:`_assess_script_size` check
-    still runs on the decoded UTF-8 string downstream.
+    Three layered defences against oversized / malicious input:
+
+    1. Encoded-length cap on the **outer** base64 blob — rejects huge
+       payloads before ``base64.b64decode`` allocates anything. This is
+       the symmetric mirror of the check in :func:`_decode_script_base64`.
+       A compressed-then-base64 payload that decompresses to ``cap`` bytes
+       would have encoded size at most ~``4/3 * cap`` (gzip can't expand
+       data appreciably for real inputs), so a cap on the encoded length
+       at the same threshold is safe for legitimate payloads.
+
+    2. Streaming gzip decompression bounded by
+       :data:`SCRIPT_HARD_MAX_BYTES` — defends against decompression
+       bombs whose compressed form is small but whose decompressed form
+       is gigabytes.
+
+    3. Final :func:`_assess_script_size` check on the decoded UTF-8
+       string downstream — defence-in-depth in case env-var changes
+       between the helper and the caller.
     """
+    stripped = data.strip()
+
+    max_encoded = ((SCRIPT_HARD_MAX_BYTES + 2) // 3) * 4 + 4
+    if len(stripped) > max_encoded:
+        raise ValueError(
+            f"Invalid {label}: encoded payload is {len(stripped)} bytes; "
+            f"the compressed input alone would exceed the hard cap of "
+            f"{SCRIPT_HARD_MAX_BYTES} bytes (RUNWHEN_SCRIPT_HARD_MAX_BYTES) "
+            "after decoding. Deploy as a registry codebundle "
+            "(search_registry + deploy_registry_codebundle) or split into "
+            "multiple SLXs."
+        )
+
     try:
-        raw = base64.b64decode(data.strip().encode("ascii"), validate=True)
+        raw = base64.b64decode(stripped.encode("ascii"), validate=True)
     except ValueError as exc:
         raise ValueError(
             f"Invalid {label}: outer base64 layer failed to decode. "

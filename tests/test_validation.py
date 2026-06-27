@@ -3033,20 +3033,27 @@ class TestGzipDecodeRejectsDecompressionBomb:
     """
 
     def test_bomb_rejected_below_hard_cap(self) -> None:
-        # A few KB of compressed zeros expands to many MB. Pin the hard
-        # cap to a small value so this test is fast and deterministic.
-        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 4096):
+        # A few KB of compressed zeros expands to many MB. Pin the cap
+        # high enough that the encoded blob fits under the pre-decode
+        # cap but the decompressed output still trips the streaming
+        # gzip cap. This exercises the STREAMING defence specifically;
+        # the pre-decode cap is tested separately.
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 16384):
             payload = b"0" * (10 * 1024 * 1024)  # 10 MB of zeros
             compressed = gzip.compress(payload)
             encoded = base64.b64encode(compressed).decode("ascii")
-            # The compressed size is small (compresses extremely well),
-            # so the base64 payload itself fits well under any envelope.
-            assert len(encoded) < 50 * 1024, "test would not exercise the bomb path"
+            # The compressed blob is ~10KB → encoded ~13KB, comfortably
+            # under the ~21KB pre-decode cap (so we exercise the
+            # streaming defence, not the pre-decode short-circuit).
+            assert len(encoded) < 21_000, "test would skip the streaming defence"
             try:
                 _decode_script_gzip_base64(encoded)
             except ValueError as exc:
                 msg = str(exc).lower()
-                assert "exceeds the hard cap" in msg or "decompressed" in msg
+                # Either the streaming cap message or (defensively) the
+                # decompressed-bytes overflow message is acceptable —
+                # both indicate the bomb was caught after decode.
+                assert "decompressed script exceeds the hard cap" in msg
                 assert "registry codebundle" in msg
             else:
                 raise AssertionError("expected ValueError for decompression bomb")
@@ -3279,6 +3286,62 @@ class TestDecodeScriptBase64SizeCap:
                 except ValueError:
                     continue
                 raise AssertionError(f"{fn.__name__} accepted oversize payload")
+
+
+class TestDecodeScriptGzipBase64PreDecodeCap:
+    """``_decode_script_gzip_base64`` must reject huge encoded blobs before decode.
+
+    Regression for Bugbot MEDIUM ("Gzip path skips base64 size cap"). The
+    streaming gzip cap only defends after ``base64.b64decode`` runs — so
+    a large outer base64 blob could still allocate the compressed buffer
+    in memory even when the would-be decompressed output is over the cap.
+    """
+
+    def test_huge_encoded_blob_rejected_before_b64decode(self) -> None:
+        # Pin the cap small. A 400 KB encoded blob exceeds the encoded
+        # budget; ``base64.b64decode`` must never be called.
+        with (
+            mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024),
+            mock.patch(
+                "runwhen_platform_mcp.server.base64.b64decode",
+                side_effect=AssertionError("b64decode must not run"),
+            ),
+        ):
+            huge = "A" * 400_000
+            try:
+                _decode_script_gzip_base64(huge)
+            except ValueError as exc:
+                msg = str(exc).lower()
+                assert "encoded payload" in msg
+                assert "registry codebundle" in msg or "split" in msg
+            else:
+                raise AssertionError("expected pre-decode rejection")
+
+    def test_legitimate_gzip_payload_still_decodes(self) -> None:
+        # A real compressed script that fits well under the cap round-trips.
+        src = "def main():\n    return [{'issue title': 'x', 'issue severity': 4}]\n"
+        encoded = base64.b64encode(gzip.compress(src.encode("utf-8"))).decode("ascii")
+        assert _decode_script_gzip_base64(encoded) == src
+
+    def test_pre_decode_cap_matches_base64_helper(self) -> None:
+        # Both helpers derive their encoded-length cap from the same
+        # formula. Pin the hard cap and confirm: an encoded string of
+        # exactly ``max_encoded + 1`` characters is rejected by BOTH.
+        with mock.patch("runwhen_platform_mcp.server.SCRIPT_HARD_MAX_BYTES", 1024):
+            # The cap formula: ceil(SCRIPT_HARD_MAX_BYTES * 4 / 3) + 4.
+            max_encoded = ((1024 + 2) // 3) * 4 + 4
+            payload = "A" * (max_encoded + 100)
+            for fn in (_decode_script_base64, _decode_script_gzip_base64):
+                try:
+                    fn(payload)
+                except ValueError as exc:
+                    assert "encoded payload" in str(exc).lower()
+                else:
+                    raise AssertionError(
+                        f"{fn.__name__} did not reject pre-decode for "
+                        f"{len(payload)}-byte encoded input (cap formula "
+                        f"max_encoded = {max_encoded})"
+                    )
 
 
 class TestGetWorkspaceSecretsHandlesEnvVarCollisions:
