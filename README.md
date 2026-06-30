@@ -528,6 +528,44 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
+### Local MCP against staging (no container rebuild)
+
+To iterate on MCP server code against a live environment (e.g. staging) without
+pushing Docker images, run the server in **stdio mode** from your checkout and
+point Cursor (or any MCP client) at the local binary:
+
+```bash
+cd runwhen-platform-mcp
+pip install -e .
+export RW_API_URL="https://papi.staging.shared.runwhen.com"
+export RUNWHEN_TOKEN="<your PAT or JWT>"
+export DEFAULT_WORKSPACE="stg-test"   # optional default
+runwhen-platform-mcp
+```
+
+**Cursor `mcp.json` example** (use the venv binary path after `pip install -e .`):
+
+```json
+{
+  "mcpServers": {
+    "runwhen-staging-local": {
+      "command": "/path/to/runwhen-platform-mcp/.venv/bin/runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.staging.shared.runwhen.com",
+        "RUNWHEN_TOKEN": "<PAT or JWT>",
+        "DEFAULT_WORKSPACE": "stg-test"
+      }
+    }
+  }
+}
+```
+
+Changes to `runwhen_platform_mcp/server.py` take effect after restarting the MCP
+server in Cursor (disable/re-enable the server or reload the window). Only
+deploy a remote HTTP MCP container when you need OAuth or a shared team endpoint.
+
+**Token:** RunWhen UI → Profile → Personal Tokens, or `POST {RW_API_URL}/api/v3/token/`.
+
 Optional Git hooks (Ruff check + format, same as CI):
 
 ```bash

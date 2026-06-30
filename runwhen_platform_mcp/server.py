@@ -685,7 +685,7 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
     for artifact in output_data.get("artifacts", []):
         signed_url = artifact.get("signedUrl")
         atype = artifact.get("type", "")
-        if not signed_url or atype not in ("log", "issues"):
+        if not signed_url or atype not in ("log", "issues", "debug"):
             continue
 
         content = await _fetch_artifact_content(signed_url)
@@ -693,6 +693,8 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
             continue
 
         artifact["content"] = content
+
+        result.setdefault("artifact_urls", {})[atype] = signed_url
 
         if atype == "issues":
             for line in content.strip().splitlines():
@@ -703,28 +705,33 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
                     issue = json.loads(line)
                     if not issue or not isinstance(issue, dict):
                         continue
-                    if not issue.get("title") and len(issue) == 0:
+                    norm = _normalize_issue_keys(issue)
+                    if not any(norm.values()):
                         continue
-                    result["issues"].append(
-                        {
-                            k: v
-                            for k, v in issue.items()
-                            if k
-                            in (
-                                "title",
-                                "severity",
-                                "details",
-                                "nextSteps",
-                                "expected",
-                                "actual",
-                                "reproduceHint",
-                                "taskName",
-                                "observedAt",
-                            )
-                        }
-                    )
+                    parsed_issue: dict[str, Any] = {
+                        "title": norm["title"],
+                        "details": norm["description"],
+                        "nextSteps": norm["next_steps"],
+                        "severity": norm["severity"],
+                    }
+                    for k, v in issue.items():
+                        if k in (
+                            "expected",
+                            "actual",
+                            "reproduceHint",
+                            "taskName",
+                            "observedAt",
+                        ):
+                            parsed_issue[k] = v
+                    result["issues"].append(parsed_issue)
                 except json.JSONDecodeError:
                     pass
+
+        elif atype == "debug":
+            text = re.sub(r"<[^>]+>", " ", content)
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                result["debug_log_snippet"] = text[:4000]
 
         elif atype == "log":
             for line in content.strip().splitlines():
@@ -4743,13 +4750,200 @@ def _extract_secret_keys(raw: Any) -> list[str]:
                     out.append(k)
         return out
     if isinstance(raw, dict):
-        # Some PAPI versions return ``{"keys": [...]}`` or
-        # ``{"results": [...]}``.
-        for field in ("keys", "results", "secret_keys", "secretKeys"):
+        # FastAPI SecretsKeysResponse uses ``{"secrets": [...]}``.
+        for field in ("secrets", "keys", "results", "secret_keys", "secretKeys"):
             value = raw.get(field)
             if isinstance(value, list):
                 return _extract_secret_keys(value)
     return []
+
+
+def _is_workspace_secret_key(value: str) -> bool:
+    """True when *value* looks like a full workspaceKey (not a vault list name)."""
+    return ":" in value or "@" in value
+
+
+def _vault_key_to_workspace_key(vault_key: str, platform: str) -> str:
+    """Best-effort vault list name → workspaceKey for author/run and commit_slx."""
+    base = vault_key.split("/")[-1]
+    if platform == "kubernetes" or base.lower() == "kubeconfig":
+        return f"k8s:file@secret/{vault_key}:{base}"
+    if platform == "azure" and "credential" in vault_key.lower():
+        return f"k8s:file@secret/{vault_key}:credentials"
+    if platform in ("gcp", "aws") and "credential" in vault_key.lower():
+        return f"k8s:file@secret/{vault_key}:credentials"
+    return f"k8s:file@secret/{vault_key}:{base}"
+
+
+async def _collect_secrets_from_slxs(
+    workspace: str,
+    *,
+    max_sample: int = 20,
+) -> dict[str, Any]:
+    """Scan committed SLX runbooks for ``secretsProvided`` / ``secrets_provided``."""
+    mappings: dict[str, dict[str, Any]] = {}
+    slxs_scanned = 0
+    slxs_with_secrets = 0
+    try:
+        slxs_data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs")
+        slxs_list = (
+            slxs_data.get("results", slxs_data) if isinstance(slxs_data, dict) else slxs_data
+        )
+        if not isinstance(slxs_list, list):
+            return {"mappings": {}, "slxs_scanned": 0, "slxs_with_secrets": 0}
+        for slx_item in slxs_list:
+            name = slx_item.get("shortName") or slx_item.get("name", "")
+            if not name or name == "debugslx":
+                continue
+            try:
+                rb = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/{name}/runbook")
+            except Exception:
+                continue
+            slxs_scanned += 1
+            spec = rb.get("spec", {}) if isinstance(rb, dict) else {}
+            secrets = spec.get("secretsProvided") or spec.get("secrets_provided") or []
+            if secrets:
+                slxs_with_secrets += 1
+            for entry in secrets:
+                if not isinstance(entry, dict):
+                    continue
+                env_name = str(entry.get("name") or "")
+                wkey = str(entry.get("workspaceKey") or entry.get("workspace_key") or "")
+                if not env_name or not wkey:
+                    continue
+                bucket = mappings.setdefault(
+                    env_name,
+                    {"workspaceKey": wkey, "slx_examples": [], "count": 0},
+                )
+                if bucket["workspaceKey"] != wkey:
+                    variants = bucket.setdefault("variants", [])
+                    if wkey not in variants:
+                        variants.append(wkey)
+                bucket["count"] += 1
+                examples: list[str] = bucket["slx_examples"]
+                if len(examples) < 3 and name not in examples:
+                    examples.append(name)
+            if slxs_scanned >= max_sample:
+                break
+    except Exception:
+        pass
+    return {
+        "mappings": mappings,
+        "slxs_scanned": slxs_scanned,
+        "slxs_with_secrets": slxs_with_secrets,
+    }
+
+
+async def _resolve_secret_vars_for_author(
+    workspace: str,
+    secret_vars: dict[str, str] | None,
+    *,
+    slx_secrets: dict[str, Any] | None = None,
+    vault_keys: list[str] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve short vault names to full workspaceKey values for author/run."""
+    if not secret_vars:
+        return {}, []
+    notes: list[str] = []
+    resolved: dict[str, str] = {}
+    if slx_secrets is None:
+        slx_data = await _collect_secrets_from_slxs(workspace)
+        slx_mappings: dict[str, Any] = slx_data.get("mappings", {})
+    else:
+        slx_mappings = slx_secrets.get("mappings", slx_secrets)
+    vault_set = set(vault_keys or [])
+
+    for env_name, value in secret_vars.items():
+        if _is_workspace_secret_key(value):
+            resolved[env_name] = value
+            continue
+        slx_entry = slx_mappings.get(env_name) or slx_mappings.get(value)
+        if isinstance(slx_entry, dict) and slx_entry.get("workspaceKey"):
+            wkey = str(slx_entry["workspaceKey"])
+            resolved[env_name] = wkey
+            examples = slx_entry.get("slx_examples") or []
+            ex = ", ".join(examples[:2]) if examples else "nearby SLXs"
+            notes.append(
+                f"Resolved secret_vars[{env_name!r}] from {value!r} to workspaceKey "
+                f"{wkey!r} (copied pattern from {ex})."
+            )
+            continue
+        lookup_key = value if value in vault_set else env_name if env_name in vault_set else value
+        platform, _ = _classify_secret(lookup_key)
+        if lookup_key in vault_set or platform != "other":
+            wkey = _vault_key_to_workspace_key(lookup_key, platform)
+            resolved[env_name] = wkey
+            if wkey != value:
+                notes.append(
+                    f"Expanded secret_vars[{env_name!r}]={value!r} to workspaceKey "
+                    f"{wkey!r}. author/run and commit_slx require full workspaceKey "
+                    "values, not vault list names alone."
+                )
+            continue
+        resolved[env_name] = value
+        notes.append(
+            f"Could not resolve secret_vars[{env_name!r}]={value!r} to a workspaceKey. "
+            "Call get_workspace_secrets (secrets_from_slxs) or inspect an existing "
+            "SLX runbook's secretsProvided and copy the workspaceKey verbatim."
+        )
+    return resolved, notes
+
+
+def _interpret_author_run_final_status(
+    final_status: str,
+    parsed: dict[str, Any],
+    *,
+    run_type: str = "task",
+    has_secrets: bool = False,
+    secret_resolution_notes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Explain author/debug run status for agents (passed_titles semantics)."""
+    issues = parsed.get("issues") or []
+    stdout = parsed.get("stdout") or ""
+    stderr = parsed.get("stderr") or ""
+    hints: list[str] = list(secret_resolution_notes or [])
+
+    if final_status == "SUCCEEDED":
+        meaning = (
+            "Runner reported SUCCEEDED (non-empty passed_titles from the debug robot runbook)."
+        )
+    elif final_status == "FAILED":
+        meaning = (
+            "Runner reported FAILED. Author/debug runs derive status from passed_titles "
+            "(see PAPI author/run), not from whether your Python main() returned cleanly. "
+            "The debug runbook hardcodes TASK_TITLE='dev-test'. Empty passed_titles → FAILED "
+            "even when the script ran."
+        )
+        if not issues and not stdout and not stderr:
+            hints.append(
+                "No issues, stdout, or stderr were parsed. Check debug_log_snippet in this "
+                "response, or call get_run_output for the log.html artifact. Typical causes: "
+                "wrong secret_vars (short key vs full workspaceKey), import-time errors, "
+                "or robot preflight failure before main() runs."
+            )
+        elif not issues and (stdout or stderr):
+            hints.append(
+                "Stdout/stderr present but zero issues parsed. Ensure main() returns a list "
+                "of dicts with 'issue title', 'issue description', 'issue severity' (1-4), "
+                "and 'issue next steps'."
+            )
+    elif final_status == "RUNNING":
+        meaning = "Polling stopped before the run finished (MCP_MAX_POLL_DURATION_S exceeded)."
+        hints.append("Poll with get_run_status / get_run_output, or raise MCP_MAX_POLL_DURATION_S.")
+    else:
+        meaning = f"Unexpected status {final_status!r}."
+
+    if has_secrets and final_status == "FAILED" and not secret_resolution_notes:
+        hints.append(
+            "If you passed secret_vars like {'kubeconfig': 'kubeconfig'}, re-run after "
+            "get_workspace_secrets returns secrets_from_slxs with full workspaceKey values."
+        )
+    if run_type == "sli" and final_status == "FAILED" and not issues:
+        hints.append(
+            "SLI runs expect main() to return a float 0–1; failures may still show as FAILED here."
+        )
+
+    return {"meaning": meaning, "hints": hints}
 
 
 @mcp.tool()
@@ -4818,11 +5012,44 @@ async def get_workspace_secrets(
             platform_collisions[env_var] = [bucket[env_var]]
         platform_collisions[env_var].append(key)
 
+    secret_vars_for_author_run: dict[str, dict[str, str]] = {}
+    for platform, bucket in recommended_secret_vars.items():
+        author_bucket: dict[str, str] = {}
+        for env_var, vault_key in bucket.items():
+            author_bucket[env_var] = _vault_key_to_workspace_key(vault_key, platform)
+        if author_bucket:
+            secret_vars_for_author_run[platform] = author_bucket
+
+    slx_secret_data: dict[str, Any] | None = None
+    if not keys:
+        slx_secret_data = await _collect_secrets_from_slxs(ws)
+        slx_mappings = slx_secret_data.get("mappings", {})
+        if slx_mappings:
+            from_slxs: dict[str, dict[str, str]] = {}
+            for env_name, meta in slx_mappings.items():
+                if not isinstance(meta, dict):
+                    continue
+                wkey = meta.get("workspaceKey")
+                if not wkey:
+                    continue
+                platform, _ = _classify_secret(env_name)
+                from_slxs.setdefault(platform, {})[env_name] = str(wkey)
+                secret_vars_for_author_run.setdefault(platform, {})[env_name] = str(wkey)
+            if from_slxs:
+                recommended_secret_vars = {**recommended_secret_vars, **from_slxs}
+
     response: dict[str, Any] = {
         "workspace": ws,
         "secrets": keys,
         "platform_groups": platform_groups,
         "recommended_secret_vars": recommended_secret_vars,
+        "secret_vars_for_author_run": secret_vars_for_author_run,
+        "author_run_semantics": (
+            "For run_script / run_script_and_wait / commit_slx, secret_vars VALUES must be "
+            "full workspaceKey strings (e.g. k8s:file@secret/kubeconfig:kubeconfig), not bare "
+            "vault list names. Use secret_vars_for_author_run or secrets_from_slxs below. "
+            "The MCP server auto-expands short keys when possible."
+        ),
         "runtime_semantics": (
             "Workspace secrets are injected into scripts as FILE PATHS, "
             "not literal values. Read them with: "
@@ -4831,6 +5058,9 @@ async def get_workspace_secrets(
         ),
         "common_pitfalls": [
             "Treating secret env vars as literal values instead of file paths.",
+            "Passing vault list names (e.g. kubeconfig) as secret_vars VALUES — use the full "
+            "workspaceKey from secret_vars_for_author_run or copy from a committed SLX's "
+            "secretsProvided.",
             "Using uppercase 'KUBECONFIG' as the env-var name — by convention "
             "it stays lowercase 'kubeconfig' to match the workspace key.",
             "Forgetting azure_credentials (or the 4-tuple "
@@ -4839,11 +5069,23 @@ async def get_workspace_secrets(
         ],
         "skill_reference": f"{SKILL_URI_SCHEME}discover-secrets",
         "next_step_hint": (
-            "Pick the entry under recommended_secret_vars that matches your "
-            "task's target platform and pass it as secret_vars= to commit_slx "
-            "or run_script. Merge multiple groups for multi-cloud tasks."
+            "Pass secret_vars_for_author_run (full workspaceKey values) to run_script* or "
+            "commit_slx. When the vault list is empty, use secrets_from_slxs copied from "
+            "nearby committed SLXs."
         ),
     }
+    if slx_secret_data and slx_secret_data.get("mappings"):
+        response["secrets_from_slxs"] = slx_secret_data["mappings"]
+        response["slxs_scanned_for_secrets"] = slx_secret_data.get("slxs_scanned", 0)
+        response["slxs_with_secrets"] = slx_secret_data.get("slxs_with_secrets", 0)
+        if not keys:
+            response["vault_list_empty"] = True
+            response["common_pitfalls"].insert(
+                0,
+                "get_workspace_secrets returned an empty vault key list, but committed SLXs "
+                "may still wire secrets via secretsProvided on their runbook — see "
+                "secrets_from_slxs for env-var → workspaceKey patterns to copy.",
+            )
     if secret_var_collisions:
         # Only include the field when collisions exist — keeps the
         # response shape clean for the common single-secret case.
@@ -5490,21 +5732,33 @@ async def run_script(
     except ValueError as exc:
         return _json_response({"error": str(exc)})
 
+    resolved_secrets: dict[str, str] = {}
+    secret_notes: list[str] = []
+    if secret_vars:
+        vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
+        vault_keys = _extract_secret_keys(vault_raw)
+        resolved_secrets, secret_notes = await _resolve_secret_vars_for_author(
+            ws, secret_vars, vault_keys=vault_keys
+        )
+
     body: dict[str, Any] = {
         "command": script,
         "location": location,
         "run_type": run_type,
         "interpreter": interpreter,
         "envVars": env_vars or {},
-        "secretVars": secret_vars or {},
+        "secretVars": resolved_secrets,
     }
 
     status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
     # PAPI's response is a dict; surface the soft size advisory alongside the
     # run_id without clobbering whatever PAPI returned.
-    if size_warning and isinstance(data, dict):
-        data.setdefault("size_warning", size_warning)
-        data.setdefault("script_bytes", len(script.encode("utf-8")))
+    if isinstance(data, dict):
+        if secret_notes:
+            data.setdefault("secret_resolution_notes", secret_notes)
+        if size_warning:
+            data.setdefault("size_warning", size_warning)
+            data.setdefault("script_bytes", len(script.encode("utf-8")))
     return _json_response(data)
 
 
@@ -5682,13 +5936,22 @@ async def run_script_and_wait(
     except ValueError as exc:
         return _json_response({"error": str(exc)})
 
+    resolved_secrets: dict[str, str] = {}
+    secret_notes: list[str] = []
+    if secret_vars:
+        vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
+        vault_keys = _extract_secret_keys(vault_raw)
+        resolved_secrets, secret_notes = await _resolve_secret_vars_for_author(
+            ws, secret_vars, vault_keys=vault_keys
+        )
+
     body: dict[str, Any] = {
         "command": script,
         "location": location,
         "run_type": run_type,
         "interpreter": interpreter,
         "envVars": {**(env_vars or {}), **(runtime_var_overrides or {})},
-        "secretVars": secret_vars or {},
+        "secretVars": resolved_secrets,
     }
 
     _, run_data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
@@ -5733,17 +5996,38 @@ async def run_script_and_wait(
         "stderr": parsed["stderr"],
         "report": parsed["report"],
     }
+    if parsed.get("debug_log_snippet"):
+        result["debug_log_snippet"] = parsed["debug_log_snippet"]
+    if parsed.get("artifact_urls"):
+        result["artifact_urls"] = parsed["artifact_urls"]
+    if secret_notes:
+        result["secret_resolution_notes"] = secret_notes
+        result["secret_vars_resolved"] = resolved_secrets
+    result["status_interpretation"] = _interpret_author_run_final_status(
+        status,
+        parsed,
+        run_type=run_type,
+        has_secrets=bool(secret_vars),
+        secret_resolution_notes=secret_notes,
+    )
     if size_warning:
         result["size_warning"] = size_warning
         result["script_bytes"] = len(script.encode("utf-8"))
     if quality_notes:
         result["issue_quality_notes"] = quality_notes
-        result["issue_quality_message"] = (
-            "The task ran successfully, but the issue payloads violate the "
-            "RunWhen reporting contract. workspace_chat surfaces only issues "
-            "(not stdout), so empty/stub issues mean operators cannot see "
-            "what the task observed. Fix these before committing the SLX."
-        )
+        if status == "SUCCEEDED":
+            result["issue_quality_message"] = (
+                "The task ran successfully, but the issue payloads violate the "
+                "RunWhen reporting contract. workspace_chat surfaces only issues "
+                "(not stdout), so empty/stub issues mean operators cannot see "
+                "what the task observed. Fix these before committing the SLX."
+            )
+        else:
+            result["issue_quality_message"] = (
+                "Issue payloads have contract-quality problems. Note: finalStatus "
+                f"is {status!r} — see status_interpretation for author/run semantics "
+                "(FAILED often means empty passed_titles, not necessarily zero issues)."
+            )
     return _json_response(result)
 
 
@@ -5753,6 +6037,28 @@ async def run_script_and_wait(
 
 SLX_RUN_MAX_POLL_S = 300
 SLX_RUN_POLL_INTERVAL_S = 5
+
+
+def _papi_run_requests(session_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """RunSession run_requests list — PAPI v3 returns camelCase ``runRequests``."""
+    reqs = session_data.get("run_requests") or session_data.get("runRequests") or []
+    return reqs if isinstance(reqs, list) else []
+
+
+def _run_request_completed(rr: dict[str, Any]) -> bool:
+    """True when a run request has finished (responseTime set)."""
+    if rr.get("is_completed") or rr.get("isCompleted"):
+        return True
+    return bool(rr.get("response_time") or rr.get("responseTime"))
+
+
+def _run_request_field(rr: dict[str, Any], snake: str, camel: str, default: Any = "") -> Any:
+    """Read a run-request field accepting snake_case or camelCase keys."""
+    if snake in rr:
+        return rr[snake]
+    if camel in rr:
+        return rr[camel]
+    return default
 
 
 @mcp.tool()
@@ -5921,8 +6227,8 @@ async def run_slx(
         elapsed += sleep_s
         try:
             session_data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/{session_id}")
-            run_requests = session_data.get("run_requests", [])
-            if run_requests and all(rr.get("response_time") for rr in run_requests):
+            run_requests = _papi_run_requests(session_data)
+            if run_requests and all(_run_request_completed(rr) for rr in run_requests):
                 run_status = "completed"
         except ValueError:
             pass
@@ -5939,7 +6245,7 @@ async def run_slx(
         )
 
     # Step 3: Return results — issues are embedded in run_requests
-    run_requests = session_data.get("run_requests", [])
+    run_requests = _papi_run_requests(session_data)
     first_rr = run_requests[0] if run_requests else {}
     result: dict[str, Any] = {
         "status": "completed",
@@ -5948,9 +6254,9 @@ async def run_slx(
         "session_id": session_id,
         "run_request_id": first_rr.get("id"),
         "elapsed_seconds": elapsed,
-        "passed_titles": first_rr.get("passed_titles", ""),
-        "failed_titles": first_rr.get("failed_titles", ""),
-        "skipped_titles": first_rr.get("skipped_titles", ""),
+        "passed_titles": _run_request_field(first_rr, "passed_titles", "passedTitles"),
+        "failed_titles": _run_request_field(first_rr, "failed_titles", "failedTitles"),
+        "skipped_titles": _run_request_field(first_rr, "skipped_titles", "skippedTitles"),
         "issues": first_rr.get("issues", []),
     }
     return _json_response(result)
@@ -6394,10 +6700,17 @@ async def commit_slx(
     committed_types: list[str] = []
     runbook_payload: dict[str, Any] | None = None
     sli_payload: dict[str, Any] | None = None
+    secret_resolution_notes: list[str] = []
 
     if task_type == "task":
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
+        if secret_vars:
+            vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
+            vault_keys = _extract_secret_keys(vault_raw)
+            secret_vars, secret_resolution_notes = await _resolve_secret_vars_for_author(
+                ws, secret_vars, vault_keys=vault_keys
+            )
         rb_config = [
             {"name": "TASK_TITLE", "value": task_title},
             {"name": "GEN_CMD", "value": script_b64},
@@ -6459,6 +6772,12 @@ async def commit_slx(
     elif task_type == "sli":
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
+        if secret_vars:
+            vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
+            vault_keys = _extract_secret_keys(vault_raw)
+            secret_vars, secret_resolution_notes = await _resolve_secret_vars_for_author(
+                ws, secret_vars, vault_keys=vault_keys
+            )
         sli_config = [
             {"name": "GEN_CMD", "value": script_b64},
             {"name": "INTERPRETER", "value": interpreter},
@@ -6520,6 +6839,8 @@ async def commit_slx(
             "the issue 'description' and 'next steps' before relying on this "
             "task."
         )
+    if secret_resolution_notes:
+        result["secret_resolution_notes"] = secret_resolution_notes
     return _json_response(result)
 
 

@@ -31,9 +31,12 @@ from runwhen_platform_mcp.server import (
     _ensure_required_tags,
     _extract_env_vars,
     _extract_secret_keys,
+    _fetch_and_parse_artifacts,
     _fetch_known_runtime_vars,
     _form_persona_full_name,
+    _interpret_author_run_final_status,
     _is_blocking_warning,
+    _is_workspace_secret_key,
     _looks_like_runtime_var_error,
     _normalize_chat_persona_scope_id,
     _parse_skill_file,
@@ -43,6 +46,7 @@ from runwhen_platform_mcp.server import (
     _resolve_assistant_short_name,
     _resolve_command_assistant_name,
     _resolve_script,
+    _resolve_secret_vars_for_author,
     _scripts_have_identical_content,
     _skills_root,
     _strip_python_main_guards,
@@ -51,6 +55,7 @@ from runwhen_platform_mcp.server import (
     _validate_runtime_vars,
     _validate_script,
     _validate_slx_name,
+    _vault_key_to_workspace_key,
     commit_slx,
     get_registry_codebundle,
     get_skill,
@@ -646,6 +651,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
         mock_location.return_value = "my-runner"
         mock_post.return_value = (200, {"runId": "run-123"})
         mock_get.side_effect = [
+            {"secrets": []},
             {"status": "SUCCEEDED"},
             {"artifacts": []},
         ]
@@ -675,6 +681,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
         mock_location.return_value = "my-runner"
         mock_post.return_value = (200, {"runId": "run-123"})
         mock_get.side_effect = [
+            {"secrets": []},
             {"status": "SUCCEEDED"},
             {"artifacts": []},
         ]
@@ -703,6 +710,7 @@ class TestRunScriptAndWaitRunTimeVarOverrides:
         mock_location.return_value = "my-runner"
         mock_post.return_value = (200, {"runId": "run-123"})
         mock_get.side_effect = [
+            {"secrets": []},
             {"status": "SUCCEEDED"},
             {"artifacts": []},
         ]
@@ -1159,6 +1167,38 @@ class TestRunSlxTaskTitlesLiteralRejected:
         )
         data = json.loads(result)
         assert data["status"] == "completed"
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    @mock.patch(
+        "runwhen_platform_mcp.server.asyncio.sleep",
+        new=mock.AsyncMock(),
+    )
+    def test_completes_on_camelcase_run_requests(self, mock_get, mock_post, mock_ws) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_post.return_value = (200, {"id": "sess-1"})
+        mock_get.return_value = {
+            "runRequests": [
+                {
+                    "id": "rr-1",
+                    "responseTime": "2026-06-25T20:00:00Z",
+                    "passedTitles": "MCP Deployment Replica Check",
+                    "issues": [{"title": "healthy"}],
+                }
+            ],
+        }
+        result = self._run(
+            run_slx(
+                slx_name="my-task",
+                workspace_name="test-ws",
+                task_titles="*",
+            )
+        )
+        data = json.loads(result)
+        assert data["status"] == "completed"
+        assert data["passed_titles"] == "MCP Deployment Replica Check"
+        assert data["issues"][0]["title"] == "healthy"
 
     @mock.patch(
         "runwhen_platform_mcp.server._fetch_known_runtime_vars",
@@ -1804,12 +1844,14 @@ class TestSizeWarningSurfacing:
 
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
-    def test_run_script_surfaces_size_warning(self, mock_post, mock_loc, mock_ws) -> None:
+    def test_run_script_surfaces_size_warning(self, mock_post, mock_get, mock_loc, mock_ws) -> None:
         from runwhen_platform_mcp.server import run_script
 
         mock_ws.return_value = "test-ws"
         mock_loc.return_value = "loc-1"
+        mock_get.return_value = {"secrets": []}
         mock_post.return_value = (200, {"runId": "run-1"})
         script = "def main():\n    return []\n" + ("    # padding\n" * 200)
         with (
@@ -1847,7 +1889,11 @@ class TestSizeWarningSurfacing:
         mock_ws.return_value = "test-ws"
         mock_loc.return_value = "loc-1"
         mock_post.return_value = (200, {"runId": "run-1"})
-        mock_get.return_value = {"status": "SUCCEEDED", "artifacts": []}
+        mock_get.side_effect = [
+            {"secrets": []},
+            {"status": "SUCCEEDED"},
+            {"artifacts": []},
+        ]
         mock_parse.return_value = {
             "issues": [
                 {
@@ -2208,9 +2254,199 @@ class TestExtractSecretKeys:
     def test_dict_with_results_field(self) -> None:
         assert _extract_secret_keys({"results": [{"key": "a"}]}) == ["a"]
 
+    def test_dict_with_secrets_field(self) -> None:
+        assert _extract_secret_keys({"secrets": ["kubeconfig", "slack"]}) == [
+            "kubeconfig",
+            "slack",
+        ]
+
     def test_unsupported_shape_returns_empty(self) -> None:
         assert _extract_secret_keys("not-a-list") == []
         assert _extract_secret_keys(None) == []
+
+
+class TestWorkspaceSecretKeyHelpers:
+    def test_is_workspace_secret_key(self) -> None:
+        assert _is_workspace_secret_key("k8s:file@secret/kubeconfig:kubeconfig") is True
+        assert _is_workspace_secret_key("kubeconfig") is False
+
+    def test_vault_key_to_workspace_key_kubeconfig(self) -> None:
+        wkey = _vault_key_to_workspace_key("kubeconfig", "kubernetes")
+        assert wkey == "k8s:file@secret/kubeconfig:kubeconfig"
+
+
+class TestFetchAndParseArtifacts:
+    """Parse report.jsonl / issues.jsonl / log.html from author run output."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @staticmethod
+    def _output_data(log_body: str = "", issues_body: str = "", debug_body: str = "") -> dict:
+        artifacts = []
+        if log_body:
+            artifacts.append({"type": "log", "signedUrl": "https://example.com/report.jsonl"})
+        if issues_body:
+            artifacts.append({"type": "issues", "signedUrl": "https://example.com/issues.jsonl"})
+        if debug_body:
+            artifacts.append({"type": "debug", "signedUrl": "https://example.com/log.html"})
+        return {"artifacts": artifacts}
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_artifact_content",
+        new_callable=mock.AsyncMock,
+    )
+    def test_parses_stdout_stderr_and_report_from_report_jsonl(self, mock_fetch) -> None:
+        report_jsonl = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "obj": "Command stdout: SUMMARY: scanned 52 pods, 0 bad phases\n",
+                        "fmt": "pre",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "obj": "Robot preflight completed",
+                        "fmt": "pre",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "obj": {
+                            "severity": 4,
+                            "title": "All pods healthy",
+                            "details": "every pod OK",
+                            "nextSteps": "none",
+                        },
+                        "fmt": "issue",
+                    }
+                ),
+                json.dumps({"obj": "Command stderr: warning: deprecated flag\n", "fmt": "pre"}),
+            ]
+        )
+
+        async def side_effect(url: str) -> str:
+            if url.endswith("report.jsonl"):
+                return report_jsonl
+            return ""
+
+        mock_fetch.side_effect = side_effect
+
+        result = self._run(_fetch_and_parse_artifacts(self._output_data(log_body=report_jsonl)))
+
+        assert result["stdout"] == "SUMMARY: scanned 52 pods, 0 bad phases\n"
+        assert result["stderr"] == "warning: deprecated flag\n"
+        assert "Robot preflight completed" in result["report"]
+        assert "All pods healthy" not in result["report"]
+        assert result["issues"] == []
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_artifact_content",
+        new_callable=mock.AsyncMock,
+    )
+    def test_parses_issues_jsonl_with_snake_and_camel_keys(self, mock_fetch) -> None:
+        issues_jsonl = json.dumps(
+            {
+                "issue title": "1 pod(s) with restarts",
+                "issue description": "details here",
+                "issue severity": 2,
+                "issue next steps": "kubectl describe pod",
+            }
+        )
+
+        async def side_effect(url: str) -> str:
+            if url.endswith("issues.jsonl"):
+                return issues_jsonl
+            return ""
+
+        mock_fetch.side_effect = side_effect
+
+        result = self._run(_fetch_and_parse_artifacts(self._output_data(issues_body=issues_jsonl)))
+
+        assert len(result["issues"]) == 1
+        assert result["issues"][0]["title"] == "1 pod(s) with restarts"
+        assert result["issues"][0]["details"] == "details here"
+        assert result["issues"][0]["severity"] == "2"
+        assert result["stdout"] == ""
+        assert result["report"] == ""
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._fetch_artifact_content",
+        new_callable=mock.AsyncMock,
+    )
+    def test_empty_stdout_prefix_yields_empty_string(self, mock_fetch) -> None:
+        """Production report.jsonl often has ``Command stdout: `` with no body."""
+        report_jsonl = json.dumps({"obj": "Command stdout: ", "fmt": "pre"})
+
+        mock_fetch.return_value = report_jsonl
+
+        result = self._run(_fetch_and_parse_artifacts(self._output_data(log_body=report_jsonl)))
+
+        assert result["stdout"] == ""
+        assert result["report"] == ""
+
+
+class TestInterpretAuthorRunFinalStatus:
+    def test_failed_empty_output_hints(self) -> None:
+        out = _interpret_author_run_final_status(
+            "FAILED",
+            {"issues": [], "stdout": "", "stderr": ""},
+            has_secrets=True,
+        )
+        assert "passed_titles" in out["meaning"]
+        assert out["hints"]
+
+    def test_succeeded_meaning(self) -> None:
+        out = _interpret_author_run_final_status(
+            "SUCCEEDED",
+            {"issues": [{"title": "ok"}], "stdout": "", "stderr": ""},
+        )
+        assert "SUCCEEDED" in out["meaning"]
+
+
+class TestResolveSecretVarsForAuthor:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._collect_secrets_from_slxs",
+        new_callable=mock.AsyncMock,
+    )
+    def test_expands_short_kubeconfig_via_slx(self, mock_slx) -> None:
+        mock_slx.return_value = {
+            "mappings": {
+                "kubeconfig": {
+                    "workspaceKey": "k8s:file@secret/kubeconfig:kubeconfig",
+                    "slx_examples": ["detect-dev-activity"],
+                    "count": 3,
+                }
+            },
+            "slxs_scanned": 5,
+            "slxs_with_secrets": 2,
+        }
+        resolved, notes = self._run(
+            _resolve_secret_vars_for_author(
+                "stg-test",
+                {"kubeconfig": "kubeconfig"},
+                vault_keys=[],
+            )
+        )
+        assert resolved["kubeconfig"] == "k8s:file@secret/kubeconfig:kubeconfig"
+        assert notes
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._collect_secrets_from_slxs",
+        new_callable=mock.AsyncMock,
+    )
+    def test_passes_through_full_workspace_key(self, mock_slx) -> None:
+        mock_slx.return_value = {"mappings": {}, "slxs_scanned": 0, "slxs_with_secrets": 0}
+        wkey = "k8s:file@secret/kubeconfig:kubeconfig"
+        resolved, notes = self._run(
+            _resolve_secret_vars_for_author("ws", {"kubeconfig": wkey}, vault_keys=[])
+        )
+        assert resolved["kubeconfig"] == wkey
+        assert notes == []
 
 
 class TestGetWorkspaceSecretsWrapper:
@@ -2263,10 +2499,28 @@ class TestGetWorkspaceSecretsWrapper:
     @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
     def test_empty_secrets_response_does_not_crash(self, mock_get, mock_ws) -> None:
         mock_ws.return_value = "test-ws"
-        mock_get.return_value = []
+        mock_get.side_effect = [
+            {"secrets": []},
+            {"results": [{"shortName": "k8s-check"}]},
+            {
+                "spec": {
+                    "secretsProvided": [
+                        {
+                            "name": "kubeconfig",
+                            "workspaceKey": "k8s:file@secret/kubeconfig:kubeconfig",
+                        }
+                    ]
+                }
+            },
+        ]
         result = json.loads(self._run(get_workspace_secrets(workspace_name="test-ws")))
         assert result["secrets"] == []
-        assert result["platform_groups"] == {}
+        assert result["vault_list_empty"] is True
+        assert "kubeconfig" in result["secrets_from_slxs"]
+        assert (
+            result["secret_vars_for_author_run"]["kubernetes"]["kubeconfig"]
+            == "k8s:file@secret/kubeconfig:kubeconfig"
+        )
 
 
 # ---------------------------------------------------------------------------
