@@ -37,6 +37,7 @@ from runwhen_platform_mcp.server import (
     _interpret_author_run_final_status,
     _is_blocking_warning,
     _is_workspace_secret_key,
+    _looks_like_azure_script,
     _looks_like_runtime_var_error,
     _needs_secret_var_resolution,
     _normalize_chat_persona_scope_id,
@@ -945,6 +946,48 @@ class TestAzureCredentialsHint:
         assert hint is None
 
 
+class TestLooksLikeAzureScript:
+    """Regression: Azure guard must not fire on issue text or comments."""
+
+    def test_detects_azure_sdk_import(self) -> None:
+        script = "from azure.identity import DefaultAzureCredential\ndef main():\n    return []\n"
+        assert _looks_like_azure_script(script) is True
+
+    def test_detects_bash_az_cli(self) -> None:
+        script = "main() {\n  az account show\n}\n"
+        assert _looks_like_azure_script(script) is True
+
+    def test_detects_environ_azure_credentials_access(self) -> None:
+        script = 'def main():\n    path = os.environ["azure_credentials"]\n    return []\n'
+        assert _looks_like_azure_script(script) is True
+
+    def test_ignores_azure_credentials_in_issue_text(self) -> None:
+        script = (
+            "def main():\n"
+            "    return [{\n"
+            '        "issue next steps": "add azure_credentials to secret_vars",\n'
+            "    }]\n"
+        )
+        assert _looks_like_azure_script(script) is False
+
+    def test_ignores_az_substring_in_issue_text(self) -> None:
+        script = (
+            "def main():\n"
+            "    return [{\n"
+            '        "issue description": "topaz storage or compare az storage docs",\n'
+            "    }]\n"
+        )
+        assert _looks_like_azure_script(script) is False
+
+    def test_ignores_azure_mentions_in_comments(self) -> None:
+        script = (
+            "# Compare AWS S3 with Azure blob; azure_credentials not used here\n"
+            "def main():\n"
+            "    return []\n"
+        )
+        assert _looks_like_azure_script(script) is False
+
+
 class TestCommitSlxAirgapAndAzureGuards:
     """Integration: commit_slx surfaces the new validation hints."""
 
@@ -996,6 +1039,55 @@ class TestCommitSlxAirgapAndAzureGuards:
         assert "error" in data
         assert "azure" in data["error"].lower()
         assert "azure_credentials" in data["message"]
+
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._get_user_email", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._get_codebundle_ref", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._sync_slx_resources", new_callable=mock.AsyncMock)
+    def test_commit_allows_gcp_script_mentioning_azure_in_issue_text(
+        self,
+        mock_sync,
+        mock_ref,
+        mock_email,
+        mock_location,
+        mock_ws,
+    ) -> None:
+        mock_ws.return_value = "test-ws"
+        mock_location.return_value = "runner-1"
+        mock_email.return_value = "u@example.com"
+        mock_ref.return_value = "main"
+        mock_sync.return_value = (
+            201,
+            {"slx": {"status": "created", "resource_id": 1}, "runbook": {"status": "created"}},
+        )
+        script = (
+            "def main():\n"
+            "    return [{\n"
+            '        "issue title": "GKE node pool healthy",\n'
+            '        "issue description": "Unlike az storage, GKE nodes are fine.",\n'
+            '        "issue severity": 4,\n'
+            '        "issue next steps": "No azure_credentials needed; check kubectl.",\n'
+            "    }]\n"
+        )
+        result = self._run(
+            commit_slx(
+                slx_name="gke-task",
+                alias="GKE Task",
+                statement="Nodes should be ready",
+                workspace_name="test-ws",
+                script=script,
+                interpreter="python",
+                task_type="task",
+                task_title="GKE nodes",
+                secret_vars={"kubeconfig": "k8s:file@secret/kubeconfig:kubeconfig"},
+                access="read-only",
+                data="config",
+            )
+        )
+        data = json.loads(result)
+        assert data.get("status") == "committed", data
+        assert "azure" not in data.get("error", "").lower()
 
     @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
     @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
