@@ -38,9 +38,11 @@ from runwhen_platform_mcp.server import (
     _is_blocking_warning,
     _is_workspace_secret_key,
     _looks_like_runtime_var_error,
+    _needs_secret_var_resolution,
     _normalize_chat_persona_scope_id,
     _parse_skill_file,
     _persona_short_name,
+    _prepare_secret_vars_for_author,
     _python_main_guard_has_paired_clause,
     _register_skill_resources,
     _resolve_assistant_short_name,
@@ -2440,13 +2442,65 @@ class TestResolveSecretVarsForAuthor:
         new_callable=mock.AsyncMock,
     )
     def test_passes_through_full_workspace_key(self, mock_slx) -> None:
-        mock_slx.return_value = {"mappings": {}, "slxs_scanned": 0, "slxs_with_secrets": 0}
         wkey = "k8s:file@secret/kubeconfig:kubeconfig"
         resolved, notes = self._run(
             _resolve_secret_vars_for_author("ws", {"kubeconfig": wkey}, vault_keys=[])
         )
         assert resolved["kubeconfig"] == wkey
         assert notes == []
+        mock_slx.assert_not_called()
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._collect_secrets_from_slxs",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch("runwhen_platform_mcp.server._papi_get", new_callable=mock.AsyncMock)
+    def test_prepare_secret_vars_skips_vault_and_slx_when_prequalified(
+        self, mock_get, mock_slx
+    ) -> None:
+        wkey = "k8s:file@secret/kubeconfig:kubeconfig"
+        resolved, notes = self._run(_prepare_secret_vars_for_author("ws", {"kubeconfig": wkey}))
+        assert resolved == {"kubeconfig": wkey}
+        assert notes == []
+        mock_get.assert_not_called()
+        mock_slx.assert_not_called()
+
+    def test_needs_secret_var_resolution_false_for_workspace_keys(self) -> None:
+        wkey = "k8s:file@secret/kubeconfig:kubeconfig"
+        assert _needs_secret_var_resolution({"kubeconfig": wkey}) is False
+
+    def test_needs_secret_var_resolution_true_for_short_names(self) -> None:
+        assert _needs_secret_var_resolution({"kubeconfig": "kubeconfig"}) is True
+
+    @mock.patch(
+        "runwhen_platform_mcp.server._prepare_secret_vars_for_author",
+        new_callable=mock.AsyncMock,
+    )
+    @mock.patch("runwhen_platform_mcp.server._resolve_workspace", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._resolve_location", new_callable=mock.AsyncMock)
+    @mock.patch("runwhen_platform_mcp.server._papi_post", new_callable=mock.AsyncMock)
+    def test_run_script_uses_prepare_secret_vars_helper(
+        self, mock_post, mock_location, mock_ws, mock_prepare
+    ) -> None:
+        from runwhen_platform_mcp.server import run_script
+
+        mock_ws.return_value = "test-ws"
+        mock_location.return_value = "runner-1"
+        mock_post.return_value = (200, {"runId": "run-1"})
+        wkey = "k8s:file@secret/kubeconfig:kubeconfig"
+        mock_prepare.return_value = ({"kubeconfig": wkey}, [])
+
+        result = self._run(
+            run_script(
+                workspace_name="test-ws",
+                script="def main(): return []",
+                interpreter="python",
+                secret_vars={"kubeconfig": wkey},
+            )
+        )
+        data = json.loads(result)
+        assert data["runId"] == "run-1"
+        mock_prepare.assert_awaited_once_with("test-ws", {"kubeconfig": wkey})
 
 
 class TestGetWorkspaceSecretsWrapper:

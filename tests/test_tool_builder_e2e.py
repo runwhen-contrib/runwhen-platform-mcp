@@ -68,6 +68,15 @@ SECRET_NOTES = [
     f"'{RESOLVED_KUBECONFIG}' (copied pattern from detect-dev-activity)."
 ]
 
+SLI_SCRIPT = '''"""Pod running ratio monitor (e2e fixture)."""
+import os
+
+
+def main():
+    _namespace = os.environ.get("NAMESPACE", "runwhen-env-test")
+    return 51.0 / 52.0
+'''
+
 COMMIT_KWARGS = {
     "slx_name": SLX_NAME,
     "alias": "Pod Restart Check",
@@ -201,6 +210,7 @@ def _full_flow_mocks(*, session_polls: list[dict]):
                     "resource_id": 1902,
                 },
                 "runbook": {"status": "created", "name": "1902", "resource_id": 1900},
+                "sli": {"status": "created", "name": "1902", "resource_id": 1901},
             },
         )
         mock_get.side_effect = [
@@ -291,6 +301,70 @@ def test_tool_builder_validate_test_commit_run_slx_flow() -> None:
     runsession_body = mocks["post"].call_args_list[1][0][1]
     assert runsession_body["runRequests"][0]["slxName"] == f"{WORKSPACE}--{SLX_NAME}"
     assert runsession_body["runRequests"][0]["taskTitles"] == ["*"]
+
+
+def test_tool_builder_task_and_monitor_commit_flow() -> None:
+    """Validate task + SLI, test the task, then commit both runbook and monitor."""
+    slx_name = "e2e-pod-health"
+    commit_kwargs = {
+        **COMMIT_KWARGS,
+        "slx_name": slx_name,
+        "alias": "Pod Health",
+        "statement": "Most pods in the namespace should be running",
+        "sli_script": SLI_SCRIPT,
+        "sli_interval_seconds": 600,
+    }
+
+    with _full_flow_mocks(session_polls=[]) as mocks:
+        task_validate = json.loads(
+            _run(validate_script(script=TASK_SCRIPT, interpreter="python", task_type="task"))
+        )
+        sli_validate = json.loads(
+            _run(validate_script(script=SLI_SCRIPT, interpreter="python", task_type="sli"))
+        )
+        run_data = json.loads(
+            _run(
+                run_script_and_wait(
+                    workspace_name=WORKSPACE,
+                    script=TASK_SCRIPT,
+                    interpreter="python",
+                    env_vars=COMMIT_KWARGS["env_vars"],
+                    secret_vars=COMMIT_KWARGS["secret_vars"],
+                )
+            )
+        )
+        commit_data = json.loads(_run(commit_slx(**commit_kwargs)))
+
+    assert task_validate["valid"] is True, task_validate
+    assert sli_validate["valid"] is True, sli_validate
+    assert sli_validate["blocking_warnings"] == []
+
+    assert run_data["finalStatus"] == "SUCCEEDED", run_data
+    assert len(run_data["issues"]) == 1
+
+    assert commit_data["status"] == "committed", commit_data
+    assert commit_data["slx_name"] == slx_name
+    assert commit_data["committed_types"] == "task + sli (custom script)"
+
+    sync_kwargs = mocks["sync"].call_args.kwargs
+    assert sync_kwargs["slx_name"] == slx_name
+    runbook = sync_kwargs["runbook_payload"]
+    sli_payload = sync_kwargs["sli_payload"]
+    assert runbook is not None
+    assert sli_payload is not None
+
+    rb_config = {c["name"]: c["value"] for c in runbook["config_provided"]}
+    assert rb_config["TASK_TITLE"] == TASK_TITLE
+    assert rb_config["INTERPRETER"] == "python"
+    assert rb_config["NAMESPACE"] == "runwhen-env-test"
+
+    sli_config = {c["name"]: c["value"] for c in sli_payload["config_provided"]}
+    assert sli_config["INTERPRETER"] == "python"
+    assert sli_config["NAMESPACE"] == "runwhen-env-test"
+    assert sli_payload["interval_seconds"] == 600
+
+    sli_secrets = {s["name"]: s["workspaceKey"] for s in sli_payload["secrets_provided"]}
+    assert sli_secrets == {"kubeconfig": RESOLVED_KUBECONFIG}
 
 
 def test_run_slx_camelcase_polling_completes_without_snake_case_keys() -> None:

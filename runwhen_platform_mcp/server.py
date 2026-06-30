@@ -4763,6 +4763,29 @@ def _is_workspace_secret_key(value: str) -> bool:
     return ":" in value or "@" in value
 
 
+def _needs_secret_var_resolution(secret_vars: dict[str, str]) -> bool:
+    """True when any secret_vars value is a short name needing vault/SLX lookup."""
+    return any(not _is_workspace_secret_key(v) for v in secret_vars.values())
+
+
+async def _prepare_secret_vars_for_author(
+    workspace: str,
+    secret_vars: dict[str, str],
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve secret_vars for author/run and commit_slx.
+
+    When every value is already a full workspaceKey, returns immediately without
+    calling secrets-keys or scanning committed SLX runbooks.
+    """
+    if not secret_vars:
+        return {}, []
+    if not _needs_secret_var_resolution(secret_vars):
+        return dict(secret_vars), []
+    vault_raw = await _papi_get(f"/api/v3/workspaces/{workspace}/secrets-keys")
+    vault_keys = _extract_secret_keys(vault_raw)
+    return await _resolve_secret_vars_for_author(workspace, secret_vars, vault_keys=vault_keys)
+
+
 def _vault_key_to_workspace_key(vault_key: str, platform: str) -> str:
     """Best-effort vault list name → workspaceKey for author/run and commit_slx."""
     base = vault_key.split("/")[-1]
@@ -4844,6 +4867,8 @@ async def _resolve_secret_vars_for_author(
     """Resolve short vault names to full workspaceKey values for author/run."""
     if not secret_vars:
         return {}, []
+    if not _needs_secret_var_resolution(secret_vars):
+        return dict(secret_vars), []
     notes: list[str] = []
     resolved: dict[str, str] = {}
     if slx_secrets is None:
@@ -5735,11 +5760,7 @@ async def run_script(
     resolved_secrets: dict[str, str] = {}
     secret_notes: list[str] = []
     if secret_vars:
-        vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-        vault_keys = _extract_secret_keys(vault_raw)
-        resolved_secrets, secret_notes = await _resolve_secret_vars_for_author(
-            ws, secret_vars, vault_keys=vault_keys
-        )
+        resolved_secrets, secret_notes = await _prepare_secret_vars_for_author(ws, secret_vars)
 
     body: dict[str, Any] = {
         "command": script,
@@ -5939,11 +5960,7 @@ async def run_script_and_wait(
     resolved_secrets: dict[str, str] = {}
     secret_notes: list[str] = []
     if secret_vars:
-        vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-        vault_keys = _extract_secret_keys(vault_raw)
-        resolved_secrets, secret_notes = await _resolve_secret_vars_for_author(
-            ws, secret_vars, vault_keys=vault_keys
-        )
+        resolved_secrets, secret_notes = await _prepare_secret_vars_for_author(ws, secret_vars)
 
     body: dict[str, Any] = {
         "command": script,
@@ -6706,10 +6723,8 @@ async def commit_slx(
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
         if secret_vars:
-            vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-            vault_keys = _extract_secret_keys(vault_raw)
-            secret_vars, secret_resolution_notes = await _resolve_secret_vars_for_author(
-                ws, secret_vars, vault_keys=vault_keys
+            secret_vars, secret_resolution_notes = await _prepare_secret_vars_for_author(
+                ws, secret_vars
             )
         rb_config = [
             {"name": "TASK_TITLE", "value": task_title},
@@ -6773,10 +6788,8 @@ async def commit_slx(
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
         if secret_vars:
-            vault_raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-            vault_keys = _extract_secret_keys(vault_raw)
-            secret_vars, secret_resolution_notes = await _resolve_secret_vars_for_author(
-                ws, secret_vars, vault_keys=vault_keys
+            secret_vars, secret_resolution_notes = await _prepare_secret_vars_for_author(
+                ws, secret_vars
             )
         sli_config = [
             {"name": "GEN_CMD", "value": script_b64},
