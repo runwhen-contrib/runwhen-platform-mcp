@@ -1396,23 +1396,46 @@ def _detect_unresolved_placeholders(task_title: str) -> str | None:
     return None
 
 
+_AZURE_ENV_CREDENTIAL_PATTERNS = (
+    re.compile(r"""os\.environ\[['"]azure_credentials['"]\]""", re.I),
+    re.compile(r"""os\.environ\.get\(\s*['"]azure_credentials['"]""", re.I),
+    re.compile(r"""environ\[['"]azure_credentials['"]\]""", re.I),
+)
+
+_AZURE_CODE_PATTERNS = (
+    re.compile(r"\bfrom\s+azure\.", re.I),
+    re.compile(r"\bimport\s+azure(?:\.|\s)", re.I),
+    re.compile(r"\bazure\.identity\b", re.I),
+    re.compile(r"\bazurerm\b", re.I),
+    re.compile(r"\bazure_subscription\b", re.I),
+    re.compile(r"\bazure_tenant\b", re.I),
+    re.compile(r"\.blob\.core\.windows\.net", re.I),
+    re.compile(
+        r"\baz\s+(?:account|ad|aks|acr|group|vm|storage|network|resource|keyvault|login)\b",
+        re.I,
+    ),
+    re.compile(r"""subprocess\.(?:run|call|Popen)\([^)]*['"]az\s""", re.I),
+)
+
+
+def _strip_strings_and_comments_for_heuristic(script: str) -> str:
+    """Drop comments and string literals so issue text cannot trip Azure guards."""
+    without_comments = "\n".join(re.sub(r"#.*$", "", line) for line in script.splitlines())
+    stripped = re.sub(r'""".*?"""', "", without_comments, flags=re.S)
+    stripped = re.sub(r"'''.*?'''", "", stripped, flags=re.S)
+    stripped = re.sub(r'"(?:\\.|[^"\\])*"', "", stripped)
+    stripped = re.sub(r"'(?:\\.|[^'\\])*'", "", stripped)
+    return stripped
+
+
 def _looks_like_azure_script(script: str | None) -> bool:
     """Heuristic: detect scripts that need ``azure_credentials`` on the runner."""
     if not script:
         return False
-    haystack = script.lower()
-    markers = (
-        "az ",
-        "azurerm",
-        "from azure.",
-        "import azure",
-        "azure_subscription",
-        "azure_tenant",
-        "azure_credentials",
-        ".blob.core.windows.net",
-        "az.identity",
-    )
-    return any(marker in haystack for marker in markers)
+    if any(pattern.search(script) for pattern in _AZURE_ENV_CREDENTIAL_PATTERNS):
+        return True
+    scan_target = _strip_strings_and_comments_for_heuristic(script)
+    return any(pattern.search(scan_target) for pattern in _AZURE_CODE_PATTERNS)
 
 
 _AZURE_CREDENTIAL_SECRET_KEYS = ("azure_credentials", "azureCredentials")
