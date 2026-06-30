@@ -39,7 +39,15 @@ def read_secret(env_var):
 get_workspace_secrets(workspace_name="my-workspace")
 ```
 
-This returns key names like `kubeconfig`, `BETA-USER_TOKEN`, `slack`, `ops-suite-sa`. These are the names you reference in `secret_vars` when calling `run_script` or `commit_slx`.
+This returns vault key names when the workspace secrets API lists them. When the
+vault list is **empty**, the response includes **`secrets_from_slxs`**: env-var →
+`workspaceKey` patterns copied from committed SLX runbooks (e.g.
+`k8s:file@secret/kubeconfig:kubeconfig`).
+
+Use **`secret_vars_for_author_run`** (full workspaceKey values) for
+`run_script`, `run_script_and_wait`, and `commit_slx` — not bare vault names
+like `"kubeconfig": "kubeconfig"` unless that value is already a workspaceKey.
+The MCP server auto-expands short keys when it can infer them from SLXs.
 
 ### Step 2: Infer from platform and context
 

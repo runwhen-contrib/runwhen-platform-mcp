@@ -60,6 +60,176 @@ Read these files for complete, contract-compliant script templates:
 - Set `data` tag: `logs-bulk` | `config` | `logs-stacktrace`
 - **`resource_path` MUST start with `custom/`** — the server enforces this automatically. Never place custom tasks under an existing platform resource path (see configure-resource-path skill)
 - **`hierarchy` MUST start with `platform=custom`** — always include `{"name": "platform", "value": "custom"}` as the first tag and `"platform"` as the first hierarchy entry (see configure-hierarchy skill)
+- **`task_title` MUST be a static literal string** — never use `${VAR}` placeholders.
+  Robot Framework resolves `${...}` at suite-parse time, before env vars are injected,
+  which crashes suite setup. The MCP rejects placeholder titles at commit time.
+- **Bash: do not append `main "$@"`** and **Python: do not include `if __name__ == "__main__":`** —
+  the runner sources the file and calls `main()` directly. Both constructs are now
+  auto-stripped before submission, but include neither in source for clarity.
+
+## Always emit a summary issue (severity 4)
+
+Investigation tasks that only raise issues on threshold failures are invisible
+in `workspace_chat` and run-session search when everything looks healthy — stdout
+is not indexed. **Always emit one final severity-4 "Summary" issue unconditionally**
+at the end of the task with the actual numbers (counts, breakdowns, p99s, etc.).
+
+```python
+def main():
+    issues = []
+    # ... investigation logic that may append severity 1-3 issues ...
+    issues.append({
+        "issue title": f"{TASK_TITLE} — Summary",
+        "issue description": (
+            f"Examined {total} resources; {failed} failed; "
+            f"top callers: {top_callers}; lookback={LOOKBACK_DAYS}d."
+        ),
+        "issue severity": 4,
+        "issue next steps": "Informational. Review numbers in description.",
+    })
+    return issues
+```
+
+## Issue payload quality bar — strictly enforced
+
+`workspace_chat` and search surface **only issues**, not stdout/stderr. An
+issue with an empty or stub description is invisible to operators. The MCP
+now both **statically** scans your script (in `validate_script` and
+`commit_slx`) and **dynamically** inspects emitted issues (in
+`run_script_and_wait`) for these violations:
+
+| Field | Minimum | Must include |
+|---|---|---|
+| `issue title` | ≥ 8 chars, non-empty | What was checked + what state was observed |
+| `issue description` | ≥ 40 chars, non-empty | Observed numbers, names, timestamps, thresholds — interpolated from runtime values |
+| `issue next steps` | ≥ 20 chars, non-empty | Concrete remediation: a kubectl/CLI command, runbook URL, owner, or escalation path |
+| `issue severity` | 1, 2, 3, or 4 | Use the scale: 1=critical, 2=high, 3=medium, 4=informational |
+
+Common anti-patterns the MCP will warn on:
+
+- ❌ `"issue description": ""` — empty literal
+- ❌ `"issue title": "Issue found"` — no signal
+- ❌ `"issue next steps": "Investigate."` — no actionable hint
+- ❌ Issue dict with no f-string or string interpolation anywhere — that means
+  no runtime data is being captured. workspace_chat sees only the static literal.
+- ❌ Placeholder tokens: `TODO`, `FIXME`, `XXX`, `lorem ipsum`, `placeholder`, `TBD`
+
+### Good vs bad — Python task
+
+```python
+# BAD — runner shows "no signal" forever
+issues.append({
+    "issue title": "Pod issue",
+    "issue description": "",
+    "issue severity": 2,
+    "issue next steps": "Check pods.",
+})
+
+# GOOD — operator can act without re-running the task
+issues.append({
+    "issue title": f"Pod {pod_name} restarted {restart_count} times in {NAMESPACE}",
+    "issue description": (
+        f"Pod {pod_name} in namespace {NAMESPACE} (cluster {CONTEXT}) has "
+        f"restarted {restart_count} times in the last {LOOKBACK_MIN} minutes. "
+        f"Last termination reason: {last_reason}. Container image: {image}. "
+        f"Owner: {owner_label or 'unknown'}."
+    ),
+    "issue severity": 2,
+    "issue next steps": (
+        f"kubectl --context={CONTEXT} -n {NAMESPACE} describe pod {pod_name} | "
+        f"head -50; then check container logs: kubectl --context={CONTEXT} -n "
+        f"{NAMESPACE} logs {pod_name} -p --tail=200"
+    ),
+})
+```
+
+## Task vs SLI — different output contracts, different scripts
+
+Task runbooks and SLI scripts have **fundamentally different output shapes**
+and **must not share the same body**. The MCP rejects `commit_slx` when
+`script` and `sli_script` have identical content.
+
+| Concept | Task (`task_type='task'`) | SLI (`sli_interpreter` script) |
+|---|---|---|
+| What it returns | `List[Dict]` of issues | One `float` between 0 and 1 |
+| Cardinality | 0..N findings per run | Exactly 1 metric per run |
+| Audience | Operators reading workspace_chat | SLO dashboards, alert evaluators |
+| Typical size | Multi-KB; explanatory | Often <1KB; just a probe |
+
+If you only need an SLI, commit with `task_type='sli'` and omit `script`/
+`sli_script` duplication. If you need both, write the SLI as a *separate*
+lightweight probe that extracts a single number (e.g. failing_pods /
+total_pods) — never copy the task body.
+
+If you want the SLI to simply *run the task on a schedule*, set
+`cron_schedule='*/15 * * * *'` on the task instead — no `sli_script`
+needed.
+
+## Script size and transport limits
+
+MCP HTTP intermediaries impose payload limits (~13KB base64 observed in the
+wild). The MCP now applies size guards on both individual scripts AND on
+the *sum* of `script` + `sli_script` in one `commit_slx` envelope.
+
+| Threshold | Behavior |
+|---|---|
+| ≤ `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` (10KB default) | Silent — ship it |
+| Soft threshold to hard cap | Advisory warning surfaced on the response |
+| > `RUNWHEN_SCRIPT_HARD_MAX_BYTES` (64KB default) | Hard reject — `commit_slx` / `run_script*` return an error |
+| Sum of task + SLI over soft/hard cap | Cumulative warning / reject |
+
+### Choose the right script-source parameter
+
+All script-taking tools (`validate_script`, `run_script`,
+`run_script_and_wait`, `commit_slx`) accept the same matrix. SLI variants
+mirror the names (`sli_script`, `sli_script_base64`, `sli_script_gzip_base64`,
+`sli_script_path`, `sli_script_base64_path`).
+
+| Variant | Best for | Mode |
+|---|---|---|
+| `script` | Small scripts <~5KB, readable | any |
+| `script_base64` | Any size; safe JSON escaping | any |
+| **`script_gzip_base64`** | **>5KB; 3-5x denser than b64 — preferred for large scripts** | **any** |
+| `script_path` | Local file, raw text | stdio only |
+| `script_base64_path` | Local file with base64 blob | stdio only |
+
+Encode `script_gzip_base64` as:
+
+```python
+import base64, gzip
+script_gzip_base64 = base64.b64encode(
+    gzip.compress(script.encode("utf-8"))
+).decode("ascii")
+```
+
+If you hit the soft warning or hard cap, prefer in order:
+
+1. **Compress first** — re-encode with `script_gzip_base64` (and `sli_script_gzip_base64`).
+   A 30KB Python script typically lands at ~7-9KB after gzip+base64.
+2. **Use a registry codebundle** — search with `search_registry` first.
+3. **Split into a custom codebundle** in a git repo and deploy with
+   `deploy_registry_codebundle` (no inline script needed).
+4. **stdio mode escape hatches**: `script_path=/local/file.py` (raw) or
+   `script_base64_path=/local/file.b64` (encoded blob on disk).
+5. **Raise the cap** with `RUNWHEN_SCRIPT_HARD_MAX_BYTES` if your
+   transport is known-good.
+
+## Cloud-specific secret requirements
+
+Some cloud platforms require a canonical secret name in `secret_vars` for the
+runner's suite-setup step to succeed. Missing it causes the task to pass with
+0 issues in ~5 seconds (because suite setup short-circuits).
+
+| Platform | Required `secret_vars` entry |
+|----------|-------------------------------|
+| Azure    | `{"azure_credentials": "azure:sp@cli"}` (or your workspace's Azure SP secret key) |
+| GCP      | `{"gcp_credentials_json": "<workspace-gcp-key>"}` for service-account auth |
+| AWS      | `{"aws_credentials": "<workspace-aws-creds-key>"}` for CLI auth |
+| Kubernetes | `{"kubeconfig": "kubeconfig"}` |
+
+The MCP server now refuses to commit an Azure-flavored SLX without
+`azure_credentials` in `secret_vars` (with an explanatory error). See
+`discover-secrets` skill to find the right key names for your workspace.
 
 ## Runtime Variables (Tasks only — never SLIs)
 
@@ -93,7 +263,10 @@ run_script_and_wait(
 
 ### Using runtime vars in `commit_slx`
 
-Pass the full schema via `runtime_vars`. All four fields are **required**:
+Pass the full schema via `runtime_vars`. All four fields are **required**.
+`default` must be *present* but may be the empty string `""` — that's the
+correct shape for an optional override with no preset (e.g.
+`SCAN_KUBE_CONTEXT` where in-cluster runners need no kubectl context):
 
 ```python
 commit_slx(

@@ -38,12 +38,15 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import hashlib
+import io
 import json
 import os
 import re
 import time
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote, urlencode
 
@@ -61,6 +64,26 @@ DEFAULT_WORKSPACE = os.environ.get("DEFAULT_WORKSPACE", "")
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()
 MCP_SERVER_LABEL = os.environ.get("MCP_SERVER_LABEL", "")
 REGISTRY_URL = os.environ.get("RUNWHEN_REGISTRY_URL", "https://registry.runwhen.com").rstrip("/")
+
+
+def _env_truthy(value: str | None) -> bool:
+    """Parse common truthy env-var values (``1``, ``true``, ``yes``, ``on``)."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# Airgap mode. When enabled, the CodeBundle Registry tools return a clear,
+# non-fatal "registry disabled" response instead of attempting a network call
+# to ``REGISTRY_URL`` (which is unreachable from airgapped customer environments).
+RUNWHEN_AIRGAP = _env_truthy(os.environ.get("RUNWHEN_AIRGAP"))
+
+# Default timeout for registry HTTP requests. Lower than PAPI because the
+# registry is a stateless catalog and an unreachable endpoint should fail fast.
+try:
+    REGISTRY_TIMEOUT_S = float(os.environ.get("RUNWHEN_REGISTRY_TIMEOUT_S", "10"))
+except ValueError:
+    REGISTRY_TIMEOUT_S = 10.0
 # Browser UI base (e.g. https://app.test.runwhen.com). If unset, derived from RW_API_URL
 # by swapping ``papi`` → ``app`` (same pattern as AgentFarm). Required for correct
 # ``chatUrl`` when RW_API_URL is an internal cluster URL.
@@ -223,14 +246,285 @@ def _build_server_instructions() -> str:
         "- Python/Bash SLI: `main()` returns/writes float 0-1\n\n"
         "REQUIRED TAGS for `commit_slx`: "
         "access='read-write'|'read-only', "
-        "data='logs-bulk'|'config'|'logs-stacktrace'"
+        "data='logs-bulk'|'config'|'logs-stacktrace'\n\n" + _build_skills_instructions_block()
+        #
+        # ── Progressive-disclosure skills ──
+        #
+        # Derive the skill count and listed names from the live discovery
+        # index (cached on first call). Previously this section hard-coded
+        # both the count ("13 SKILL.md guides") and the list of names,
+        # which silently drifted whenever a skill was added or removed.
+        # See ``_get_skill_index`` / ``_register_skill_resources``.
     )
 
 
+def _build_skills_instructions_block() -> str:
+    """Build the SKILLS section of the server instructions dynamically.
+
+    Counts and skill names come from ``_get_skill_index`` so the
+    instructions stay in lockstep with what ``list_skills`` /
+    ``resources/list`` actually expose. If no skills are discovered
+    (e.g. a stripped Docker image), we omit the section entirely
+    rather than misleading the agent with an empty advertisement.
+    """
+    try:
+        index = _get_skill_index()
+    except Exception:
+        # Discovery should be best-effort: if the skills directory is
+        # broken at server start we keep the rest of the instructions
+        # intact rather than crashing import.
+        return ""
+
+    skill_names = sorted(index.keys())
+    count = len(skill_names)
+    if count == 0:
+        return ""
+
+    bullet_list = ", ".join(f"`{n}`" for n in skill_names)
+    return (
+        "SKILLS (progressive disclosure for any MCP client):\n"
+        f"- This server exposes {count} SKILL.md "
+        f"guide{'s' if count != 1 else ''} as MCP resources under the "
+        "`runwhen-skill://` URI scheme. Each skill has a short description "
+        "in the resource list and a full body fetchable on demand — the "
+        "standards-correct way to keep your context lean.\n"
+        "- Cross-vendor clients can also use the `list_skills` and "
+        "`get_skill(name)` tool shims to discover and load skills without "
+        "touching MCP resources.\n"
+        f"- Available skills: {bullet_list}.\n"
+        "- ALWAYS prefer reading the relevant skill over guessing — tool "
+        "docstrings cross-link to the skills they pair with."
+    )
+
+
+# NOTE: the module-level FastMCP construction is deliberately deferred
+# until *after* the skill-discovery helpers below are defined (see the
+# ``mcp = FastMCP(...)`` block further down). ``_build_server_instructions``
+# now calls ``_get_skill_index`` to derive the SKILLS block from the live
+# discovery cache, so the helpers must exist at call time. Adding any
+# ``@mcp.tool()`` decorators before that block will raise ``NameError``;
+# instead, add them after ``_register_skill_resources(mcp)`` below.
+
+
+# ---------------------------------------------------------------------------
+# Skills: progressive disclosure for ALL MCP clients
+# ---------------------------------------------------------------------------
+#
+# Skills live as SKILL.md files in ``skills/<skill-name>/`` with YAML
+# frontmatter (``name`` + ``description``). Filesystem-based clients
+# (Cursor, Claude Code, Copilot) discover them through symlinks
+# (.claude/skills, .github/skills), but *cross-vendor* MCP clients
+# (Goose, Continue, Cline, OpenAI Codex CLI, custom Gemini agents, ...)
+# only see what the MCP protocol exposes.
+#
+# We expose each skill *both* as:
+#   1. An MCP **resource** (the standards-correct progressive-disclosure
+#      primitive — every compliant MCP client gets it for free), and
+#   2. ``list_skills()`` / ``get_skill()`` *tool shims* for clients that
+#      under-surface resources in their default UX (some OpenAI / Gemini
+#      function-calling clients ignore non-tool primitives).
+#
+# The result: ANY agent connected via MCP can follow the same progressive
+# disclosure pattern Cursor / Claude Code already use — read a short
+# description, fetch the body on demand, keep the tool surface lean.
+
+# Canonical scheme used in resource URIs so clients can recognise our
+# skills (vs other resource families).
+SKILL_URI_SCHEME = "runwhen-skill://"
+
+# Frontmatter pattern: YAML block delimited by ``---`` at file head.
+_SKILL_FRONTMATTER_RE = re.compile(
+    r"\A---\s*\n(.*?)\n---\s*\n(.*)\Z",
+    re.DOTALL,
+)
+
+
+def _skills_root() -> Path:
+    """Return the canonical skills directory.
+
+    Resolution order:
+      1. ``RUNWHEN_SKILLS_DIR`` env override (tests, custom deployments)
+      2. The bundled ``skills`` data-package, located via
+         :mod:`importlib.resources`. This is the path that works for normal
+         ``pip install`` and the published Docker image — the previous
+         "two parents up from ``server.py``" trick resolved to
+         ``site-packages/skills`` and silently found nothing there because
+         the directory was not shipped with the wheel.
+      3. Legacy repo-root layout, as a last-resort fallback for environments
+         where the package metadata is missing (e.g. running ``server.py``
+         directly out of an unpacked sdist on ``sys.path``).
+    """
+    override = os.environ.get("RUNWHEN_SKILLS_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+
+    # Look up the bundled data-package. This works for both wheel installs
+    # (resolves to ``site-packages/skills``) and editable installs
+    # (resolves to the repo-root ``skills/`` directory).
+    try:
+        from importlib.resources import files as _resource_files
+
+        bundled = _resource_files("skills")
+        # ``files()`` returns a Traversable; we only ship on-disk files, so
+        # str() yields a real filesystem path we can hand to ``Path``.
+        bundled_path = Path(str(bundled)).resolve()
+        if bundled_path.is_dir():
+            return bundled_path
+    except (ModuleNotFoundError, AttributeError, TypeError):
+        # The data-package is missing (very old wheel build, or stripped
+        # install layout). Fall through to the legacy resolver.
+        pass
+
+    return (Path(__file__).resolve().parent.parent / "skills").resolve()
+
+
+def _parse_skill_file(path: Path) -> dict[str, Any] | None:
+    """Read a SKILL.md and return ``{name, description, body, path}``.
+
+    Returns ``None`` when the file is missing required frontmatter so we
+    fail soft at registration time rather than crashing the server.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = _SKILL_FRONTMATTER_RE.match(raw)
+    if not match:
+        return None
+    try:
+        meta = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
+        return None
+    if not isinstance(meta, dict):
+        return None
+    name = meta.get("name")
+    description = meta.get("description")
+    if not isinstance(name, str) or not isinstance(description, str):
+        return None
+    return {
+        "name": name.strip(),
+        "description": description.strip(),
+        "body": match.group(2),
+        "path": str(path),
+    }
+
+
+def _discover_skills(root: Path | None = None) -> list[dict[str, Any]]:
+    """Walk ``skills/*/SKILL.md`` and return parsed skill records.
+
+    Sorted by ``name`` so list_skills output is deterministic across
+    clients and OSes.
+    """
+    base = root or _skills_root()
+    if not base.is_dir():
+        return []
+    skills: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for skill_md in sorted(base.glob("*/SKILL.md")):
+        parsed = _parse_skill_file(skill_md)
+        if parsed is None:
+            continue
+        if parsed["name"] in seen:
+            continue  # de-dup if symlinks introduce a cycle
+        seen.add(parsed["name"])
+        parsed["uri"] = f"{SKILL_URI_SCHEME}{parsed['name']}"
+        skills.append(parsed)
+    return skills
+
+
+# Cache the discovery result. Skills are mostly static at deployment time
+# but we expose a ``reload`` flag on ``get_skill`` to support iterative
+# authoring without a server restart.
+_skill_cache: dict[str, dict[str, Any]] | None = None
+
+
+def _get_skill_index(*, reload: bool = False) -> dict[str, dict[str, Any]]:
+    """Return a ``{name: skill}`` index, populating the cache on first call."""
+    global _skill_cache
+    if _skill_cache is None or reload:
+        _skill_cache = {s["name"]: s for s in _discover_skills()}
+    return _skill_cache
+
+
+def _register_skill_resources(server: FastMCP) -> int:
+    """Register every discovered skill as an MCP resource on ``server``.
+
+    Accepts the target FastMCP instance so the same resources land on both
+    the module-level ``mcp`` (stdio transport) and the HTTP server built
+    later in :func:`_build_http_server`. Previously the registration was
+    hard-coded to ``mcp`` and HTTP clients saw an empty ``resources/list``.
+
+    Returns the number of resources registered. Failures are non-fatal —
+    a malformed skill is skipped, the tool shims (``list_skills`` /
+    ``get_skill``) still work.
+    """
+    skills = list(_get_skill_index().values())
+    registered = 0
+    for skill in skills:
+        try:
+            _register_one_skill_resource(server, skill)
+            registered += 1
+        except Exception:
+            # Don't let a malformed skill take down the whole server.
+            continue
+    return registered
+
+
+def _register_one_skill_resource(server: FastMCP, skill: dict[str, Any]) -> None:
+    """Register a single skill via the ``@server.resource`` decorator.
+
+    The decorator both wraps the function as an MCP resource AND adds it
+    to the server's resource registry; we do NOT need (and must not call)
+    ``server.add_resource`` afterwards.
+
+    The body is fetched live from :func:`_get_skill_index` at request time
+    rather than captured at registration. This keeps the resource path in
+    sync with the tool path: ``get_skill(name, reload=True)`` rebuilds the
+    cache, and the very next ``resources/read`` returns the fresh body.
+    Previously the closure captured a snapshot of ``skill["body"]``, so on-
+    disk edits surfaced through the tool but not through resources.
+    """
+    uri = skill["uri"]
+    name = skill["name"]
+    description = skill["description"]
+    # Capture only the name in the closure; body is looked up live below.
+    skill_name = name
+
+    @server.resource(
+        uri,
+        name=f"skill:{name}",
+        description=description,
+        mime_type="text/markdown",
+        tags={"skill", "runwhen"},
+    )
+    def _skill_resource() -> str:  # pragma: no cover - exercised via mcp client
+        index = _get_skill_index()
+        live = index.get(skill_name)
+        if live is None:
+            # The skill went away between registration and read (rename or
+            # deletion on disk). Return a stable marker so the client gets
+            # a graceful response instead of a 500.
+            return f"Skill {skill_name!r} is no longer available on this server."
+        return live["body"]
+
+
+# Construct the stdio MCP server *after* the skill helpers above so the
+# instructions block reflects the actual discovered skill set (count +
+# names) rather than a hard-coded list that drifted whenever skills were
+# added or removed. ``_build_server_instructions`` reads from
+# ``_get_skill_index()`` which is now defined.
 mcp = FastMCP(
     _build_server_name(),
     instructions=_build_server_instructions(),
 )
+
+# Register each discovered skill as an MCP resource on the stdio
+# instance. HTTP transport registers its own copy on the ``http_mcp``
+# instance inside ``_build_http_server``. We don't capture the count any
+# more — the live cache is the single source of truth and is consulted
+# both by the instructions block above and by ``list_skills``.
+_register_skill_resources(mcp)
+
 
 # ---------------------------------------------------------------------------
 # Tool Builder constants (override via env for airgap / internal git mirrors)
@@ -391,7 +685,7 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
     for artifact in output_data.get("artifacts", []):
         signed_url = artifact.get("signedUrl")
         atype = artifact.get("type", "")
-        if not signed_url or atype not in ("log", "issues"):
+        if not signed_url or atype not in ("log", "issues", "debug"):
             continue
 
         content = await _fetch_artifact_content(signed_url)
@@ -399,6 +693,8 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
             continue
 
         artifact["content"] = content
+
+        result.setdefault("artifact_urls", {})[atype] = signed_url
 
         if atype == "issues":
             for line in content.strip().splitlines():
@@ -409,28 +705,33 @@ async def _fetch_and_parse_artifacts(output_data: dict) -> dict:
                     issue = json.loads(line)
                     if not issue or not isinstance(issue, dict):
                         continue
-                    if not issue.get("title") and len(issue) == 0:
+                    norm = _normalize_issue_keys(issue)
+                    if not any(norm.values()):
                         continue
-                    result["issues"].append(
-                        {
-                            k: v
-                            for k, v in issue.items()
-                            if k
-                            in (
-                                "title",
-                                "severity",
-                                "details",
-                                "nextSteps",
-                                "expected",
-                                "actual",
-                                "reproduceHint",
-                                "taskName",
-                                "observedAt",
-                            )
-                        }
-                    )
+                    parsed_issue: dict[str, Any] = {
+                        "title": norm["title"],
+                        "details": norm["description"],
+                        "nextSteps": norm["next_steps"],
+                        "severity": norm["severity"],
+                    }
+                    for k, v in issue.items():
+                        if k in (
+                            "expected",
+                            "actual",
+                            "reproduceHint",
+                            "taskName",
+                            "observedAt",
+                        ):
+                            parsed_issue[k] = v
+                    result["issues"].append(parsed_issue)
                 except json.JSONDecodeError:
                     pass
+
+        elif atype == "debug":
+            text = re.sub(r"<[^>]+>", " ", content)
+            text = re.sub(r"\s+", " ", text).strip()
+            if text:
+                result["debug_log_snippet"] = text[:4000]
 
         elif atype == "log":
             for line in content.strip().splitlines():
@@ -487,11 +788,15 @@ def _get_token() -> str:
 
 
 def _headers() -> dict[str, str]:
-    return {
+    from runwhen_platform_mcp.tool_trace import trace_headers
+
+    headers = {
         "Authorization": f"Bearer {_get_token()}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
+    headers.update(trace_headers())
+    return headers
 
 
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
@@ -841,6 +1146,191 @@ def _raise_for_papi_status(resp: httpx.Response, path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_PY_MAIN_GUARD_HEAD_RE = re.compile(
+    r"^([ \t]*)if\s+__name__\s*==\s*['\"]__main__['\"]\s*:\s*(?:#.*)?$",
+)
+_BASH_MAIN_INVOKE_RE = re.compile(
+    r'^[ \t]*main\s+(?:"\$@"|\$@|\$\*|"\$\*")\s*(?:#.*)?$',
+    re.MULTILINE,
+)
+
+
+def _python_string_literal_line_set(script: str) -> set[int]:
+    """Return the 1-indexed line numbers that live *inside* a multi-line string.
+
+    Used by :func:`_strip_python_main_guards` to skip any guard-shaped lines
+    that live inside a docstring or a multi-line string. Without this, a
+    regex pass would happily mutilate scripts that *document* the
+    ``if __name__ == "__main__":`` pattern in a docstring or example block.
+
+    Only **interior** lines of multi-line string tokens are returned — i.e.
+    for a string spanning lines ``[start, end]`` (``start < end``), the
+    interior is ``(start, end)``. The opening and closing lines are NOT
+    included because they typically contain code (the leading variable
+    assignment / function call, or the closing quote followed by more code)
+    and may legitimately also carry a guard match somewhere else on the
+    line. The common false-positive case — a guard whose own line contains
+    the ``"__main__"`` literal — has ``start == end`` and so is never
+    flagged here, which is the correct outcome.
+
+    Returns an empty set when the script doesn't tokenize cleanly (e.g. it
+    is bash, or syntactically invalid Python) — the caller then falls back
+    to the original line-by-line behaviour, which is no worse than before.
+    """
+    import tokenize
+    from io import BytesIO
+
+    try:
+        tokens = tokenize.tokenize(BytesIO(script.encode("utf-8")).readline)
+        lines: set[int] = set()
+        for tok in tokens:
+            if tok.type != tokenize.STRING:
+                continue
+            start_line = tok.start[0]
+            end_line = tok.end[0]
+            if end_line > start_line:
+                # Interior lines only: range(start + 1, end) excludes both
+                # endpoints. A docstring on lines 3-7 yields {4, 5, 6}.
+                lines.update(range(start_line + 1, end_line))
+        return lines
+    except (tokenize.TokenError, SyntaxError, IndentationError, UnicodeDecodeError):
+        return set()
+
+
+def _strip_python_main_guards(script: str) -> tuple[str, int, int]:
+    """Remove ``if __name__ == "__main__":`` blocks from a Python script.
+
+    Returns ``(cleaned_script, num_removed, num_skipped_paired)``. A guard is
+    *skipped* when followed by a paired ``elif``/``else:`` clause at the same
+    indentation, because dropping the ``if`` alone would leave invalid Python
+    (orphan ``else:``). For skipped guards the caller should keep the warning
+    blocking so the agent fixes the structure manually.
+
+    Guard-shaped lines that appear *inside* a string literal (docstrings,
+    examples in triple-quoted strings, etc.) are left untouched — see
+    :func:`_python_string_literal_line_set`.
+    """
+    lines = script.splitlines(keepends=True)
+    string_lines = _python_string_literal_line_set(script)
+    output: list[str] = []
+    removed = 0
+    skipped = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # ``i`` is 0-indexed; tokenize line numbers are 1-indexed.
+        if (i + 1) in string_lines:
+            output.append(line)
+            i += 1
+            continue
+        match = _PY_MAIN_GUARD_HEAD_RE.match(line.rstrip("\n").rstrip("\r"))
+        if not match:
+            output.append(line)
+            i += 1
+            continue
+        guard_indent = match.group(1)
+        # Walk the body: every line until we hit a non-blank line whose
+        # leading whitespace is ≤ guard_indent (i.e. dedent to the guard's
+        # level or lower). Blank/comment-only lines at any indent are part
+        # of the body.
+        body_end = i + 1
+        while body_end < len(lines):
+            body_line = lines[body_end]
+            stripped = body_line.lstrip()
+            if not stripped or stripped.startswith("#"):
+                body_end += 1
+                continue
+            line_indent = body_line[: len(body_line) - len(stripped)]
+            # A line at the same indent as the guard ends the body.
+            if len(line_indent) <= len(guard_indent):
+                break
+            body_end += 1
+        # Check whether the line that ended the body is a paired clause
+        # belonging to the same ``if``.
+        paired = False
+        if body_end < len(lines):
+            tail = lines[body_end].lstrip()
+            tail_indent = lines[body_end][: len(lines[body_end]) - len(tail)]
+            if tail_indent == guard_indent and (
+                tail.startswith("else:")
+                or tail.startswith("else ")
+                or tail.startswith("elif ")
+                or tail.startswith("elif(")
+            ):
+                paired = True
+        if paired:
+            # Refuse to strip — would orphan the else/elif clause. Keep the
+            # original lines verbatim and let validate_script surface the
+            # blocking warning so the agent fixes it.
+            output.extend(lines[i:body_end])
+            skipped += 1
+            i = body_end
+        else:
+            # Replace the entire guard (head + body) with a single ``pass``
+            # statement at the guard's indent. This is important for guards
+            # nested inside another control-flow block: removing the lines
+            # outright would leave the parent block empty (a ``SyntaxError``).
+            # ``pass`` is a harmless no-op at any indent — at module level it
+            # adds a single line; inside a parent ``if``/``def``/``for`` it
+            # preserves the parent's syntactic requirement of a body.
+            output.append(f"{guard_indent}pass\n")
+            removed += 1
+            i = body_end
+    return "".join(output), removed, skipped
+
+
+def _strip_runner_unsafe_blocks(script: str, interpreter: str) -> tuple[str, list[str]]:
+    """Remove constructs that break the RunWhen runner contract.
+
+    Returns the cleaned script and a list of human-readable notes describing
+    what was stripped. Non-destructive when nothing matches.
+
+    Python: ``if __name__ == "__main__":`` guards cause the runner to fire a
+    second ``main()`` invocation during import (see ``.issues`` #8). Stripping
+    is safe — the runner always calls ``main()`` directly — *except* when the
+    guard has a paired ``else:`` / ``elif`` clause; those scripts must be
+    fixed by the author to avoid orphan ``else:`` syntax errors.
+
+    Bash: ``main "$@"`` at the bottom triggers a preflight invocation with
+    FD 3 read-only ("Bad file descriptor"). Strip it.
+    """
+    notes: list[str] = []
+    cleaned = script
+    if interpreter == "python":
+        cleaned, removed, skipped = _strip_python_main_guards(cleaned)
+        if removed:
+            notes.append(
+                f'Removed {removed} `if __name__ == "__main__":` block(s) — the '
+                "runner always invokes main() directly; the guard fires a "
+                "duplicate run."
+            )
+        if skipped:
+            notes.append(
+                f'Left {skipped} `if __name__ == "__main__":` block(s) intact '
+                "because they have a paired else/elif clause that would become "
+                "orphan code. Refactor by removing the conditional manually."
+            )
+    elif interpreter == "bash":
+        new_cleaned, n = _BASH_MAIN_INVOKE_RE.subn("", cleaned)
+        if n:
+            notes.append(
+                f'Removed {n} trailing `main "$@"` invocation(s) — the runner '
+                "sources the file and calls main() with FD 3 already wired."
+            )
+            cleaned = new_cleaned
+    return cleaned, notes
+
+
+def _python_main_guard_has_paired_clause(script: str) -> bool:
+    """True when at least one ``__main__`` guard has a paired else/elif.
+
+    Used to decide whether to keep the ``__main__`` warning blocking — paired
+    guards cannot be auto-stripped without producing invalid Python.
+    """
+    _, _, skipped = _strip_python_main_guards(script)
+    return skipped > 0
+
+
 def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]:
     """Validate a script against the RunWhen contract. Returns a list of warnings."""
     warnings: list[str] = []
@@ -851,18 +1341,504 @@ def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]
         if re.search(r"^main\s*\(", script, re.MULTILINE):
             warnings.append("Do not call main() directly — the runner invokes it.")
         if re.search(r'if\s+__name__\s*==\s*["\']__main__["\']', script):
-            warnings.append('Do not use if __name__ == "__main__" — the runner invokes main().')
+            if _python_main_guard_has_paired_clause(script):
+                warnings.append(
+                    'Do not use if __name__ == "__main__" — the runner invokes '
+                    "main(). This guard has a paired else/elif clause that "
+                    "cannot be auto-stripped safely (would leave orphan code). "
+                    "Refactor by removing the conditional manually."
+                )
+            else:
+                warnings.append(
+                    'Do not use if __name__ == "__main__" — the runner invokes '
+                    "main(). Auto-stripped at run/commit time, but please "
+                    "remove from the source."
+                )
         if task_type == "sli" and "return" in script and not re.search(r"return\s+[\d.]", script):
             warnings.append("SLI main() should return a float between 0 and 1.")
     elif interpreter == "bash":
         if not re.search(r"^main\s*\(\s*\)", script, re.MULTILINE):
             warnings.append("Script must define a main() function.")
+        if _BASH_MAIN_INVOKE_RE.search(script):
+            warnings.append(
+                'Do not include `main "$@"` at the bottom — the runner invokes main() '
+                "with FD 3 already wired. Auto-stripped at run/commit time."
+            )
         if task_type == "task" and ">&3" not in script and "> /dev/fd/3" not in script:
             warnings.append("Bash task should write issue JSON to file descriptor 3 (>&3).")
         if task_type == "sli" and ">&3" not in script and "> /dev/fd/3" not in script:
             warnings.append("Bash SLI should write metric value to file descriptor 3 (>&3).")
 
     return warnings
+
+
+# Matches Robot/shell-style ${VAR} placeholders (with optional surrounding text).
+_PLACEHOLDER_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+
+
+def _detect_unresolved_placeholders(task_title: str) -> str | None:
+    """Return a user-facing error when ``task_title`` contains ``${...}``.
+
+    Robot Framework resolves ``${...}`` at parse time as suite variables, before
+    any env-var injection. Embedding a placeholder in ``task_title`` causes
+    suite-setup failures (see ``.issues`` #5). Static literal titles are the
+    only safe option.
+    """
+    if not task_title:
+        return None
+    if _PLACEHOLDER_RE.search(task_title):
+        return (
+            f"task_title contains a ${'{...}'} placeholder: {task_title!r}. "
+            "Robot Framework resolves these at suite-parse time, before env vars "
+            "are injected, which crashes the suite. Use a literal string instead "
+            "(e.g. 'Check Storage Account Health')."
+        )
+    return None
+
+
+def _looks_like_azure_script(script: str | None) -> bool:
+    """Heuristic: detect scripts that need ``azure_credentials`` on the runner."""
+    if not script:
+        return False
+    haystack = script.lower()
+    markers = (
+        "az ",
+        "azurerm",
+        "from azure.",
+        "import azure",
+        "azure_subscription",
+        "azure_tenant",
+        "azure_credentials",
+        ".blob.core.windows.net",
+        "az.identity",
+    )
+    return any(marker in haystack for marker in markers)
+
+
+_AZURE_CREDENTIAL_SECRET_KEYS = ("azure_credentials", "azureCredentials")
+
+
+def _azure_credentials_hint(
+    script: str | None,
+    sli_script: str | None,
+    secret_vars: dict[str, str] | None,
+) -> str | None:
+    """Warn when an Azure SLX is being committed without ``azure_credentials``.
+
+    The runner expects ``azure_credentials`` in ``SECRET_ENV_MAP`` to drive the
+    ``RW.Core.Import Secret azure_credentials`` step in the Azure suite
+    bootstrap. Without it the task silently passes with 0 issues (see
+    ``.issues`` #11).
+    """
+    if not (_looks_like_azure_script(script) or _looks_like_azure_script(sli_script)):
+        return None
+    keys = set((secret_vars or {}).keys())
+    if any(k in keys for k in _AZURE_CREDENTIAL_SECRET_KEYS):
+        return None
+    return (
+        "This script looks Azure-flavored but secret_vars is missing "
+        "'azure_credentials'. Without it the runner's Azure suite-setup step "
+        "(`RW.Core.Import Secret azure_credentials`) fails silently and the "
+        "task returns 0 issues in ~5 seconds. Add "
+        "secret_vars={'azure_credentials': 'azure:sp@cli'} (or your workspace's "
+        "Azure service-principal secret key) before committing. "
+        "Pass an empty placeholder value if you are intentionally bypassing this."
+    )
+
+
+def _scripts_have_identical_content(task_script: str, sli_script: str | None) -> bool:
+    """Return True iff task and SLI scripts have the same logical content.
+
+    Task and SLI runbooks have *fundamentally different contracts*:
+
+    - **Task** returns/writes a List[Dict] of issues with keys ``issue title``,
+      ``issue description``, ``issue severity`` (1-4), ``issue next steps``.
+    - **SLI** returns/writes a single float between 0 and 1.
+
+    Submitting identical content for both is almost always an anti-pattern
+    (a single binary hacked to branch on an env var like ``RW_RFNS``), and
+    it's the primary way agents balloon ``commit_slx`` envelopes past the
+    transport budget (see the cursor-scratch transcript in
+    ``.issues/06-25-2026.md``).
+
+    The comparison normalises trailing whitespace and CRLFs so that an
+    intentional re-encode round-trip doesn't get a false negative.
+    """
+    if not task_script or not sli_script:
+        return False
+
+    def _norm(s: str) -> str:
+        return "\n".join(line.rstrip() for line in s.replace("\r\n", "\n").split("\n")).strip()
+
+    return _norm(task_script) == _norm(sli_script)
+
+
+_IDENTICAL_TASK_SLI_MSG = (
+    "The provided 'script' (task) and 'sli_script' (SLI) have identical "
+    "content. This is an anti-pattern: task and SLI runbooks have different "
+    "contracts and cannot share the same body.\n"
+    "  • Task  → returns a List[Dict] of issues "
+    "(title/description/severity 1-4/next steps).\n"
+    "  • SLI   → returns a single float between 0 and 1.\n"
+    "Options:\n"
+    "  1. If you only need an SLI: commit with task_type='sli' and NO 'script' "
+    "field; provide sli_script alone.\n"
+    "  2. If you only need a task: omit sli_script entirely (or use "
+    "cron_schedule='*/N * * * *' to trigger the runbook on a schedule).\n"
+    "  3. If you need BOTH: write a separate, lightweight sli_script that "
+    "emits one float metric (e.g. count of failing pods / total pods). "
+    "Do not duplicate the task body. See "
+    "runwhen-skill://build-runwhen-task for the SLI contract."
+)
+
+
+# ---------------------------------------------------------------------------
+# Script size + transport guards
+# ---------------------------------------------------------------------------
+
+# Soft warning threshold. Above this size, base64-encoded payloads start
+# brushing up against MCP HTTP intermediary limits (≈13KB observed in the
+# wild — see .issues/06-25-2026.md). Below this we trust the transport.
+try:
+    SCRIPT_SOFT_MAX_BYTES = int(os.environ.get("RUNWHEN_SCRIPT_SOFT_MAX_BYTES", "10240"))
+except ValueError:
+    SCRIPT_SOFT_MAX_BYTES = 10240
+
+# Hard cap. Above this we reject the call rather than ship a payload that
+# the transport will likely truncate or 413. Configurable so customers with
+# generous proxies can opt-in to larger scripts.
+try:
+    SCRIPT_HARD_MAX_BYTES = int(os.environ.get("RUNWHEN_SCRIPT_HARD_MAX_BYTES", "65536"))
+except ValueError:
+    SCRIPT_HARD_MAX_BYTES = 65536
+
+
+def _assess_script_size(script: str, *, label: str = "script") -> tuple[str | None, str | None]:
+    """Inspect script size and return ``(warning, error)`` strings.
+
+    Both can be ``None``. The base64 expansion factor (≈4/3) is applied
+    because some MCP intermediaries re-encode payloads, so the practical
+    transport budget is base64 bytes, not raw bytes.
+    """
+    n = len(script.encode("utf-8"))
+    b64_n = (n + 2) // 3 * 4
+    if n > SCRIPT_HARD_MAX_BYTES:
+        return (
+            None,
+            (
+                f"{label} is {n} bytes (~{b64_n} bytes base64), exceeding the "
+                f"hard cap of {SCRIPT_HARD_MAX_BYTES} bytes. MCP HTTP "
+                "intermediaries truncate or 413 large payloads. Try:\n"
+                "  1. Use a registry codebundle (search_registry + "
+                "deploy_registry_codebundle) for reusable automation.\n"
+                "  2. Split the script: move helpers into a custom codebundle "
+                "git repo and deploy via deploy_registry_codebundle.\n"
+                "  3. In stdio mode, pass script_path=/local/path/to/script.py "
+                "instead of inline script or script_base64.\n"
+                "  4. Raise RUNWHEN_SCRIPT_HARD_MAX_BYTES if your transport "
+                "supports larger payloads."
+            ),
+        )
+    if n > SCRIPT_SOFT_MAX_BYTES:
+        return (
+            (
+                f"{label} is {n} bytes (~{b64_n} bytes base64). Some MCP HTTP "
+                "intermediaries truncate payloads above ~13KB base64. If the "
+                "call fails or times out, prefer script_path (stdio) or a "
+                "registry codebundle. Raise RUNWHEN_SCRIPT_SOFT_MAX_BYTES to "
+                "silence this warning."
+            ),
+            None,
+        )
+    return (None, None)
+
+
+# ---------------------------------------------------------------------------
+# Issue / report quality contract
+# ---------------------------------------------------------------------------
+
+# Minimum reasonable lengths for issue payload fields. Shorter than this is a
+# strong signal the agent is producing a stub instead of useful telemetry.
+MIN_ISSUE_DESCRIPTION_CHARS = 40
+MIN_ISSUE_NEXT_STEPS_CHARS = 20
+MIN_ISSUE_TITLE_CHARS = 8
+
+# Tokens that suggest a placeholder rather than real content.
+_PLACEHOLDER_TOKENS = (
+    "todo",
+    "fixme",
+    "xxx",
+    "lorem ipsum",
+    "placeholder",
+    "fill me in",
+    "tbd",
+)
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    if not value:
+        return False
+    low = value.strip().lower()
+    return any(tok in low for tok in _PLACEHOLDER_TOKENS)
+
+
+# Regexes used to spot common contract violations in script source. We
+# deliberately err on the side of false positives — the cost of a warning
+# is small, the cost of an SLX returning empty issues for weeks is high.
+_PY_ISSUE_DESC_EMPTY_RE = re.compile(
+    r'["\']issue description["\']\s*:\s*["\']\s*["\']',
+)
+_PY_ISSUE_NEXT_STEPS_EMPTY_RE = re.compile(
+    r'["\']issue next steps["\']\s*:\s*["\']\s*["\']',
+)
+_PY_ISSUE_TITLE_EMPTY_RE = re.compile(
+    r'["\']issue title["\']\s*:\s*["\']\s*["\']',
+)
+# Detect ``"issue severity": <value>`` where ``<value>`` is NOT one of the
+# valid integers 1..4 (bare or quoted). Valid: ``1``, ``2``, ``3``, ``4``,
+# ``"1"``, ``"2"``, ``"3"``, ``"4"``. Everything else (``0``, ``5..9``,
+# ``10``+, ``"0"``, ``"5"``+, negatives (incl. ``-1`` … ``-4``), multi-digit
+# quoted strings, etc.) is flagged.
+#
+# The inner alternative ``-\d+|[05-9]|\d{2,}`` accepts:
+#   - any *negative* integer (``-1``, ``-4``, ``-12`` …) — severity is
+#     unsigned in the contract, so all of these are invalid
+#   - the bare digits ``0`` and ``5``–``9`` (single-digit out-of-range)
+#   - any multi-digit value (``10``+ — always out of range)
+# It deliberately does NOT match the positive digits ``1``–``4``, so valid
+# bare or quoted severities never trigger.
+_PY_ISSUE_SEVERITY_INVALID_RE = re.compile(
+    r'["\']issue severity["\']\s*:\s*'
+    r"(?:"
+    # Bare invalid (any negative, 0, 5-9, or any multi-digit number).
+    r"(?:-\d+|[05-9]|\d{2,})"
+    r"|"
+    # Double-quoted invalid.
+    r'"(?:-\d+|[05-9]|\d{2,})"'
+    r"|"
+    # Single-quoted invalid.
+    r"'(?:-\d+|[05-9]|\d{2,})'"
+    r")",
+)
+_BASH_ISSUE_DESC_EMPTY_RE = re.compile(
+    r'--arg\s+description\s+["\']\s*["\']',
+)
+
+
+def _assess_issue_quality_static(script: str, interpreter: str, task_type: str) -> list[str]:
+    """Scan script source for common issue-contract violations.
+
+    Returns a list of human-readable advisory warnings. These are *not*
+    blocking — they surface in ``validate_script`` / ``run_script_and_wait``
+    output so agents can self-correct before commit. SLIs are skipped
+    (they emit a metric, not issues).
+    """
+    if task_type == "sli":
+        return []
+
+    findings: list[str] = []
+
+    if interpreter == "python":
+        if _PY_ISSUE_DESC_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty 'issue description'. Issues with empty "
+                "descriptions provide no signal to operators or workspace_chat. "
+                "Include the observed value, threshold, and any relevant context."
+            )
+        if _PY_ISSUE_NEXT_STEPS_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty 'issue next steps'. Always provide a "
+                "concrete remediation hint (kubectl command, runbook link, owner)."
+            )
+        if _PY_ISSUE_TITLE_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty 'issue title'. Titles are the primary "
+                "key for indexing and dedup — they must be present and meaningful."
+            )
+        if _PY_ISSUE_SEVERITY_INVALID_RE.search(script):
+            findings.append(
+                "Found an 'issue severity' value outside 1-4. RunWhen accepts "
+                "only integers 1 (critical) through 4 (informational)."
+            )
+        # No f-string / no format anywhere in the script that emits issues
+        # is a strong signal the description is static. Combined with the
+        # presence of an 'issue description' key, that's almost always a bug.
+        #
+        # The ``+`` check only fires when ``+`` is adjacent to a string
+        # literal or a stringification call (``str(`` / ``repr(`` / ``format(``).
+        # A bare ``"+" in script`` test false-positives on arithmetic
+        # (``i + 1``, ``len(x) + 1``) and silently suppresses this warning
+        # for every script that does basic math — defeating the contract.
+        has_issue_key = re.search(r'["\']issue\s+(?:title|description)["\']', script)
+        _str_concat_re = re.compile(
+            r"""
+            ["']\s*\+        # "..." + ...
+            |
+            \+\s*["']        # ... + "..."
+            |
+            \+\s*(?:str|repr|format)\(   # ... + str(x) / repr(x) / format(x)
+            """,
+            re.VERBOSE,
+        )
+        has_dynamic = bool(
+            re.search(r'f["\']', script)
+            or ".format(" in script
+            or re.search(r"%\s*\(", script)
+            or _str_concat_re.search(script)
+        )
+        if has_issue_key and not has_dynamic:
+            findings.append(
+                "Script emits issues but contains no f-strings or string "
+                "concatenation. Issues should embed runtime values (counts, "
+                "names, timestamps) so the next agent or operator can act "
+                "without re-running the task."
+            )
+    elif interpreter == "bash":
+        if _BASH_ISSUE_DESC_EMPTY_RE.search(script):
+            findings.append(
+                "Found a hardcoded empty issue description in jq output. "
+                "Always interpolate the observed value into the description."
+            )
+
+    # Detect placeholder/stub text in any of the issue fields.
+    for token in _PLACEHOLDER_TOKENS:
+        pattern = re.compile(rf'["\'][^"\']*\b{re.escape(token)}\b[^"\']*["\']', re.IGNORECASE)
+        if pattern.search(script):
+            findings.append(
+                f"Script contains the placeholder token {token!r}. Replace "
+                "before committing — these typically indicate stub content."
+            )
+            break
+
+    return findings
+
+
+def _normalize_issue_keys(issue: dict[str, Any]) -> dict[str, str]:
+    """Return a dict with both snake_case and camelCase issue keys mapped to strings."""
+
+    def _get(*candidates: str) -> str:
+        for k in candidates:
+            v = issue.get(k)
+            if v not in (None, ""):
+                return str(v)
+        return ""
+
+    return {
+        "title": _get("title", "issue title", "issue_title"),
+        "description": _get("details", "description", "issue description", "issue_description"),
+        "next_steps": _get("nextSteps", "next_steps", "issue next steps", "issue_next_steps"),
+        "severity": _get("severity", "issue severity", "issue_severity"),
+    }
+
+
+def _assess_run_output_quality(parsed: dict[str, Any]) -> list[str]:
+    """Inspect a completed task run for contract-quality violations.
+
+    Surfaces:
+      - Empty / under-length descriptions, next-steps, titles.
+      - Placeholder text (TODO, FIXME, lorem-ipsum, ...).
+      - Missing summary issue when no high-severity issues were emitted.
+
+    Returns a list of human-readable warnings (empty when output looks fine).
+    """
+    notes: list[str] = []
+    issues = parsed.get("issues") or []
+    if not isinstance(issues, list):
+        return notes
+
+    has_high_severity = False
+    has_summary = False
+    for idx, issue in enumerate(issues):
+        if not isinstance(issue, dict):
+            continue
+        norm = _normalize_issue_keys(issue)
+        title = norm["title"]
+        desc = norm["description"]
+        steps = norm["next_steps"]
+        sev_str = norm["severity"]
+
+        prefix = f"issue[{idx}]"
+        if not title:
+            notes.append(f"{prefix}: missing 'issue title'.")
+        elif len(title) < MIN_ISSUE_TITLE_CHARS:
+            notes.append(
+                f"{prefix}: title {title!r} is only {len(title)} chars — "
+                "use a descriptive title (target ≥ "
+                f"{MIN_ISSUE_TITLE_CHARS} chars)."
+            )
+        if not desc:
+            notes.append(
+                f"{prefix}: missing 'issue description'. Always include "
+                "observed values + thresholds so the next agent can act."
+            )
+        elif len(desc) < MIN_ISSUE_DESCRIPTION_CHARS:
+            notes.append(
+                f"{prefix}: description is only {len(desc)} chars — include "
+                "observed numbers, names, and timestamps so workspace_chat can "
+                "surface useful detail (target ≥ "
+                f"{MIN_ISSUE_DESCRIPTION_CHARS} chars)."
+            )
+        if not steps:
+            notes.append(
+                f"{prefix}: missing 'issue next steps'. Operators rely on a "
+                "concrete remediation hint (command to run, runbook link, owner)."
+            )
+        elif len(steps) < MIN_ISSUE_NEXT_STEPS_CHARS:
+            notes.append(
+                f"{prefix}: next steps are only {len(steps)} chars — provide "
+                "an actionable remediation (target ≥ "
+                f"{MIN_ISSUE_NEXT_STEPS_CHARS} chars)."
+            )
+        if _looks_like_placeholder(title) or _looks_like_placeholder(desc):
+            notes.append(
+                f"{prefix}: placeholder/stub text detected. Replace TODO/FIXME/"
+                "lorem-ipsum content with real telemetry before committing."
+            )
+        try:
+            sev_int = int(sev_str) if sev_str else 0
+        except (TypeError, ValueError):
+            sev_int = 0
+        if sev_int < 1 or sev_int > 4:
+            notes.append(f"{prefix}: severity {sev_str!r} is out of contract; use 1-4.")
+        if 1 <= sev_int <= 3:
+            has_high_severity = True
+        # The contract from .issues/06-25-2026.md #10: every investigation
+        # task must emit at least one severity-4 informational summary so
+        # workspace_chat has something to surface even when nothing is wrong.
+        # Treat *any* severity-4 issue as the required summary; also accept
+        # titles that explicitly say "summary" regardless of severity.
+        title_lower = title.lower()
+        if sev_int == 4 or "summary" in title_lower:
+            has_summary = True
+
+    if issues and not has_high_severity and not has_summary:
+        notes.append(
+            "No high-severity issues and no severity-4 summary issue detected. "
+            "Investigation tasks must always emit at least one severity-4 "
+            "summary issue containing the observed numbers — otherwise "
+            "workspace_chat has nothing to surface when everything looks healthy."
+        )
+    if not issues:
+        notes.append(
+            "Task emitted zero issues. The RunWhen contract requires every "
+            "task run to surface at least one severity-4 'summary' issue with "
+            "the observed values so results are searchable in workspace_chat."
+        )
+
+    return notes
+
+
+def _is_blocking_warning(warning: str) -> bool:
+    """True when a validation warning indicates a real contract violation.
+
+    Some warnings (``__name__`` guard, trailing ``main "$@"``) flag constructs
+    that are auto-stripped before submission; those should not block
+    ``run_script_and_wait`` or ``commit_slx`` from proceeding. Other warnings
+    (missing ``main()``, wrong return type, missing FD-3 writes) indicate the
+    script will not function on the runner and must stop the call.
+    """
+    auto_fixed = ("Auto-stripped at run/commit time",)
+    return not any(marker in warning for marker in auto_fixed)
 
 
 def _extract_env_vars(script: str, interpreter: str) -> list[str]:
@@ -1208,16 +2184,31 @@ def _validate_slx_name(slx_name: str) -> None:
 
 
 def _validate_runtime_vars(runtime_vars: list[dict] | None) -> list[str]:
-    """Validate runtime_vars list. Returns list of error strings (empty = valid)."""
+    """Validate runtime_vars list. Returns list of error strings (empty = valid).
+
+    ``default`` must be *present* but may be the empty string — this is the
+    legitimate "optional override with no preset" pattern (e.g.
+    ``SCAN_KUBE_CONTEXT`` where in-cluster runners need no kubectl context).
+    The runner treats empty defaults as "leave unset".
+    """
     if not runtime_vars:
         return []
     errors: list[str] = []
     seen: set[str] = set()
     for i, var in enumerate(runtime_vars):
         prefix = f"runtime_vars[{i}]"
-        for field in ("name", "description", "default"):
+        for field in ("name", "description"):
             if not var.get(field):
                 errors.append(f"{prefix}: '{field}' is required and must be non-empty")
+        if "default" not in var:
+            errors.append(
+                f"{prefix}: 'default' is required (empty string '' is OK for "
+                "optional-override vars with no preset)"
+            )
+        elif not isinstance(var.get("default"), str):
+            errors.append(
+                f"{prefix}: 'default' must be a string (got {type(var['default']).__name__})"
+            )
         name = var.get("name")
         if name:
             if name in seen:
@@ -1992,7 +2983,10 @@ async def create_chat_rule(
     ] = None,
     is_active: bool = Field(default=True, description="Whether the rule is active."),
 ) -> str:
-    """Create a chat rule. Uses AgentFarm internal API."""
+    """Create a chat rule. Uses AgentFarm internal API.
+
+    Skill: runwhen-skill://manage-rules (scoping + wording guidance).
+    """
     ws = await _resolve_workspace(workspace_name)
     resolved_scope_id = scope_id
     if scope_type == "persona" and scope_id is not None:
@@ -2166,6 +3160,8 @@ async def create_chat_command(
     ] = None,
 ) -> str:
     """Create a chat command (slash-command). Name must be alphanumeric, underscore, or hyphen only.
+
+    Skill: runwhen-skill://manage-commands (scoping, scheduling, sinks).
 
     Commands are invoked in chat as [/label](cmd://name).
 
@@ -2593,6 +3589,8 @@ async def create_assistant(
 ) -> str:
     """Create a new AI assistant (persona) in a workspace.
 
+    Skill: runwhen-skill://create-ai-assistant (full setup workflow).
+
     An assistant is a persona that tailors how the RunWhen AI investigates and
     acts — e.g. an "Azure DevOps Helper" focused on a specific tech stack. The
     ``short_name`` you choose becomes the ``persona_name`` for ``workspace_chat``.
@@ -2786,15 +3784,23 @@ async def get_workspace_issues(
 async def get_workspace_slxs(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List SLXs (Service Level eXperiences) in a workspace (structured JSON).
+    """List ALL SLXs in a workspace (structured JSON). No filtering.
 
     SLXs are the fundamental unit of work in RunWhen — each represents a
     health check, task, or automation runbook for a piece of infrastructure.
 
-    NOTE: For questions like "which SLXs monitor neo4j?" or "find health
-    checks for namespace X", prefer `workspace_chat` — it can search and
-    correlate SLXs with resources semantically. Use this tool only when you
-    need raw JSON for programmatic processing.
+    This tool returns the **full list** for the workspace and accepts only
+    ``workspace_name``. It does NOT accept ``slx_name``, ``filter``,
+    ``alias``, ``tag``, or any other filtering parameter — those would
+    fail with ``unexpected_keyword_argument``.
+
+    For other shapes:
+    - **One specific SLX (runbook detail)**: ``get_slx_runbook(workspace_name=..., slx_name=...)``
+    - **Search / filter by topic** (e.g. "neo4j health checks"): ``workspace_chat``
+    - **Search by resource** (e.g. "what monitors namespace X"): ``workspace_chat``
+
+    Use this raw-list tool only when you need to enumerate every SLX for
+    programmatic processing (counting, batch operations, etc).
     """
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
@@ -2878,6 +3884,72 @@ async def get_slx_runbook(
     ws = await _resolve_workspace(workspace_name)
     data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs/{slx_name}/runbook")
     return _json_response(data)
+
+
+# Keywords that strongly indicate a PAPI 400 was actually rejecting the
+# runtime_var_overrides shape — used by run_slx to decide whether the
+# "known_runtime_vars" enrichment path applies. We require a substantive
+# token, not just the bare HTTP status, so unrelated 400s don't get a
+# misleading runtime-var hint.
+_RUNTIME_VAR_ERROR_TOKENS = (
+    "runtime_var",
+    "runtime var",
+    "runtimevar",
+    "runtime_vars_provided",
+    "runtimevarsprovided",
+    "runtime_var_overrides",
+    "runtimevaroverrides",
+    "unknown runtime",
+    "invalid runtime",
+)
+
+
+def _looks_like_runtime_var_error(error_message: str) -> bool:
+    """True when a PAPI error message references runtime-var-shaped validation."""
+    if not error_message:
+        return False
+    low = error_message.lower()
+    return any(tok in low for tok in _RUNTIME_VAR_ERROR_TOKENS)
+
+
+async def _fetch_known_runtime_vars(workspace: str, full_slx_name: str) -> list[str] | None:
+    """Best-effort fetch of the declared ``runtime_vars`` for an SLX runbook.
+
+    Used to enrich ``run_slx`` error responses when ``runtime_var_overrides``
+    contains unknown keys (see ``.issues`` #4). Returns ``None`` if the
+    runbook cannot be retrieved or the response shape is unexpected.
+    """
+    short = full_slx_name.split("--", 1)[-1] if "--" in full_slx_name else full_slx_name
+    try:
+        data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/{short}/runbook")
+    except (ValueError, httpx.HTTPStatusError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates: list[Any] = []
+    candidates.append(data.get("runtime_vars_provided"))
+    candidates.append(data.get("runtimeVarsProvided"))
+    spec = data.get("spec") or {}
+    if isinstance(spec, dict):
+        candidates.append(spec.get("runtimeVarsProvided"))
+        candidates.append(spec.get("runtime_vars_provided"))
+    # Merge across all list candidates rather than short-circuiting on the
+    # first one found. An earlier empty ``runtime_vars_provided`` should not
+    # hide a populated ``spec.runtimeVarsProvided`` later in the response.
+    names: list[str] = []
+    found_any_list = False
+    for value in candidates:
+        if not isinstance(value, list):
+            continue
+        found_any_list = True
+        for entry in value:
+            if isinstance(entry, dict) and entry.get("name"):
+                names.append(str(entry["name"]))
+            elif isinstance(entry, str):
+                names.append(entry)
+    if not found_any_list:
+        return None
+    return sorted(set(names))
 
 
 @mcp.tool()
@@ -2966,6 +4038,8 @@ async def create_knowledge_base_article(
     ] = None,
 ) -> str:
     """Create a new Knowledge Base article in a workspace.
+
+    Skill: runwhen-skill://manage-knowledge (article scoping + lifecycle).
 
     KB articles are indexed into the Knowledge Overlay Graph and become
     searchable by the workspace AI assistant and other tools.
@@ -3060,11 +4134,60 @@ async def delete_knowledge_base_article(
 # ---------------------------------------------------------------------------
 
 
+class RegistryUnavailable(Exception):
+    """Raised when the CodeBundle Registry is disabled or unreachable.
+
+    Callers should turn this into a structured, non-fatal MCP response (rather
+    than letting the request bubble up as a generic transport error) so that
+    airgapped customers can keep working with the rest of the MCP toolset.
+    """
+
+    def __init__(self, message: str, *, airgap: bool = False) -> None:
+        super().__init__(message)
+        self.airgap = airgap
+
+
+def _registry_unavailable_response(message: str, *, airgap: bool) -> str:
+    """Render the standard 'registry unavailable' response for MCP clients."""
+    return _json_response(
+        {
+            "registry_available": False,
+            "airgap": airgap,
+            "registry_url": REGISTRY_URL,
+            "message": message,
+            "hint": (
+                "Set RUNWHEN_AIRGAP=true to silence this warning, or build the "
+                "task locally with commit_slx instead of deploy_registry_codebundle."
+            ),
+        }
+    )
+
+
 async def _registry_get(path: str, params: dict | None = None) -> httpx.Response:
-    """GET against the public CodeBundle Registry API (no auth needed)."""
+    """GET against the public CodeBundle Registry API (no auth needed).
+
+    Raises :class:`RegistryUnavailable` when airgap mode is enabled or the
+    registry endpoint cannot be reached. Callers should convert that exception
+    into a graceful response via :func:`_registry_unavailable_response`.
+    """
+    if RUNWHEN_AIRGAP:
+        raise RegistryUnavailable(
+            "RunWhen CodeBundle Registry access is disabled (RUNWHEN_AIRGAP=true).",
+            airgap=True,
+        )
     url = f"{REGISTRY_URL}{path}"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await client.get(url, params=params)
+    try:
+        async with httpx.AsyncClient(timeout=REGISTRY_TIMEOUT_S) as client:
+            return await client.get(url, params=params)
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+        raise RegistryUnavailable(
+            f"CodeBundle Registry unreachable ({type(exc).__name__}): {exc}. "
+            f"Set RUNWHEN_AIRGAP=true to suppress this warning in airgapped environments."
+        ) from exc
+    except httpx.RequestError as exc:
+        raise RegistryUnavailable(
+            f"CodeBundle Registry request failed ({type(exc).__name__}): {exc}."
+        ) from exc
 
 
 @mcp.tool()
@@ -3082,6 +4205,8 @@ async def search_registry(
 ) -> str:
     """Search the RunWhen CodeBundle Registry for reusable automation.
 
+    Skill: runwhen-skill://find-and-deploy-codebundle (search → deploy workflow).
+
     Use this BEFORE writing a custom script — there may already be a
     production-ready codebundle for the task.  Returns codebundles with
     their tasks, SLIs, required env vars, and deployment metadata.
@@ -3092,7 +4217,10 @@ async def search_registry(
     if tags:
         params["tags"] = tags
 
-    resp = await _registry_get("/api/v1/codebundles", params=params)
+    try:
+        resp = await _registry_get("/api/v1/codebundles", params=params)
+    except RegistryUnavailable as exc:
+        return _registry_unavailable_response(str(exc), airgap=exc.airgap)
     if resp.status_code != 200:
         return _json_response(
             {"error": f"Registry returned {resp.status_code}", "body": resp.text[:500]}
@@ -3147,9 +4275,12 @@ async def get_registry_codebundle(
     Use after search_registry to get complete information including
     configuration templates, environment variables, and deployment instructions.
     """
-    resp = await _registry_get(
-        f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
-    )
+    try:
+        resp = await _registry_get(
+            f"/api/v1/collections/{collection_slug}/codebundles/{codebundle_slug}"
+        )
+    except RegistryUnavailable as exc:
+        return _registry_unavailable_response(str(exc), airgap=exc.airgap)
     if resp.status_code == 404:
         return _json_response(
             {
@@ -3446,66 +4577,876 @@ async def get_workspace_context(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Skill discovery shims for clients that under-surface MCP resources
+# ---------------------------------------------------------------------------
+#
+# Skills are exposed primarily as MCP resources (see the skill-loader at the
+# top of this file). Resources are the standards-correct progressive-
+# disclosure primitive. However, some clients (e.g. OpenAI function-calling
+# clients running through a simple harness, certain CLI MCP clients) only
+# surface tools in their prompt UX. These two tools give those clients the
+# same affordance.
+
+
+@mcp.tool()
+async def list_skills() -> str:
+    """List every progressive-disclosure skill the server exposes.
+
+    Returns ``[{name, description, uri}]``. Use this when you want to know
+    what guidance is available before running a tool — read the description
+    to decide whether you need the full body, then fetch it with
+    ``get_skill(name)`` (or, if your client supports MCP resources directly,
+    read the ``uri`` via the resource read API).
+
+    Cross-vendor note: this is the same information that ``list_resources``
+    returns for the ``runwhen-skill://`` family. Clients that surface MCP
+    resources should prefer that path; this tool is the explicit fallback.
+    """
+    skills = list(_get_skill_index().values())
+    summaries = [
+        {
+            "name": s["name"],
+            "uri": s["uri"],
+            "description": s["description"],
+        }
+        for s in sorted(skills, key=lambda x: x["name"])
+    ]
+    return _json_response(
+        {
+            "count": len(summaries),
+            "skills": summaries,
+            "usage_hint": (
+                "Pick a skill whose description matches your current task, "
+                "then call get_skill(name='<name>') to load its full body. "
+                "Skills are also addressable as MCP resources at "
+                f"{SKILL_URI_SCHEME}<name>."
+            ),
+        }
+    )
+
+
+@mcp.tool()
+async def get_skill(
+    name: str = Field(
+        description=(
+            "Skill name (e.g. 'build-runwhen-task'). Call list_skills first "
+            "if you don't know the available names."
+        )
+    ),
+    reload: bool = Field(
+        default=False,
+        description="Force re-read from disk (default: use cached version).",
+    ),
+) -> str:
+    """Return the full body of a skill by name.
+
+    Returns ``{name, description, uri, body, path}`` on success or
+    ``{error, available}`` when the name is unknown so the agent can self-
+    correct without a second round-trip.
+    """
+    index = _get_skill_index(reload=reload)
+    skill = index.get(name)
+    if skill is None:
+        return _json_response(
+            {
+                "error": f"Unknown skill {name!r}.",
+                "hint": (
+                    "Call list_skills() to see available names, or read the "
+                    f"resource list for URIs under {SKILL_URI_SCHEME}."
+                ),
+                "available": sorted(index.keys()),
+            }
+        )
+    return _json_response(
+        {
+            "name": skill["name"],
+            "description": skill["description"],
+            "uri": skill["uri"],
+            "body": skill["body"],
+            "path": skill["path"],
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Location & secret discovery (structured, agent-friendly responses)
+# ---------------------------------------------------------------------------
+
+
+# Platform inference heuristics for secret names. Order matters — we walk
+# in this order and assign each secret to the first matching platform, so
+# more-specific patterns (azure-clientId before azure) come first. Each
+# entry is (platform_label, compiled_regex, recommended_env_var).
+#
+# The recommended_env_var is what the agent should put on the LEFT side of
+# the ``secret_vars`` mapping (the script-facing env var name). The
+# workspace-secret key (right side) is the secret's actual key.
+#
+# Anchor convention: every suffix-anchored pattern starts with
+# ``(?:^|[-_.])`` so the matching token is either the whole key or
+# preceded by a separator. Without this, a short suffix like ``sa$``
+# false-positives on workspace secrets such as ``melissa`` (matches at
+# the trailing ``sa``) or ``myserviceaccount`` (matches ``service_account``
+# embedded in a longer identifier). The anchor keeps real conventions
+# (``prod-sa``, ``ops-suite-sa``, ``team_service_account``) intact while
+# rejecting incidental substrings.
+_SEC_SEP = r"(?:^|[-_.])"
+_SECRET_PLATFORM_RULES: list[tuple[str, re.Pattern[str], str]] = [
+    ("kubernetes", re.compile(r"^kubeconfig$", re.IGNORECASE), "kubeconfig"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}azure[_-]?credentials?$"), "azure_credentials"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}client[_-]?id$"), "AZURE_CLIENT_ID"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}client[_-]?secret$"), "AZURE_CLIENT_SECRET"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}tenant[_-]?id$"), "AZURE_TENANT_ID"),
+    ("azure", re.compile(rf"(?i){_SEC_SEP}subscription[_-]?id$"), "AZURE_SUBSCRIPTION_ID"),
+    ("aws", re.compile(rf"(?i){_SEC_SEP}aws[_-]?credentials?$"), "aws_credentials"),
+    ("aws", re.compile(rf"(?i){_SEC_SEP}aws[_-]?access[_-]?key[_-]?id$"), "AWS_ACCESS_KEY_ID"),
+    (
+        "aws",
+        re.compile(rf"(?i){_SEC_SEP}aws[_-]?secret[_-]?access[_-]?key$"),
+        "AWS_SECRET_ACCESS_KEY",
+    ),
+    ("aws", re.compile(rf"(?i){_SEC_SEP}aws[_-]?session[_-]?token$"), "AWS_SESSION_TOKEN"),
+    ("gcp", re.compile(rf"(?i){_SEC_SEP}gcp[_-]?credentials?$"), "gcp_credentials"),
+    (
+        "gcp",
+        re.compile(rf"(?i){_SEC_SEP}(?:ops-suite-)?sa$"),
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ),
+    (
+        "gcp",
+        re.compile(rf"(?i){_SEC_SEP}service[_-]?account$"),
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ),
+    ("github", re.compile(rf"(?i){_SEC_SEP}repo[_-]?token$"), "GITHUB_TOKEN"),
+    ("github", re.compile(rf"(?i){_SEC_SEP}github[_-]?token$"), "GITHUB_TOKEN"),
+    ("slack", re.compile(r"(?i)^slack(?:[_-]webhook|[_-]token)?$"), "SLACK_TOKEN"),
+    ("papi", re.compile(rf"(?i){_SEC_SEP}user[_-]?token$"), "USER_TOKEN"),
+]
+
+
+def _classify_secret(key: str) -> tuple[str, str]:
+    """Return ``(platform, recommended_env_var_name)`` for *key*.
+
+    Falls back to ``("other", key)`` when no heuristic matches, so the
+    agent still gets a usable identity mapping.
+    """
+    for platform, pattern, env_var in _SECRET_PLATFORM_RULES:
+        if pattern.search(key):
+            return platform, env_var
+    return "other", key
+
+
+def _extract_secret_keys(raw: Any) -> list[str]:
+    """Normalise PAPI's secrets-keys response into a flat ``list[str]``."""
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict):
+                k = item.get("key") or item.get("name") or item.get("workspaceKey")
+                if isinstance(k, str):
+                    out.append(k)
+        return out
+    if isinstance(raw, dict):
+        # FastAPI SecretsKeysResponse uses ``{"secrets": [...]}``.
+        for field in ("secrets", "keys", "results", "secret_keys", "secretKeys"):
+            value = raw.get(field)
+            if isinstance(value, list):
+                return _extract_secret_keys(value)
+    return []
+
+
+def _is_workspace_secret_key(value: str) -> bool:
+    """True when *value* looks like a full workspaceKey (not a vault list name)."""
+    return ":" in value or "@" in value
+
+
+def _needs_secret_var_resolution(secret_vars: dict[str, str]) -> bool:
+    """True when any secret_vars value is a short name needing vault/SLX lookup."""
+    return any(not _is_workspace_secret_key(v) for v in secret_vars.values())
+
+
+async def _prepare_secret_vars_for_author(
+    workspace: str,
+    secret_vars: dict[str, str],
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve secret_vars for author/run and commit_slx.
+
+    When every value is already a full workspaceKey, returns immediately without
+    calling secrets-keys or scanning committed SLX runbooks.
+    """
+    if not secret_vars:
+        return {}, []
+    if not _needs_secret_var_resolution(secret_vars):
+        return dict(secret_vars), []
+    vault_raw = await _papi_get(f"/api/v3/workspaces/{workspace}/secrets-keys")
+    vault_keys = _extract_secret_keys(vault_raw)
+    return await _resolve_secret_vars_for_author(workspace, secret_vars, vault_keys=vault_keys)
+
+
+def _vault_key_to_workspace_key(vault_key: str, platform: str) -> str:
+    """Best-effort vault list name → workspaceKey for author/run and commit_slx."""
+    base = vault_key.split("/")[-1]
+    if platform == "kubernetes" or base.lower() == "kubeconfig":
+        return f"k8s:file@secret/{vault_key}:{base}"
+    if platform == "azure" and "credential" in vault_key.lower():
+        return f"k8s:file@secret/{vault_key}:credentials"
+    if platform in ("gcp", "aws") and "credential" in vault_key.lower():
+        return f"k8s:file@secret/{vault_key}:credentials"
+    return f"k8s:file@secret/{vault_key}:{base}"
+
+
+async def _collect_secrets_from_slxs(
+    workspace: str,
+    *,
+    max_sample: int = 20,
+) -> dict[str, Any]:
+    """Scan committed SLX runbooks for ``secretsProvided`` / ``secrets_provided``."""
+    mappings: dict[str, dict[str, Any]] = {}
+    slxs_scanned = 0
+    slxs_with_secrets = 0
+    try:
+        slxs_data = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs")
+        slxs_list = (
+            slxs_data.get("results", slxs_data) if isinstance(slxs_data, dict) else slxs_data
+        )
+        if not isinstance(slxs_list, list):
+            return {"mappings": {}, "slxs_scanned": 0, "slxs_with_secrets": 0}
+        for slx_item in slxs_list:
+            name = slx_item.get("shortName") or slx_item.get("name", "")
+            if not name or name == "debugslx":
+                continue
+            try:
+                rb = await _papi_get(f"/api/v3/workspaces/{workspace}/slxs/{name}/runbook")
+            except Exception:
+                continue
+            slxs_scanned += 1
+            spec = rb.get("spec", {}) if isinstance(rb, dict) else {}
+            secrets = spec.get("secretsProvided") or spec.get("secrets_provided") or []
+            if secrets:
+                slxs_with_secrets += 1
+            for entry in secrets:
+                if not isinstance(entry, dict):
+                    continue
+                env_name = str(entry.get("name") or "")
+                wkey = str(entry.get("workspaceKey") or entry.get("workspace_key") or "")
+                if not env_name or not wkey:
+                    continue
+                bucket = mappings.setdefault(
+                    env_name,
+                    {"workspaceKey": wkey, "slx_examples": [], "count": 0},
+                )
+                if bucket["workspaceKey"] != wkey:
+                    variants = bucket.setdefault("variants", [])
+                    if wkey not in variants:
+                        variants.append(wkey)
+                bucket["count"] += 1
+                examples: list[str] = bucket["slx_examples"]
+                if len(examples) < 3 and name not in examples:
+                    examples.append(name)
+            if slxs_scanned >= max_sample:
+                break
+    except Exception:
+        pass
+    return {
+        "mappings": mappings,
+        "slxs_scanned": slxs_scanned,
+        "slxs_with_secrets": slxs_with_secrets,
+    }
+
+
+async def _resolve_secret_vars_for_author(
+    workspace: str,
+    secret_vars: dict[str, str] | None,
+    *,
+    slx_secrets: dict[str, Any] | None = None,
+    vault_keys: list[str] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve short vault names to full workspaceKey values for author/run."""
+    if not secret_vars:
+        return {}, []
+    if not _needs_secret_var_resolution(secret_vars):
+        return dict(secret_vars), []
+    notes: list[str] = []
+    resolved: dict[str, str] = {}
+    if slx_secrets is None:
+        slx_data = await _collect_secrets_from_slxs(workspace)
+        slx_mappings: dict[str, Any] = slx_data.get("mappings", {})
+    else:
+        slx_mappings = slx_secrets.get("mappings", slx_secrets)
+    vault_set = set(vault_keys or [])
+
+    for env_name, value in secret_vars.items():
+        if _is_workspace_secret_key(value):
+            resolved[env_name] = value
+            continue
+        slx_entry = slx_mappings.get(env_name) or slx_mappings.get(value)
+        if isinstance(slx_entry, dict) and slx_entry.get("workspaceKey"):
+            wkey = str(slx_entry["workspaceKey"])
+            resolved[env_name] = wkey
+            examples = slx_entry.get("slx_examples") or []
+            ex = ", ".join(examples[:2]) if examples else "nearby SLXs"
+            notes.append(
+                f"Resolved secret_vars[{env_name!r}] from {value!r} to workspaceKey "
+                f"{wkey!r} (copied pattern from {ex})."
+            )
+            continue
+        lookup_key = value if value in vault_set else env_name if env_name in vault_set else value
+        platform, _ = _classify_secret(lookup_key)
+        if lookup_key in vault_set or platform != "other":
+            wkey = _vault_key_to_workspace_key(lookup_key, platform)
+            resolved[env_name] = wkey
+            if wkey != value:
+                notes.append(
+                    f"Expanded secret_vars[{env_name!r}]={value!r} to workspaceKey "
+                    f"{wkey!r}. author/run and commit_slx require full workspaceKey "
+                    "values, not vault list names alone."
+                )
+            continue
+        resolved[env_name] = value
+        notes.append(
+            f"Could not resolve secret_vars[{env_name!r}]={value!r} to a workspaceKey. "
+            "Call get_workspace_secrets (secrets_from_slxs) or inspect an existing "
+            "SLX runbook's secretsProvided and copy the workspaceKey verbatim."
+        )
+    return resolved, notes
+
+
+def _interpret_author_run_final_status(
+    final_status: str,
+    parsed: dict[str, Any],
+    *,
+    run_type: str = "task",
+    has_secrets: bool = False,
+    secret_resolution_notes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Explain author/debug run status for agents (passed_titles semantics)."""
+    issues = parsed.get("issues") or []
+    stdout = parsed.get("stdout") or ""
+    stderr = parsed.get("stderr") or ""
+    hints: list[str] = list(secret_resolution_notes or [])
+
+    if final_status == "SUCCEEDED":
+        meaning = (
+            "Runner reported SUCCEEDED (non-empty passed_titles from the debug robot runbook)."
+        )
+    elif final_status == "FAILED":
+        meaning = (
+            "Runner reported FAILED. Author/debug runs derive status from passed_titles "
+            "(see PAPI author/run), not from whether your Python main() returned cleanly. "
+            "The debug runbook hardcodes TASK_TITLE='dev-test'. Empty passed_titles → FAILED "
+            "even when the script ran."
+        )
+        if not issues and not stdout and not stderr:
+            hints.append(
+                "No issues, stdout, or stderr were parsed. Check debug_log_snippet in this "
+                "response, or call get_run_output for the log.html artifact. Typical causes: "
+                "wrong secret_vars (short key vs full workspaceKey), import-time errors, "
+                "or robot preflight failure before main() runs."
+            )
+        elif not issues and (stdout or stderr):
+            hints.append(
+                "Stdout/stderr present but zero issues parsed. Ensure main() returns a list "
+                "of dicts with 'issue title', 'issue description', 'issue severity' (1-4), "
+                "and 'issue next steps'."
+            )
+    elif final_status == "RUNNING":
+        meaning = "Polling stopped before the run finished (MCP_MAX_POLL_DURATION_S exceeded)."
+        hints.append("Poll with get_run_status / get_run_output, or raise MCP_MAX_POLL_DURATION_S.")
+    else:
+        meaning = f"Unexpected status {final_status!r}."
+
+    if has_secrets and final_status == "FAILED" and not secret_resolution_notes:
+        hints.append(
+            "If you passed secret_vars like {'kubeconfig': 'kubeconfig'}, re-run after "
+            "get_workspace_secrets returns secrets_from_slxs with full workspaceKey values."
+        )
+    if run_type == "sli" and final_status == "FAILED" and not issues:
+        hints.append(
+            "SLI runs expect main() to return a float 0–1; failures may still show as FAILED here."
+        )
+
+    return {"meaning": meaning, "hints": hints}
+
+
 @mcp.tool()
 async def get_workspace_secrets(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List available secret key names in a workspace.
+    """List available secret keys with platform grouping and mapping guidance.
 
-    Returns the secret keys that can be referenced when running or committing
-    scripts (e.g. "kubeconfig", "api-token"). These map environment variable
-    names to workspace-stored secrets.
+    Returns a structured payload that helps agents pick the right
+    ``secret_vars`` mapping for a task. The raw key list is preserved in
+    ``secrets`` for backward compatibility.
+
+    Response shape::
+
+      {
+        "workspace": "<ws>",
+        "secrets": [<raw keys>],
+        "platform_groups": { "kubernetes": ["kubeconfig"], "azure": [...], ... },
+        "recommended_secret_vars": {
+          "kubernetes": { "kubeconfig": "kubeconfig" },
+          "azure":      { "AZURE_CLIENT_ID": "...", ... },
+          ...
+        },
+        "runtime_semantics": "<critical note about file-path semantics>",
+        "skill_reference": "runwhen-skill://discover-secrets",
+      }
+
+    Critical for agents: workspace secrets are injected into scripts as
+    FILE PATHS, not literal values. See the ``discover-secrets`` skill
+    for the ``read_secret`` helper pattern.
     """
     ws = await _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
-    return _json_response(data)
+    raw = await _papi_get(f"/api/v3/workspaces/{ws}/secrets-keys")
+    keys = _extract_secret_keys(raw)
+
+    platform_groups: dict[str, list[str]] = {}
+    recommended_secret_vars: dict[str, dict[str, str]] = {}
+    # Track env-var collisions so we never silently drop a workspace key.
+    # Two keys can classify to the same env var (e.g. two GitHub PATs both
+    # mapped to ``GITHUB_TOKEN``): the first gets the canonical name, the
+    # rest get numeric suffixes (``GITHUB_TOKEN_2`` …), and the collision
+    # is surfaced in the response so the agent can pick consciously.
+    secret_var_collisions: dict[str, dict[str, list[str]]] = {}
+    for key in sorted(set(keys)):
+        platform, env_var = _classify_secret(key)
+        platform_groups.setdefault(platform, []).append(key)
+        bucket = recommended_secret_vars.setdefault(platform, {})
+
+        if env_var not in bucket:
+            bucket[env_var] = key
+            continue
+
+        # Collision — disambiguate with a numeric suffix. Walk forward
+        # until we find an unused name (defensive: tolerates a key that
+        # was *itself* classified to ``ENV_VAR_2`` from somewhere else).
+        n = 2
+        while f"{env_var}_{n}" in bucket:
+            n += 1
+        disambiguated = f"{env_var}_{n}"
+        bucket[disambiguated] = key
+
+        # Record both the canonical and disambiguated keys grouped by the
+        # collision env var so the agent sees every candidate at a glance.
+        platform_collisions = secret_var_collisions.setdefault(platform, {})
+        if env_var not in platform_collisions:
+            platform_collisions[env_var] = [bucket[env_var]]
+        platform_collisions[env_var].append(key)
+
+    secret_vars_for_author_run: dict[str, dict[str, str]] = {}
+    for platform, bucket in recommended_secret_vars.items():
+        author_bucket: dict[str, str] = {}
+        for env_var, vault_key in bucket.items():
+            author_bucket[env_var] = _vault_key_to_workspace_key(vault_key, platform)
+        if author_bucket:
+            secret_vars_for_author_run[platform] = author_bucket
+
+    slx_secret_data: dict[str, Any] | None = None
+    if not keys:
+        slx_secret_data = await _collect_secrets_from_slxs(ws)
+        slx_mappings = slx_secret_data.get("mappings", {})
+        if slx_mappings:
+            from_slxs: dict[str, dict[str, str]] = {}
+            for env_name, meta in slx_mappings.items():
+                if not isinstance(meta, dict):
+                    continue
+                wkey = meta.get("workspaceKey")
+                if not wkey:
+                    continue
+                platform, _ = _classify_secret(env_name)
+                from_slxs.setdefault(platform, {})[env_name] = str(wkey)
+                secret_vars_for_author_run.setdefault(platform, {})[env_name] = str(wkey)
+            if from_slxs:
+                recommended_secret_vars = {**recommended_secret_vars, **from_slxs}
+
+    response: dict[str, Any] = {
+        "workspace": ws,
+        "secrets": keys,
+        "platform_groups": platform_groups,
+        "recommended_secret_vars": recommended_secret_vars,
+        "secret_vars_for_author_run": secret_vars_for_author_run,
+        "author_run_semantics": (
+            "For run_script / run_script_and_wait / commit_slx, secret_vars VALUES must be "
+            "full workspaceKey strings (e.g. k8s:file@secret/kubeconfig:kubeconfig), not bare "
+            "vault list names. Use secret_vars_for_author_run or secrets_from_slxs below. "
+            "The MCP server auto-expands short keys when possible."
+        ),
+        "runtime_semantics": (
+            "Workspace secrets are injected into scripts as FILE PATHS, "
+            "not literal values. Read them with: "
+            "`v = os.environ.get('NAME'); open(v).read().strip() if os.path.isfile(v) else v`. "
+            "See the discover-secrets skill for the full read_secret helper."
+        ),
+        "common_pitfalls": [
+            "Treating secret env vars as literal values instead of file paths.",
+            "Passing vault list names (e.g. kubeconfig) as secret_vars VALUES — use the full "
+            "workspaceKey from secret_vars_for_author_run or copy from a committed SLX's "
+            "secretsProvided.",
+            "Using uppercase 'KUBECONFIG' as the env-var name — by convention "
+            "it stays lowercase 'kubeconfig' to match the workspace key.",
+            "Forgetting azure_credentials (or the 4-tuple "
+            "clientId/clientSecret/tenantId/subscriptionId) on Azure tasks — "
+            "commit_slx will reject the SLX with a hint.",
+        ],
+        "skill_reference": f"{SKILL_URI_SCHEME}discover-secrets",
+        "next_step_hint": (
+            "Pass secret_vars_for_author_run (full workspaceKey values) to run_script* or "
+            "commit_slx. When the vault list is empty, use secrets_from_slxs copied from "
+            "nearby committed SLXs."
+        ),
+    }
+    if slx_secret_data and slx_secret_data.get("mappings"):
+        response["secrets_from_slxs"] = slx_secret_data["mappings"]
+        response["slxs_scanned_for_secrets"] = slx_secret_data.get("slxs_scanned", 0)
+        response["slxs_with_secrets"] = slx_secret_data.get("slxs_with_secrets", 0)
+        if not keys:
+            response["vault_list_empty"] = True
+            response["common_pitfalls"].insert(
+                0,
+                "get_workspace_secrets returned an empty vault key list, but committed SLXs "
+                "may still wire secrets via secretsProvided on their runbook — see "
+                "secrets_from_slxs for env-var → workspaceKey patterns to copy.",
+            )
+    if secret_var_collisions:
+        # Only include the field when collisions exist — keeps the
+        # response shape clean for the common single-secret case.
+        response["secret_var_collisions"] = secret_var_collisions
+        response["common_pitfalls"].append(
+            "Multiple workspace keys map to the same recommended env var "
+            "(see secret_var_collisions). The first key gets the canonical "
+            "name; subsequent keys get a numeric suffix. Pick the entry "
+            "that matches your environment (e.g. prod vs test)."
+        )
+    return _json_response(response)
+
+
+def _summarise_location(loc: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a PAPI location record to ``{name, type, health, raw}``."""
+    return {
+        "name": _loc_name(loc) or "",
+        "type": loc.get("type") or "",
+        "health": loc.get("health") or loc.get("status") or "",
+        "raw": loc,
+    }
 
 
 @mcp.tool()
 async def get_workspace_locations(
     workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
 ) -> str:
-    """List available runner locations for a workspace.
+    """List runner locations with auto-resolution guidance and recommendations.
 
-    Runner locations are where scripts execute. Returns location identifiers
-    that can be used with run_script and commit_slx.
+    Returns a structured payload that tells the agent which location to
+    use (or to omit the parameter entirely when auto-resolution can pick).
+    The raw list is preserved in ``locations`` for backward compatibility.
+
+    Response shape::
+
+      {
+        "workspace": "<ws>",
+        "count": <int>,
+        "locations": [<raw>],
+        "private": [<summary>],     # workspace-type runners (preferred)
+        "public":  [<summary>],     # shared runners (fallback)
+        "recommended": "<name|null>",
+        "auto_resolves": <bool>,    # True when run_*/commit_slx can pick alone
+        "disambiguation_hint": "...",
+        "skill_reference": "runwhen-skill://discover-locations",
+      }
+
+    ``recommended`` is the name run_script / run_script_and_wait /
+    commit_slx WILL pick when the ``location`` parameter is omitted.
+    When ``auto_resolves`` is True the agent should NOT pass a
+    ``location`` argument at all.
     """
     ws = await _resolve_workspace(workspace_name)
     locations = await _get_authorized_locations(ws)
-    return _json_response(locations)
+
+    summarised = [_summarise_location(loc) for loc in locations]
+    private = [s for s in summarised if s["type"] != "public"]
+    public = [s for s in summarised if s["type"] == "public"]
+
+    recommended: str | None = None
+    auto_resolves = False
+    disambiguation_hint = ""
+
+    if len(private) == 1 and private[0]["name"]:
+        recommended = private[0]["name"]
+        auto_resolves = True
+        disambiguation_hint = (
+            "One private runner available — omit the location parameter and "
+            "the MCP will auto-resolve to it."
+        )
+    elif len(private) > 1:
+        # Mirror the disambiguation logic in _resolve_location: ask PAPI
+        # which one existing SLXs prefer. Treat failures as soft (the
+        # agent can still see the list).
+        try:
+            inferred = await _infer_location_from_slxs(ws)
+        except Exception:
+            inferred = None
+        private_names = {s["name"] for s in private if s["name"]}
+        if inferred and inferred in private_names:
+            recommended = inferred
+            auto_resolves = True
+            disambiguation_hint = (
+                f"Multiple private runners exist; auto-resolution will pick "
+                f"{inferred!r} based on existing SLX usage. Override with the "
+                "location parameter if a different runner is needed."
+            )
+        else:
+            recommended = None
+            auto_resolves = False
+            opts = ", ".join(sorted(private_names))
+            disambiguation_hint = (
+                f"Multiple private runners exist ({opts}) and auto-resolution "
+                "cannot disambiguate. Ask the user which to use, or inspect "
+                "existing SLXs via get_slx_runbook to see prevailing choices."
+            )
+    elif public:
+        # No private runners — fall back to the first public runner.
+        recommended = next((p["name"] for p in public if p["name"]), None)
+        auto_resolves = recommended is not None
+        disambiguation_hint = (
+            "No private runners — auto-resolution will fall back to the public "
+            "runner. Public runners cannot reach workspace-internal "
+            "infrastructure (Kubernetes, internal databases, etc.); register a "
+            "private runner if your task targets internal resources."
+        )
+    else:
+        disambiguation_hint = (
+            "No runners found for this workspace. Register a private runner "
+            "before running any tasks."
+        )
+
+    return _json_response(
+        {
+            "workspace": ws,
+            "count": len(summarised),
+            "locations": locations,
+            "private": private,
+            "public": public,
+            "recommended": recommended,
+            "auto_resolves": auto_resolves,
+            "disambiguation_hint": disambiguation_hint,
+            "skill_reference": f"{SKILL_URI_SCHEME}discover-locations",
+            "next_step_hint": (
+                "If auto_resolves is True, OMIT the location parameter when "
+                "calling run_script / run_script_and_wait / commit_slx; the "
+                "MCP will pick the recommended location for you. Pass an "
+                "explicit location only to override that choice."
+            ),
+        }
+    )
+
+
+def _decode_script_base64(data: str, *, label: str = "script_base64") -> str:
+    """Decode standard base64 of UTF-8 text. Raises ValueError on failure.
+
+    The decoded payload is bounded by :data:`SCRIPT_HARD_MAX_BYTES` so an
+    abusively large ``script_base64`` argument cannot allocate gigabytes
+    of memory before the downstream :func:`_assess_script_size` check
+    runs. The cap is enforced *before* decoding by checking the encoded
+    length (base64 expands by 4/3, so the encoded budget is bounded), and
+    *after* decoding as defence-in-depth.
+    """
+    stripped = data.strip()
+
+    # Encoded budget: base64 expands payload bytes by ceil(n*4/3) and
+    # pads to a multiple of 4, so the encoded form of a maximally-sized
+    # payload is at most this many characters. Reject before allocating.
+    max_encoded = ((SCRIPT_HARD_MAX_BYTES + 2) // 3) * 4 + 4
+    if len(stripped) > max_encoded:
+        raise ValueError(
+            f"Invalid {label}: encoded payload is {len(stripped)} bytes, "
+            f"which decodes to more than the hard cap of "
+            f"{SCRIPT_HARD_MAX_BYTES} bytes (RUNWHEN_SCRIPT_HARD_MAX_BYTES). "
+            "If the script is genuinely this large, deploy it as a registry "
+            "codebundle (search_registry + deploy_registry_codebundle) or "
+            "split the work into multiple SLXs."
+        )
+
+    try:
+        raw = base64.b64decode(stripped.encode("ascii"), validate=True)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"Invalid {label}: must be valid standard base64 encoding UTF-8 text."
+        ) from exc
+
+    if len(raw) > SCRIPT_HARD_MAX_BYTES:
+        raise ValueError(
+            f"Invalid {label}: decoded payload is {len(raw)} bytes, "
+            f"which exceeds the hard cap of {SCRIPT_HARD_MAX_BYTES} bytes "
+            "(RUNWHEN_SCRIPT_HARD_MAX_BYTES). Deploy as a registry codebundle "
+            "or split into multiple SLXs."
+        )
+
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"Invalid {label}: must be valid standard base64 encoding UTF-8 text."
+        ) from exc
+
+
+def _decode_script_gzip_base64(data: str, *, label: str = "script_gzip_base64") -> str:
+    """Decode standard base64 of gzip-compressed UTF-8 text. Raises ValueError on failure.
+
+    This is the highest-density inline transport: a typical Python or bash
+    script compresses 3-5x before base64 expansion, giving an effective
+    capacity of ~40-50KB raw script per ~13KB transport budget.
+
+    Encode with:
+        import base64, gzip
+        base64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")
+
+    Three layered defences against oversized / malicious input:
+
+    1. Encoded-length cap on the **outer** base64 blob — rejects huge
+       payloads before ``base64.b64decode`` allocates anything. This is
+       the symmetric mirror of the check in :func:`_decode_script_base64`.
+       A compressed-then-base64 payload that decompresses to ``cap`` bytes
+       would have encoded size at most ~``4/3 * cap`` (gzip can't expand
+       data appreciably for real inputs), so a cap on the encoded length
+       at the same threshold is safe for legitimate payloads.
+
+    2. Streaming gzip decompression bounded by
+       :data:`SCRIPT_HARD_MAX_BYTES` — defends against decompression
+       bombs whose compressed form is small but whose decompressed form
+       is gigabytes.
+
+    3. Final :func:`_assess_script_size` check on the decoded UTF-8
+       string downstream — defence-in-depth in case env-var changes
+       between the helper and the caller.
+    """
+    stripped = data.strip()
+
+    max_encoded = ((SCRIPT_HARD_MAX_BYTES + 2) // 3) * 4 + 4
+    if len(stripped) > max_encoded:
+        raise ValueError(
+            f"Invalid {label}: encoded payload is {len(stripped)} bytes; "
+            f"the compressed input alone would exceed the hard cap of "
+            f"{SCRIPT_HARD_MAX_BYTES} bytes (RUNWHEN_SCRIPT_HARD_MAX_BYTES) "
+            "after decoding. Deploy as a registry codebundle "
+            "(search_registry + deploy_registry_codebundle) or split into "
+            "multiple SLXs."
+        )
+
+    try:
+        raw = base64.b64decode(stripped.encode("ascii"), validate=True)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {label}: outer base64 layer failed to decode. "
+            "Encode as: base64.b64encode(gzip.compress(script.encode('utf-8'))).decode('ascii')"
+        ) from exc
+
+    # Stream-decompress with a hard byte cap. ``gzip.GzipFile.read(n)``
+    # reads at most ``n`` bytes from the decompressed stream; we ask for
+    # one byte more than the cap so the overflow case can be detected
+    # cheaply without ever materialising the full bomb payload.
+    cap = SCRIPT_HARD_MAX_BYTES
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(raw), mode="rb") as gz:
+            decompressed = gz.read(cap + 1)
+            # A non-empty next read means the stream extends past the cap.
+            overflow = bool(gz.read(1))
+    except (OSError, EOFError, gzip.BadGzipFile) as exc:
+        raise ValueError(
+            f"Invalid {label}: gzip decompression failed (was the value not gzipped?). "
+            "Encode as: base64.b64encode(gzip.compress(script.encode('utf-8'))).decode('ascii')"
+        ) from exc
+
+    if overflow or len(decompressed) > cap:
+        raise ValueError(
+            f"Invalid {label}: decompressed script exceeds the hard cap "
+            f"({cap} bytes / "
+            f"RUNWHEN_SCRIPT_HARD_MAX_BYTES). This usually means the encoded "
+            "value is malicious (decompression bomb) or genuinely too large "
+            "for inline transport. If the script is real, deploy it as a "
+            "registry codebundle (search_registry + deploy_registry_codebundle) "
+            "or split the work into multiple SLXs."
+        )
+
+    try:
+        return decompressed.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Invalid {label}: decompressed bytes are not valid UTF-8.") from exc
 
 
 def _resolve_script(
     script: str | None,
     script_path: str | None,
     script_base64: str | None = None,
+    script_gzip_base64: str | None = None,
+    script_base64_path: str | None = None,
+    *,
+    label: str = "script",
 ) -> str:
-    """Return script content from inline text, base64, or a local file path.
+    """Return script content from one of five mutually-exclusive sources.
 
-    Exactly one of *script*, *script_path*, or *script_base64* must be provided.
-    *script_base64* is standard base64 of UTF-8 text — use when MCP clients
-    struggle to JSON-escape multiline scripts (e.g. ``def main():``).
-    *script_path* reads the file on the MCP server host (Tool Builder / stdio).
+    Exactly one of these must be provided:
+    - **script**: inline raw text (best for small scripts <~5KB; readable).
+    - **script_base64**: standard base64 of UTF-8 text (use when JSON-escaping
+      multiline scripts is error-prone). Costs +33% transport overhead.
+    - **script_gzip_base64**: base64(gzip(utf-8 script)). 3-5x more capacity
+      than ``script_base64`` for typical whitespace-heavy scripts. Strongly
+      preferred for scripts >5KB inline. Encode:
+      ``base64.b64encode(gzip.compress(s.encode())).decode()``.
+    - **script_path**: local file path to the *raw* script. **stdio mode only.**
+    - **script_base64_path**: local file path to a file containing a base64
+      blob of the script. **stdio mode only.** Useful when the agent has
+      already written the encoded script to a scratch file and wants the
+      server to read+decode rather than re-inlining it.
+
+    HTTP/remote MCP mode rejects both path-based variants because the server
+    cannot read the client's filesystem — use ``script_base64`` or
+    ``script_gzip_base64`` instead.
     """
     has_script = script is not None and script != ""
     has_path = bool(script_path)
     has_b64 = bool(script_base64 and script_base64.strip())
-    chosen = sum(1 for x in (has_script, has_path, has_b64) if x)
+    has_gz = bool(script_gzip_base64 and script_gzip_base64.strip())
+    has_b64_path = bool(script_base64_path)
+    chosen = sum(1 for x in (has_script, has_path, has_b64, has_gz, has_b64_path) if x)
     if chosen != 1:
-        raise ValueError("Provide exactly one of 'script', 'script_path', or 'script_base64'.")
-    if script_base64:
-        try:
-            raw = base64.b64decode(script_base64.strip().encode("ascii"), validate=True)
-            return raw.decode("utf-8")
-        except (ValueError, UnicodeDecodeError) as exc:
-            raise ValueError(
-                "Invalid script_base64: must be valid base64 encoding UTF-8 text."
-            ) from exc
-    if script_path:
+        raise ValueError(
+            f"Provide exactly one source for {label}: 'script', 'script_path', "
+            "'script_base64', 'script_gzip_base64', or 'script_base64_path'."
+        )
+    if has_b64 and script_base64:
+        return _decode_script_base64(script_base64, label=label + "_base64")
+    if has_gz and script_gzip_base64:
+        return _decode_script_gzip_base64(script_gzip_base64, label=label + "_gzip_base64")
+    if has_b64_path and script_base64_path:
         if MCP_TRANSPORT == "http":
             raise ValueError(
-                "script_path is not supported in HTTP mode. "
-                "Use 'script' (inline) or 'script_base64' instead."
+                f"{label}_base64_path is not supported in HTTP mode (the MCP server "
+                "cannot read your local filesystem). Encode the script and pass it "
+                "inline instead:\n"
+                "  • Best (3-5x capacity): script_gzip_base64 = "
+                "base64.b64encode(gzip.compress(s.encode('utf-8'))).decode('ascii')\n"
+                "  • Standard: script_base64 = "
+                "base64.b64encode(s.encode('utf-8')).decode('ascii')\n"
+                "If the script is too large for either, deploy it as a registry "
+                "codebundle (see search_registry + deploy_registry_codebundle)."
+            )
+        path = os.path.expanduser(script_base64_path)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"{label}_base64_path file not found: {path}")
+        with open(path) as f:
+            return _decode_script_base64(f.read(), label=label + "_base64_path")
+    if has_path and script_path:
+        if MCP_TRANSPORT == "http":
+            raise ValueError(
+                f"{label}_path is not supported in HTTP mode (the MCP server cannot "
+                "read your local filesystem). Use one of these inline alternatives:\n"
+                "  • Best (3-5x capacity): script_gzip_base64\n"
+                "  • Standard:             script_base64\n"
+                "  • Small scripts:        script (raw inline)"
             )
         path = os.path.expanduser(script_path)
         if not os.path.isfile(path):
@@ -3513,6 +5454,54 @@ def _resolve_script(
         with open(path) as f:
             return f.read()
     return script or ""
+
+
+def _assess_combined_script_size(
+    *scripts: tuple[str, str],
+) -> tuple[str | None, str | None]:
+    """Inspect the combined size of multiple scripts in one tool envelope.
+
+    *scripts* is a sequence of ``(content, label)`` pairs. Returns
+    ``(warning, error)`` for the *sum*; either can be ``None``. This catches
+    the common ``commit_slx(script=..., sli_script=...)`` shape where each
+    individual script is under the soft cap but their sum exceeds the
+    transport budget for a single JSON-RPC envelope.
+    """
+    pairs = [(content, label) for content, label in scripts if content]
+    if len(pairs) < 2:
+        return (None, None)
+    total = sum(len(content.encode("utf-8")) for content, _ in pairs)
+    b64_total = (total + 2) // 3 * 4
+    breakdown = ", ".join(f"{label}={len(content.encode('utf-8'))}B" for content, label in pairs)
+    if total > SCRIPT_HARD_MAX_BYTES:
+        return (
+            None,
+            (
+                f"Combined scripts ({breakdown}) total {total} bytes "
+                f"(~{b64_total} bytes base64), exceeding the hard cap of "
+                f"{SCRIPT_HARD_MAX_BYTES} bytes per tool call. MCP HTTP "
+                "intermediaries truncate or 413 envelopes that bundle "
+                "multiple large script fields. Options:\n"
+                "  1. Use 'script_gzip_base64' (and 'sli_script_gzip_base64') "
+                "to compress before transport — typical 3-5x reduction.\n"
+                "  2. Deploy as a registry codebundle (search_registry + "
+                "deploy_registry_codebundle) and skip inline scripts.\n"
+                "  3. Raise RUNWHEN_SCRIPT_HARD_MAX_BYTES on the server if "
+                "your transport supports larger envelopes."
+            ),
+        )
+    if total > SCRIPT_SOFT_MAX_BYTES:
+        return (
+            (
+                f"Combined scripts ({breakdown}) total {total} bytes "
+                f"(~{b64_total} bytes base64). The sum approaches the "
+                "transport budget for one MCP envelope even though each "
+                "individual script is under the cap. If this call fails or "
+                "times out, prefer 'script_gzip_base64' for both fields."
+            ),
+            None,
+        )
+    return (None, None)
 
 
 @mcp.tool()
@@ -3525,16 +5514,37 @@ async def validate_script(
         str | None,
         Field(
             default=None,
-            description="Local file path to read the script from. "
-            "Mutually exclusive with 'script' and 'script_base64'.",
+            description="Local file path to read the script from. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params.",
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 script as standard base64. Prefer when JSON-escaping "
-            "multiline scripts is error-prone. Mutually exclusive with 'script'.",
+            description="UTF-8 script as standard base64. Prefer over inline 'script' "
+            "when JSON-escaping multiline content is error-prone. Mutually exclusive "
+            "with the other script_* params.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as base64(gzip(...)). Best inline option for "
+            "scripts >5KB — typically 3-5x denser than 'script_base64'. Encode with: "
+            "base64.b64encode(gzip.compress(script.encode())).decode(). Mutually "
+            "exclusive with the other script_* params.",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded "
+            "script. **stdio mode only.** Convenient when the agent has already "
+            "written the encoded script to a scratch file. Mutually exclusive with "
+            "the other script_* params.",
         ),
     ] = None,
     interpreter: str = Field(default="bash", description="'bash' or 'python'."),
@@ -3550,27 +5560,88 @@ async def validate_script(
     Task scripts must return/write issues with keys: 'issue title',
     'issue description', 'issue severity' (1-4), 'issue next steps',
     and optionally 'issue observed at'.
+
+    Script-source parameter matrix (provide exactly one):
+
+    | Variant              | Best for                          | Mode      |
+    |----------------------|-----------------------------------|-----------|
+    | script               | Small scripts <~5KB, readable     | any       |
+    | script_base64        | Any size; safe JSON escaping      | any       |
+    | script_gzip_base64   | >5KB; 3-5x denser than b64        | any       |
+    | script_path          | Local file, raw text              | stdio only|
+    | script_base64_path   | Local file containing base64 blob | stdio only|
+
+    Skill: runwhen-skill://build-runwhen-task (full authoring workflow).
     """
     try:
-        script_resolved = _resolve_script(script, script_path, script_base64)
-    except ValueError as exc:
+        script_resolved = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+        )
+    except (ValueError, FileNotFoundError) as exc:
         return _json_response({"valid": False, "error": str(exc), "warnings": []})
     warnings = _validate_script(script_resolved, interpreter, task_type)
     env_vars = _extract_env_vars(script_resolved, interpreter)
 
+    # Strip first, then measure size against the SAME payload that the
+    # run_script / run_script_and_wait / commit_slx tools will actually
+    # submit. Measuring the un-stripped source here can produce a
+    # ``valid: false`` / ``size_error`` for a script those tools accept
+    # (and vice versa), because they strip ``__main__`` guards and trailing
+    # ``main "$@"`` invocations before checking the cap.
+    stripped_script, auto_fix_notes = _strip_runner_unsafe_blocks(script_resolved, interpreter)
+    blocking = [w for w in warnings if _is_blocking_warning(w)]
+    auto_fixable = [w for w in warnings if not _is_blocking_warning(w)]
+    quality_notes = _assess_issue_quality_static(script_resolved, interpreter, task_type)
+    size_warning, size_error = _assess_script_size(stripped_script)
+
     result: dict[str, Any] = {
-        "valid": len(warnings) == 0,
+        "valid": len(blocking) == 0 and size_error is None,
         "warnings": warnings,
+        "blocking_warnings": blocking,
+        "auto_fixable_warnings": auto_fixable,
+        "auto_fixes_applied_on_run": auto_fix_notes,
+        "issue_quality_notes": quality_notes,
         "detected_env_vars": env_vars,
         "interpreter": interpreter,
         "task_type": task_type,
+        "script_bytes": len(stripped_script.encode("utf-8")),
     }
+    # When auto-stripping changed the payload size, surface the original
+    # size too so the agent understands why a "10KB" script reports a
+    # smaller byte count.
+    if stripped_script != script_resolved:
+        result["original_script_bytes"] = len(script_resolved.encode("utf-8"))
+    if size_warning:
+        result["size_warning"] = size_warning
+    if size_error:
+        result["size_error"] = size_error
 
-    if not warnings:
+    if size_error:
+        result["message"] = "Script exceeds the configured hard size cap. See size_error."
+    elif not blocking and not auto_fixable and not quality_notes and not size_warning:
         result["message"] = "Script passes RunWhen contract validation."
+    elif not blocking:
+        bits = []
+        if auto_fixable:
+            bits.append(f"{len(auto_fixable)} auto-fixable warning(s)")
+        if quality_notes:
+            bits.append(f"{len(quality_notes)} issue-quality note(s)")
+        if size_warning:
+            bits.append("size advisory")
+        result["message"] = (
+            "Script is runnable. "
+            + ", ".join(bits)
+            + ". Review issue_quality_notes / size_warning before committing — "
+            "scripts that return empty or stub issue payloads provide no signal "
+            "to operators or workspace_chat."
+        )
     else:
         result["message"] = (
-            f"Script has {len(warnings)} contract warning(s). "
+            f"Script has {len(blocking)} blocking warning(s). "
             "Fix these before running or committing."
         )
 
@@ -3597,16 +5668,33 @@ async def run_script(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path to read the script from. Mutually exclusive with "
-            "'script' and 'script_base64'."
+            description="Local file path to read the script from. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params."
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 script as standard base64. Prefer when JSON-escaping multiline "
-            "scripts is error-prone.",
+            description="UTF-8 script as standard base64. Prefer over inline 'script' "
+            "when JSON-escaping multiline content is error-prone.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as base64(gzip(...)). Best inline option for "
+            "scripts >5KB — 3-5x denser than 'script_base64'. Encode with: "
+            "base64.b64encode(gzip.compress(script.encode())).decode().",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded "
+            "script. **stdio mode only.**",
         ),
     ] = None,
 ) -> str:
@@ -3623,29 +5711,56 @@ async def run_script(
     - Bash task: define main() writing issue JSON array to FD 3 (>&3).
     - Bash SLI: define main() writing a metric float to FD 3.
 
+    Provide exactly one of: script | script_base64 | script_gzip_base64 |
+    script_path (stdio) | script_base64_path (stdio). Use script_gzip_base64
+    for scripts >5KB to maximise transport headroom.
+
     Use validate_script first to check compliance.
     """
     try:
-        script = _resolve_script(script, script_path, script_base64)
+        script = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+        )
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    ws = await _resolve_workspace(workspace_name)
-
     warnings = _validate_script(script, interpreter, run_type)
-    if warnings:
+    blocking = [w for w in warnings if _is_blocking_warning(w)]
+    if blocking:
         return _json_response(
             {
                 "error": "Script validation failed",
                 "warnings": warnings,
+                "blocking_warnings": blocking,
                 "message": "Fix the warnings and try again. Use validate_script for details.",
             }
         )
+    script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
+    size_warning, size_error = _assess_script_size(script)
+    if size_error:
+        return _json_response(
+            {
+                "error": "Script too large for transport",
+                "message": size_error,
+                "script_bytes": len(script.encode("utf-8")),
+            }
+        )
+
+    ws = await _resolve_workspace(workspace_name)
 
     try:
         location = await _resolve_location(ws, location)
     except ValueError as exc:
         return _json_response({"error": str(exc)})
+
+    resolved_secrets: dict[str, str] = {}
+    secret_notes: list[str] = []
+    if secret_vars:
+        resolved_secrets, secret_notes = await _prepare_secret_vars_for_author(ws, secret_vars)
 
     body: dict[str, Any] = {
         "command": script,
@@ -3653,10 +5768,18 @@ async def run_script(
         "run_type": run_type,
         "interpreter": interpreter,
         "envVars": env_vars or {},
-        "secretVars": secret_vars or {},
+        "secretVars": resolved_secrets,
     }
 
     status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
+    # PAPI's response is a dict; surface the soft size advisory alongside the
+    # run_id without clobbering whatever PAPI returned.
+    if isinstance(data, dict):
+        if secret_notes:
+            data.setdefault("secret_resolution_notes", secret_notes)
+        if size_warning:
+            data.setdefault("size_warning", size_warning)
+            data.setdefault("script_bytes", len(script.encode("utf-8")))
     return _json_response(data)
 
 
@@ -3726,16 +5849,32 @@ async def run_script_and_wait(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path to read the script from. Mutually exclusive with "
-            "'script' and 'script_base64'."
+            description="Local file path to read the script from. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params."
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 script as standard base64. Prefer when JSON-escaping multiline "
-            "scripts is error-prone.",
+            description="UTF-8 script as standard base64. Prefer over inline 'script' "
+            "when JSON-escaping multiline content is error-prone.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 script as base64(gzip(...)). Best inline option for "
+            "scripts >5KB — 3-5x denser than 'script_base64'.",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded "
+            "script. **stdio mode only.**",
         ),
     ] = None,
     runtime_var_overrides: Annotated[
@@ -3762,6 +5901,10 @@ async def run_script_and_wait(
     - Bash task: define main() writing issue JSON array to FD 3 (>&3).
     - Bash SLI: define main() writing a metric float to FD 3.
 
+    Provide exactly one of: script | script_base64 | script_gzip_base64 |
+    script_path (stdio) | script_base64_path (stdio). Use script_gzip_base64
+    for scripts >5KB to maximise transport headroom.
+
     Bash scripts must NOT include `main "$@"` at the bottom. The runner
     sources the script and invokes `main()` itself with FD 3 wired to a
     run_output.json file. A trailing `main "$@"` triggers a preflight
@@ -3775,25 +5918,49 @@ async def run_script_and_wait(
     `open(os.environ["VAR"]).read()` (python) to get the actual value.
     """
     try:
-        script = _resolve_script(script, script_path, script_base64)
+        script = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+        )
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    ws = await _resolve_workspace(workspace_name)
-
     warnings = _validate_script(script, interpreter, run_type)
-    if warnings:
+    blocking = [w for w in warnings if _is_blocking_warning(w)]
+    if blocking:
         return _json_response(
             {
                 "error": "Script validation failed",
                 "warnings": warnings,
+                "blocking_warnings": blocking,
             }
         )
+    script, _auto_fix_notes = _strip_runner_unsafe_blocks(script, interpreter)
+    size_warning, size_error = _assess_script_size(script)
+    if size_error:
+        return _json_response(
+            {
+                "error": "Script too large for transport",
+                "message": size_error,
+                "script_bytes": len(script.encode("utf-8")),
+            }
+        )
+    static_quality_notes = _assess_issue_quality_static(script, interpreter, run_type)
+
+    ws = await _resolve_workspace(workspace_name)
 
     try:
         location = await _resolve_location(ws, location)
     except ValueError as exc:
         return _json_response({"error": str(exc)})
+
+    resolved_secrets: dict[str, str] = {}
+    secret_notes: list[str] = []
+    if secret_vars:
+        resolved_secrets, secret_notes = await _prepare_secret_vars_for_author(ws, secret_vars)
 
     body: dict[str, Any] = {
         "command": script,
@@ -3801,7 +5968,7 @@ async def run_script_and_wait(
         "run_type": run_type,
         "interpreter": interpreter,
         "envVars": {**(env_vars or {}), **(runtime_var_overrides or {})},
-        "secretVars": secret_vars or {},
+        "secretVars": resolved_secrets,
     }
 
     _, run_data = await _papi_post(f"/api/v3/workspaces/{ws}/author/run", body)
@@ -3834,7 +6001,10 @@ async def run_script_and_wait(
             if isinstance(output_data, dict):
                 parsed = await _fetch_and_parse_artifacts(output_data)
 
-    result = {
+    runtime_quality_notes = _assess_run_output_quality(parsed) if run_type == "task" else []
+    quality_notes = sorted(set(static_quality_notes + runtime_quality_notes))
+
+    result: dict[str, Any] = {
         "runId": run_id,
         "finalStatus": status,
         "elapsedSeconds": elapsed,
@@ -3843,6 +6013,38 @@ async def run_script_and_wait(
         "stderr": parsed["stderr"],
         "report": parsed["report"],
     }
+    if parsed.get("debug_log_snippet"):
+        result["debug_log_snippet"] = parsed["debug_log_snippet"]
+    if parsed.get("artifact_urls"):
+        result["artifact_urls"] = parsed["artifact_urls"]
+    if secret_notes:
+        result["secret_resolution_notes"] = secret_notes
+        result["secret_vars_resolved"] = resolved_secrets
+    result["status_interpretation"] = _interpret_author_run_final_status(
+        status,
+        parsed,
+        run_type=run_type,
+        has_secrets=bool(secret_vars),
+        secret_resolution_notes=secret_notes,
+    )
+    if size_warning:
+        result["size_warning"] = size_warning
+        result["script_bytes"] = len(script.encode("utf-8"))
+    if quality_notes:
+        result["issue_quality_notes"] = quality_notes
+        if status == "SUCCEEDED":
+            result["issue_quality_message"] = (
+                "The task ran successfully, but the issue payloads violate the "
+                "RunWhen reporting contract. workspace_chat surfaces only issues "
+                "(not stdout), so empty/stub issues mean operators cannot see "
+                "what the task observed. Fix these before committing the SLX."
+            )
+        else:
+            result["issue_quality_message"] = (
+                "Issue payloads have contract-quality problems. Note: finalStatus "
+                f"is {status!r} — see status_interpretation for author/run semantics "
+                "(FAILED often means empty passed_titles, not necessarily zero issues)."
+            )
     return _json_response(result)
 
 
@@ -3852,6 +6054,28 @@ async def run_script_and_wait(
 
 SLX_RUN_MAX_POLL_S = 300
 SLX_RUN_POLL_INTERVAL_S = 5
+
+
+def _papi_run_requests(session_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """RunSession run_requests list — PAPI v3 returns camelCase ``runRequests``."""
+    reqs = session_data.get("run_requests") or session_data.get("runRequests") or []
+    return reqs if isinstance(reqs, list) else []
+
+
+def _run_request_completed(rr: dict[str, Any]) -> bool:
+    """True when a run request has finished (responseTime set)."""
+    if rr.get("is_completed") or rr.get("isCompleted"):
+        return True
+    return bool(rr.get("response_time") or rr.get("responseTime"))
+
+
+def _run_request_field(rr: dict[str, Any], snake: str, camel: str, default: Any = "") -> Any:
+    """Read a run-request field accepting snake_case or camelCase keys."""
+    if snake in rr:
+        return rr[snake]
+    if camel in rr:
+        return rr[camel]
+    return default
 
 
 @mcp.tool()
@@ -3874,6 +6098,9 @@ async def run_slx(
 ) -> str:
     """Run an existing SLX's runbook tasks on the workspace runner.
 
+    Skill: runwhen-skill://run-existing-slx — and default ``task_titles="*"``
+    (a literal resolved title produces empty passedTitles).
+
     This triggers execution of a previously committed SLX (not an ad-hoc script).
     Use this when you want to run a health check, troubleshooting task, or
     automation that already exists in the workspace.
@@ -3893,8 +6120,73 @@ async def run_slx(
     # Full SLX name expected by the runsessions API: workspace--slx-short-name
     full_slx_name = slx_name if "--" in slx_name else f"{ws}--{slx_name}"
 
-    # task_titles is a '||'-separated string or '*'; API expects a list
-    task_titles_list = [t.strip() for t in task_titles.split("||")] if task_titles != "*" else ["*"]
+    # task_titles is a '||'-separated string or '*'; API expects a list.
+    # SLX runbooks store the task name as the literal Robot variable
+    # ``${TASK_TITLE}`` (resolved at runtime), so a resolved title (e.g.
+    # "Analyze Storage Auth Type Metrics") never matches and yields empty
+    # passed_titles (see ``.issues`` #6). When the caller passes a literal
+    # human-readable title, hint them to use ``*``.
+    if task_titles != "*":
+        # Reject empty / whitespace-only input before splitting so we never
+        # send ``taskTitles=[""]`` (or ``[]``) to PAPI. The literal-title
+        # guard below only fires for *non-empty* strings, so without this
+        # short-circuit a blank value would silently flow through.
+        if not task_titles or not task_titles.strip():
+            return _json_response(
+                {
+                    "error": "Invalid task_titles value",
+                    "message": (
+                        "task_titles must be '*' (run every task in the SLX) "
+                        "or one or more non-empty patterns joined by '||'. "
+                        f"Got {task_titles!r} which resolves to an empty list."
+                    ),
+                    "hint": (
+                        "For nearly all use cases, pass task_titles='*'. "
+                        "Only override when you know the SLX's runtime "
+                        "${TASK_TITLE} values."
+                    ),
+                }
+            )
+
+        task_titles_list = [t.strip() for t in task_titles.split("||")]
+        # Drop any empty trailing/leading segments (e.g. ``"foo||"``) and
+        # reject the whole call if no valid entries remain.
+        non_empty = [t for t in task_titles_list if t]
+        if not non_empty:
+            return _json_response(
+                {
+                    "error": "Invalid task_titles value",
+                    "message": (
+                        f"task_titles={task_titles!r} contained only empty "
+                        "segments after splitting on '||'."
+                    ),
+                    "hint": (
+                        "Use task_titles='*' to run every task, or supply "
+                        "at least one non-empty pattern."
+                    ),
+                }
+            )
+        task_titles_list = non_empty
+
+        suspicious = [
+            t for t in task_titles_list if not t.startswith("${") and not t.startswith("*")
+        ]
+        if suspicious:
+            return _json_response(
+                {
+                    "error": "Unsupported task_titles value",
+                    "message": (
+                        "SLX runbooks register task names as the literal Robot "
+                        "variable ${TASK_TITLE}, not the resolved string. Passing "
+                        f"{suspicious!r} will produce empty passed_titles. Use "
+                        "task_titles='*' to run all tasks (the platform expands "
+                        "'*' to ['${TASK_TITLE}'] which Robot resolves correctly), "
+                        "or pass '${TASK_TITLE}' explicitly."
+                    ),
+                }
+            )
+    else:
+        task_titles_list = ["*"]
 
     # Build the run request dict (camelCase keys for JSON payload)
     run_request: dict[str, Any] = {
@@ -3912,7 +6204,29 @@ async def run_slx(
             {"source": "direct", "runRequests": [run_request]},
         )
     except ValueError as exc:
-        return _json_response({"error": f"Failed to create RunSession: {exc}"})
+        error_msg = str(exc)
+        # Issue #4: surface known runtime_vars when the runner rejects unknown
+        # override keys so the agent can self-correct without a separate
+        # discovery step. We require both the override to be present *and* a
+        # real runtime-var signal in the PAPI body — not just any 400 status,
+        # because _raise_for_papi_status always embeds the status code in the
+        # error string and unrelated 400s would otherwise get a misleading
+        # runtime-var hint.
+        if runtime_var_overrides and _looks_like_runtime_var_error(error_msg):
+            known = await _fetch_known_runtime_vars(ws, full_slx_name)
+            if known is not None:
+                return _json_response(
+                    {
+                        "error": f"Failed to create RunSession: {error_msg}",
+                        "hint": (
+                            "runtime_var_overrides must only contain variables "
+                            "declared in the runbook's runtime_vars schema."
+                        ),
+                        "known_runtime_vars": known,
+                        "submitted_override_keys": sorted(runtime_var_overrides),
+                    }
+                )
+        return _json_response({"error": f"Failed to create RunSession: {error_msg}"})
 
     session_id = session_data.get("id")
     if not session_id:
@@ -3930,8 +6244,8 @@ async def run_slx(
         elapsed += sleep_s
         try:
             session_data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions/{session_id}")
-            run_requests = session_data.get("run_requests", [])
-            if run_requests and all(rr.get("response_time") for rr in run_requests):
+            run_requests = _papi_run_requests(session_data)
+            if run_requests and all(_run_request_completed(rr) for rr in run_requests):
                 run_status = "completed"
         except ValueError:
             pass
@@ -3948,7 +6262,7 @@ async def run_slx(
         )
 
     # Step 3: Return results — issues are embedded in run_requests
-    run_requests = session_data.get("run_requests", [])
+    run_requests = _papi_run_requests(session_data)
     first_rr = run_requests[0] if run_requests else {}
     result: dict[str, Any] = {
         "status": "completed",
@@ -3957,9 +6271,9 @@ async def run_slx(
         "session_id": session_id,
         "run_request_id": first_rr.get("id"),
         "elapsed_seconds": elapsed,
-        "passed_titles": first_rr.get("passed_titles", ""),
-        "failed_titles": first_rr.get("failed_titles", ""),
-        "skipped_titles": first_rr.get("skipped_titles", ""),
+        "passed_titles": _run_request_field(first_rr, "passed_titles", "passedTitles"),
+        "failed_titles": _run_request_field(first_rr, "failed_titles", "failedTitles"),
+        "skipped_titles": _run_request_field(first_rr, "skipped_titles", "skippedTitles"),
         "issues": first_rr.get("issues", []),
     }
     return _json_response(result)
@@ -4026,31 +6340,61 @@ async def commit_slx(
     script_path: Annotated[
         str | None,
         Field(
-            description="Local file path for main script. Mutually exclusive with 'script' "
-            "and 'script_base64'."
+            description="Local file path for main script. **stdio mode only.** "
+            "Mutually exclusive with the other script_* params."
         ),
     ] = None,
     script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 main script as standard base64. Mutually exclusive with "
-            "'script' and 'script_path'.",
+            description="UTF-8 main script as standard base64.",
+        ),
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 main script as base64(gzip(...)). Best inline option "
+            "for scripts >5KB — 3-5x denser than 'script_base64'.",
+        ),
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded main "
+            "script. **stdio mode only.**",
         ),
     ] = None,
     sli_script_path: Annotated[
         str | None,
         Field(
-            description="Local file path for SLI script. Mutually exclusive with "
-            "'sli_script' and 'sli_script_base64'."
+            description="Local file path for SLI script. **stdio mode only.** "
+            "Mutually exclusive with the other sli_script_* params."
         ),
     ] = None,
     sli_script_base64: Annotated[
         str | None,
         Field(
             default=None,
-            description="UTF-8 SLI script as standard base64. Mutually exclusive with "
-            "'sli_script' and 'sli_script_path'.",
+            description="UTF-8 SLI script as standard base64.",
+        ),
+    ] = None,
+    sli_script_gzip_base64: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="UTF-8 SLI script as base64(gzip(...)). Best inline option "
+            "for SLI scripts that exceed simple-metric size.",
+        ),
+    ] = None,
+    sli_script_base64_path: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Local file path to a file containing the base64-encoded SLI "
+            "script. **stdio mode only.**",
         ),
     ] = None,
     runtime_vars: Annotated[
@@ -4072,22 +6416,53 @@ async def commit_slx(
 ) -> str:
     """Commit a tested script as an SLX to the workspace Git repo.
 
+    Skills:
+      - runwhen-skill://build-runwhen-task (authoring workflow)
+      - runwhen-skill://discover-secrets   (secret_vars mapping)
+      - runwhen-skill://discover-locations (location selection)
+      - runwhen-skill://configure-hierarchy (hierarchy/resource_path)
+
     Creates a new SLX with the script as a Task (runbook) and/or SLI.
     The script should already be tested via run_script or run_script_and_wait.
 
     This writes slx.yaml + runbook.yaml (for tasks) or slx.yaml + sli.yaml
     (for SLIs) to the workspace repository.
 
-    To commit BOTH a task AND an SLI on the same SLX, use one of these approaches:
+    Script-source parameter matrix (provide exactly one task variant; SLI
+    variants mirror the names):
 
-    1. Custom SLI script: set task_type="task" and provide sli_script with
-       a script that returns a 0-1 metric. Generates both runbook.yaml and sli.yaml.
+    | Variant                | Best for                          | Mode      |
+    |------------------------|-----------------------------------|-----------|
+    | script                 | Small scripts <~5KB, readable     | any       |
+    | script_base64          | Any size; safe JSON escaping      | any       |
+    | script_gzip_base64     | >5KB; 3-5x denser than b64        | any       |
+    | script_path            | Local file, raw text              | stdio only|
+    | script_base64_path     | Local file with base64 blob       | stdio only|
 
-    2. Cron-scheduler SLI: set task_type="task" and provide cron_schedule with
-       a cron expression (e.g. "0 */2 * * *"). The SLI will trigger the task's
-       runbook on that schedule.
+    For very large scripts (combined task+SLI >~50KB) prefer publishing as a
+    registry codebundle and using deploy_registry_codebundle.
 
-    Script-content contract (the two most common footguns):
+    To commit BOTH a task AND an SLI on the same SLX:
+
+    1. **Custom SLI script** (preferred): set task_type="task" and provide a
+       separate lightweight sli_script that emits ONE float between 0 and 1
+       (e.g. failing_pods / total_pods). The SLI script MUST be its own
+       small probe — DO NOT duplicate the task body. The server rejects
+       identical task+SLI content.
+
+    2. **Cron-scheduler SLI**: set task_type="task" and provide cron_schedule
+       with a cron expression (e.g. "0 */2 * * *"). The SLI will trigger the
+       task's runbook on that schedule. No sli_script needed.
+
+    Output contracts (the two scripts are NOT interchangeable):
+
+    - **Task** (interpreter, task_type='task'): returns/writes a List[Dict] of
+      issues with keys 'issue title', 'issue description', 'issue severity'
+      (1-4), 'issue next steps'.
+    - **SLI** (sli_interpreter, implied task_type='sli'): returns/writes ONE
+      float between 0 and 1.
+
+    Script-content footguns:
 
     - Bash scripts must NOT include `main "$@"` at the bottom. The runner
       sources the script and invokes `main()` itself with FD 3 wired to a
@@ -4146,12 +6521,27 @@ async def commit_slx(
                 }
             )
 
-    if sli_script and cron_schedule:
+    # ``sli_script`` is one of FIVE script-source parameters: inline,
+    # path (stdio), base64, gzip+base64, base64+path (stdio). Any of them
+    # commits the SLX to a custom-SLI branch that emits a 0-1 metric, which
+    # is incompatible with cron_schedule (the cron branch instead runs the
+    # task on a schedule and emits no SLI). Only checking ``sli_script``
+    # would let the other four sources silently win and drop the cron
+    # schedule at commit time.
+    if cron_schedule and (
+        sli_script is not None
+        or sli_script_path
+        or sli_script_base64
+        or sli_script_gzip_base64
+        or sli_script_base64_path
+    ):
         return _json_response(
             {
-                "error": "Cannot specify both sli_script and cron_schedule. "
-                "Use sli_script for a custom SLI metric, or cron_schedule "
-                "to trigger the runbook on a schedule.",
+                "error": "Cannot specify both an SLI script and cron_schedule. "
+                "Use any of sli_script / sli_script_path / sli_script_base64 / "
+                "sli_script_gzip_base64 / sli_script_base64_path for a custom "
+                "SLI metric, or cron_schedule to trigger the runbook on a "
+                "schedule. They are mutually exclusive — pick one.",
             }
         )
 
@@ -4163,15 +6553,128 @@ async def commit_slx(
         return _json_response({"error": f"Invalid data tag '{data}'. Must be one of: {valid}"})
 
     try:
-        script = _resolve_script(script, script_path, script_base64)
+        script = _resolve_script(
+            script,
+            script_path,
+            script_base64,
+            script_gzip_base64,
+            script_base64_path,
+            label="script",
+        )
     except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
-    if sli_script_path or sli_script is not None or sli_script_base64:
+    sli_source_provided = bool(
+        sli_script_path
+        or sli_script is not None
+        or sli_script_base64
+        or sli_script_gzip_base64
+        or sli_script_base64_path
+    )
+    if sli_source_provided:
         try:
-            sli_script = _resolve_script(sli_script, sli_script_path, sli_script_base64)
+            sli_script = _resolve_script(
+                sli_script,
+                sli_script_path,
+                sli_script_base64,
+                sli_script_gzip_base64,
+                sli_script_base64_path,
+                label="sli_script",
+            )
         except (ValueError, FileNotFoundError) as exc:
             return _json_response({"error": f"SLI script: {exc}"})
+
+    # Reject identical task+SLI content BEFORE doing any further work. This
+    # is the agent anti-pattern that ballooned commit_slx envelopes in the
+    # cursor-scratch transcript: one big script branching on RW_RFNS shipped
+    # as both 'script' and 'sli_script'. Task and SLI have different output
+    # contracts and cannot share the same body.
+    if _scripts_have_identical_content(script, sli_script):
+        return _json_response(
+            {
+                "error": "Identical task and SLI script content",
+                "message": _IDENTICAL_TASK_SLI_MSG,
+            }
+        )
+
+    main_warnings = _validate_script(script, interpreter, task_type)
+    blocking = [w for w in main_warnings if _is_blocking_warning(w)]
+    if blocking:
+        return _json_response(
+            {
+                "error": "Script validation failed",
+                "warnings": main_warnings,
+                "blocking_warnings": blocking,
+                "message": "Fix the warnings before committing. Use validate_script for details.",
+            }
+        )
+    script, _script_fixes = _strip_runner_unsafe_blocks(script, interpreter)
+    script_size_warning, size_error = _assess_script_size(script, label="script")
+    if size_error:
+        return _json_response(
+            {
+                "error": "Script too large for transport",
+                "message": size_error,
+                "script_bytes": len(script.encode("utf-8")),
+            }
+        )
+    static_quality_notes = _assess_issue_quality_static(script, interpreter, task_type)
+
+    sli_size_warning: str | None = None
+    if sli_script:
+        sli_interp = sli_interpreter or interpreter
+        sli_warnings = _validate_script(sli_script, sli_interp, "sli")
+        sli_blocking = [w for w in sli_warnings if _is_blocking_warning(w)]
+        if sli_blocking:
+            return _json_response(
+                {
+                    "error": "SLI script validation failed",
+                    "warnings": sli_warnings,
+                    "blocking_warnings": sli_blocking,
+                }
+            )
+        sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
+        sli_size_warning, sli_size_error = _assess_script_size(sli_script, label="SLI script")
+        if sli_size_error:
+            return _json_response(
+                {
+                    "error": "SLI script too large for transport",
+                    "message": sli_size_error,
+                    "sli_script_bytes": len(sli_script.encode("utf-8")),
+                }
+            )
+
+    combined_size_warning, combined_size_error = _assess_combined_script_size(
+        (script, "script"),
+        (sli_script or "", "sli_script"),
+    )
+    if combined_size_error:
+        return _json_response(
+            {
+                "error": "Combined task+SLI scripts too large for one tool envelope",
+                "message": combined_size_error,
+                "script_bytes": len(script.encode("utf-8")),
+                "sli_script_bytes": len((sli_script or "").encode("utf-8")),
+            }
+        )
+
+    task_title_issue = _detect_unresolved_placeholders(task_title)
+    if task_title_issue:
+        return _json_response(
+            {
+                "error": "Invalid task_title",
+                "message": task_title_issue,
+            }
+        )
+
+    azure_hint = _azure_credentials_hint(script, sli_script, secret_vars)
+    if azure_hint:
+        return _json_response(
+            {
+                "error": "Azure SLX missing azure_credentials secret",
+                "message": azure_hint,
+            }
+        )
 
     ws = await _resolve_workspace(workspace_name)
 
@@ -4214,10 +6717,15 @@ async def commit_slx(
     committed_types: list[str] = []
     runbook_payload: dict[str, Any] | None = None
     sli_payload: dict[str, Any] | None = None
+    secret_resolution_notes: list[str] = []
 
     if task_type == "task":
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
+        if secret_vars:
+            secret_vars, secret_resolution_notes = await _prepare_secret_vars_for_author(
+                ws, secret_vars
+            )
         rb_config = [
             {"name": "TASK_TITLE", "value": task_title},
             {"name": "GEN_CMD", "value": script_b64},
@@ -4279,6 +6787,10 @@ async def commit_slx(
     elif task_type == "sli":
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
+        if secret_vars:
+            secret_vars, secret_resolution_notes = await _prepare_secret_vars_for_author(
+                ws, secret_vars
+            )
         sli_config = [
             {"name": "GEN_CMD", "value": script_b64},
             {"name": "INTERPRETER", "value": interpreter},
@@ -4310,7 +6822,7 @@ async def commit_slx(
     )
 
     success = status_code in (200, 201)
-    result = {
+    result: dict[str, Any] = {
         "status": "committed" if success else f"error_{status_code}",
         "slx_name": slx_name,
         "workspace": ws,
@@ -4318,6 +6830,30 @@ async def commit_slx(
         "committed_types": type_label,
         "response": resp_data,
     }
+    size_warnings: list[str] = []
+    if script_size_warning:
+        size_warnings.append(script_size_warning)
+    if sli_size_warning:
+        size_warnings.append(sli_size_warning)
+    if combined_size_warning:
+        size_warnings.append(combined_size_warning)
+    if size_warnings:
+        result["size_warnings"] = size_warnings
+        result["script_bytes"] = len(script.encode("utf-8"))
+        if sli_script:
+            result["sli_script_bytes"] = len(sli_script.encode("utf-8"))
+    if static_quality_notes:
+        result["issue_quality_notes"] = static_quality_notes
+        result["issue_quality_message"] = (
+            "Commit succeeded, but a static scan of the script flagged issue-"
+            "contract concerns. Empty/stub issue payloads make this SLX "
+            "useless for workspace_chat (which surfaces issues, not stdout). "
+            "Strongly consider re-running run_script_and_wait and refining "
+            "the issue 'description' and 'next steps' before relying on this "
+            "task."
+        )
+    if secret_resolution_notes:
+        result["secret_resolution_notes"] = secret_resolution_notes
     return _json_response(result)
 
 
@@ -4389,6 +6925,8 @@ _TOOL_FUNCTIONS = [
     get_registry_codebundle,
     deploy_registry_codebundle,
     get_workspace_context,
+    list_skills,
+    get_skill,
     get_workspace_secrets,
     get_workspace_locations,
     validate_script,
@@ -4474,6 +7012,13 @@ def _make_workspace_auth_check(tool_name: str) -> Any:
     return check
 
 
+def _install_tool_tracing(server: FastMCP) -> None:
+    """Register tool-call tracing middleware on an MCP server instance."""
+    from runwhen_platform_mcp.tool_trace import ToolTraceMiddleware
+
+    server.add_middleware(ToolTraceMiddleware())
+
+
 def _build_http_server() -> FastMCP:
     """Build an HTTP-mode MCP server with authentication and health checks.
 
@@ -4499,6 +7044,11 @@ def _build_http_server() -> FastMCP:
         tool = FunctionTool.from_function(fn, auth=auth_check)  # type: ignore[arg-type]
         http_mcp.add_tool(tool)
 
+    # Register skill resources on the HTTP server too. Without this,
+    # ``runwhen-skill://`` resources are only visible to stdio clients
+    # even though the server instructions advertise them universally.
+    _register_skill_resources(http_mcp)
+
     @http_mcp.custom_route("/health", methods=["GET"])
     async def health_check(request: Any) -> Any:
         from starlette.responses import JSONResponse
@@ -4516,6 +7066,7 @@ def _build_http_server() -> FastMCP:
 
         return JSONResponse({"status": "alive"})
 
+    _install_tool_tracing(http_mcp)
     return http_mcp
 
 
@@ -4542,6 +7093,9 @@ def main() -> None:
         http_mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
     else:
         mcp.run()
+
+
+_install_tool_tracing(mcp)
 
 
 if __name__ == "__main__":

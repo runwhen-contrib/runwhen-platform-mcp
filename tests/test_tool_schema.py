@@ -44,6 +44,8 @@ EXPECTED_TOOLS = {
     "get_registry_codebundle",
     "deploy_registry_codebundle",
     "get_workspace_context",
+    "list_skills",
+    "get_skill",
     "get_workspace_secrets",
     "get_workspace_locations",
     "validate_script",

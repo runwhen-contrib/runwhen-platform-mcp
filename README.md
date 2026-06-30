@@ -424,6 +424,10 @@ The server exposes these tools, grouped by use case.
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
+| `RUNWHEN_AIRGAP` | No | Set to `true` for airgapped environments. `search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call to the registry. |
+| `RUNWHEN_REGISTRY_TIMEOUT_S` | No | HTTP timeout (seconds) for registry calls. Default `10`. Lowered from the PAPI default so an unreachable registry fails fast and is reported gracefully. |
+| `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` | No | Soft warning threshold for script payload size. Default `10240` (10KB). Scripts above this size produce an advisory warning in `validate_script` / `run_script_and_wait` — MCP HTTP intermediaries often truncate base64 payloads above ~13KB. |
+| `RUNWHEN_SCRIPT_HARD_MAX_BYTES` | No | Hard cap for script payload size. Default `65536` (64KB). `commit_slx` / `run_script*` reject scripts above this with an error and suggest using a registry codebundle, `script_gzip_base64`, or `script_path`. |
 | `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Internal git URL for `rw-generic-codecollection` (airgap). Shared default for Tool Builder runbook + SLI bundles. |
 | `MCP_GENERIC_CODECOLLECTION_REF` | No | Git ref for the generic codecollection mirror (default: `main`). |
 | `MCP_TOOL_BUILDER_RUNBOOK_*` | No | Override Tool Builder runbook code bundle (`REPO_URL`, `REF`, `PATH`). |
@@ -488,13 +492,31 @@ Put a `RUNWHEN.md` in your project root with infrastructure rules (DBs, naming, 
 | **MCP server** | `runwhen_platform_mcp/` | Python package; run via `runwhen-platform-mcp` or `python -m runwhen_platform_mcp.server`. |
 | **Docs** | `runwhen_platform_mcp/docs/` | Tool Builder flow, RUNWHEN.md template/example. |
 | **Tests** | `tests/` | Pytest tests; run with `pytest tests/ -v` (see `requirements-dev.txt`). |
-| **Skills** | `skills/` | Reusable AI workflow skills (SKILL.md) — discovered by Cursor, Copilot, and Claude. Symlinked at `.github/skills/` for Copilot auto-discovery. |
+| **Skills** | `skills/` | Reusable AI workflow skills (SKILL.md). Filesystem-discovered by Cursor / Copilot / Claude via `.github/skills/` & `.claude/skills/` symlinks, AND exposed to **every MCP client** as `runwhen-skill://<name>` resources (plus `list_skills` / `get_skill` tool fallbacks for clients that under-surface resources). |
 | **Rules & agents** | `rules/`, `agents/` | Optional Cursor rules and agent personas. |
 | **Docker** | `Dockerfile` | Container image for remote HTTP deployment. Published to `ghcr.io/runwhen-contrib/runwhen-platform-mcp`. |
 | **Cursor plugin** | `.cursor-plugin/`, `mcp.json` | Plugin metadata and example MCP config. |
 | **Copilot instructions** | `.github/copilot-instructions.md` | Always-on instructions for GitHub Copilot. |
 
 The MCP server is client-agnostic; client-specific pieces (`.cursor-plugin/`, `.github/copilot-instructions.md`) are optional.
+
+---
+
+## Skills (progressive disclosure for any MCP client)
+
+`skills/<name>/SKILL.md` files are RunWhen's progressive-disclosure surface — short, task-focused guides agents load on demand instead of bundling everything into tool docstrings.
+
+**How each agent type sees them:**
+
+| Client | Discovery path | Mechanism |
+|--------|----------------|-----------|
+| Cursor / Claude Code / Copilot | `.cursor-plugin/`, `.claude/skills/`, `.github/skills/` (symlinks to `skills/`) | Native filesystem skill loading |
+| Goose, Continue, Cline, OpenAI Codex CLI, **any other compliant MCP client** | `runwhen-skill://<name>` MCP resources | Standard MCP `resources/list` + `resources/read` |
+| Clients that surface tools only (some OpenAI / Gemini function-callers) | `list_skills()` + `get_skill(name)` tool shims | Fallback path with identical content |
+
+The single source of truth is `skills/<name>/SKILL.md`. Frontmatter `description` is the trigger an agent reads to decide whether to load the body — keep it 1-2 sentences with explicit "Use when:" clauses.
+
+**Authoring rule of thumb:** if you find yourself growing a tool docstring past ~30 lines, lift the content into a new skill and reference its URI from the docstring instead. Tool-side guidance should be short; depth goes in skills.
 
 ---
 
@@ -505,6 +527,44 @@ pip install -e .
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
+
+### Local MCP against staging (no container rebuild)
+
+To iterate on MCP server code against a live environment (e.g. staging) without
+pushing Docker images, run the server in **stdio mode** from your checkout and
+point Cursor (or any MCP client) at the local binary:
+
+```bash
+cd runwhen-platform-mcp
+pip install -e .
+export RW_API_URL="https://papi.staging.shared.runwhen.com"
+export RUNWHEN_TOKEN="<your PAT or JWT>"
+export DEFAULT_WORKSPACE="stg-test"   # optional default
+runwhen-platform-mcp
+```
+
+**Cursor `mcp.json` example** (use the venv binary path after `pip install -e .`):
+
+```json
+{
+  "mcpServers": {
+    "runwhen-staging-local": {
+      "command": "/path/to/runwhen-platform-mcp/.venv/bin/runwhen-platform-mcp",
+      "env": {
+        "RW_API_URL": "https://papi.staging.shared.runwhen.com",
+        "RUNWHEN_TOKEN": "<PAT or JWT>",
+        "DEFAULT_WORKSPACE": "stg-test"
+      }
+    }
+  }
+}
+```
+
+Changes to `runwhen_platform_mcp/server.py` take effect after restarting the MCP
+server in Cursor (disable/re-enable the server or reload the window). Only
+deploy a remote HTTP MCP container when you need OAuth or a shared team endpoint.
+
+**Token:** RunWhen UI → Profile → Personal Tokens, or `POST {RW_API_URL}/api/v3/token/`.
 
 Optional Git hooks (Ruff check + format, same as CI):
 
