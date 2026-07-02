@@ -40,7 +40,7 @@ RunWhen UI (e.g. to run tasks from the chat).
 
 | Need | Tool(s) |
 |------|---------|
-| **Execute** a task | `run_slx` (workspace_chat CANNOT run tasks) |
+| **Execute** a task | `run_slx` (workspace_chat CANNOT run tasks). Always use `task_titles="*"` — never pass display titles from `get_slx_runbook` |
 | Task authoring | `validate_script`, `run_script_and_wait`, `commit_slx`, `delete_slx` |
 | Registry | `search_registry`, `get_registry_codebundle`, `deploy_registry_codebundle` |
 | Chat config CRUD | `list/get/create/update_chat_rule`, `list/get/create/update_chat_command` |
@@ -79,7 +79,7 @@ to interact with the platform — do not attempt to call APIs directly.
 | `get_workspace_issues` | Raw JSON: current issues (prefer `workspace_chat` for search/investigation) |
 | `get_workspace_slxs` | Raw JSON: list SLXs (prefer `workspace_chat` for search/investigation) |
 | `get_run_sessions` | Raw JSON: recent run sessions (prefer `workspace_chat` for search/investigation) |
-| `get_workspace_config_index` | Raw JSON: workspace config overview (prefer `workspace_chat` for questions) |
+| `get_workspace_config_index` | Raw JSON: workspace config overview (prefer `workspace_chat` for questions). Accepts `workspace_name` only — not `resource_path` |
 | `get_issue_details` | Raw JSON: issue by ID (prefer `workspace_chat` for investigation) |
 | `get_slx_runbook` | Raw JSON: SLX runbook (prefer `workspace_chat` for "what does this do?") |
 | `search_workspace` | Autocomplete search (prefer `workspace_chat` for richer results) |

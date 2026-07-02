@@ -36,27 +36,44 @@ not actually trigger it. You MUST use `run_slx` for execution.
 3. **Execute** — Call `run_slx` with the SLX short name
 4. **Review results** — The tool returns pass/fail status and output
 
+## Critical: always use `task_titles="*"`
+
+SLX runbooks register task names as the literal Robot variable `${TASK_TITLE}`
+(resolved at runtime), **not** the human-readable title shown in
+`get_slx_runbook`. Passing a display title (e.g. `"GitHub Project Board Daily
+Update"`) produces empty `passed_titles` — the run looks empty even though the
+SLX exists. The MCP rejects such literals with `Unsupported task_titles value`.
+
+- **Default:** omit `task_titles` or pass `task_titles="*"` (runs all tasks)
+- **Advanced:** pass `task_titles="${TASK_TITLE}"` only when you know the exact
+  Robot variable name stored in the runbook
+- **Never:** copy the resolved title from `get_slx_runbook` into `task_titles`
+
 ## Examples
 
-### Run all tasks in an SLX
+### Run all tasks in an SLX (usual case)
 
 ```
 run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 ```
 
-### Run specific tasks within a runbook
+### Run with per-run runtime variable overrides
+
+Use `runtime_var_overrides` for user inputs declared in the runbook's
+`runtime_vars`. Still use `task_titles="*"` (or omit it).
 
 ```
-run_slx(slx_name="k8s-namespace-check", workspace_name="my-workspace", task_titles="Check Pod Status||Check Pod Restarts")
+run_slx(
+  slx_name="github-project-board-update",
+  workspace_name="my-workspace",
+  task_titles="*",
+  runtime_var_overrides={
+    "GITHUB_OWNER": "runwhen",
+    "GITHUB_REPO": "customer-project-g-research",
+    "LOOKBACK_DAYS": "1",
+  },
+)
 ```
-
-> **Default to `task_titles="*"`.** SLX runbooks register task names as the
-> literal Robot variable `${TASK_TITLE}` (resolved at runtime), not the
-> resolved string. Passing the literal title (e.g. `"Check Pod Status"`)
-> returns empty `passed_titles`. The MCP now rejects such literals with a
-> hint to use `"*"`, which the platform expands to `["${TASK_TITLE}"]` and
-> Robot resolves correctly. Pass `"${TASK_TITLE}"` explicitly only if you
-> are certain the runbook expects a specific Robot variable name.
 
 ### Full discovery-to-execution flow
 
@@ -77,7 +94,8 @@ run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 |-----------|----------|---------|-------------|
 | `slx_name` | Yes | — | SLX short name (e.g. "k8s-pod-health") |
 | `workspace_name` | Yes | — | Target workspace (e.g. "t-oncall") |
-| `task_titles` | No | `"*"` (all) | Which tasks to run. `"*"` for all, or `"||"`-separated titles |
+| `task_titles` | No | `"*"` (all) | Almost always `"*"`. Do not pass human-readable titles from `get_slx_runbook` |
+| `runtime_var_overrides` | No | — | Per-run values for runbook `runtime_vars` (name → value dict) |
 
 ## How it works
 
@@ -91,6 +109,8 @@ run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 
 | Problem | Solution |
 |---------|----------|
+| `Unsupported task_titles value` | Use `task_titles="*"` — never pass the display title from `get_slx_runbook` |
+| `unexpected_keyword_argument` on `resource_path` | `resource_path` is only for `commit_slx` / `deploy_registry_codebundle`, not query tools like `get_workspace_config_index` |
 | "SLX not found" / 404 | Verify the SLX name with `get_workspace_slxs` |
 | Timeout after 300s | SLX may still be running. Check `get_run_sessions` later |
 | No output returned | The runner may still be processing. Wait and check `get_run_sessions` |

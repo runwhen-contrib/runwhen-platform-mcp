@@ -79,3 +79,5 @@ spec:
 ## Important: commit reconciliation
 
 After `commit_slx` succeeds, it takes time for the workspace config repo commit to reconcile through the system. The SLX will not appear in `get_workspace_config_index`, `search_workspace`, or workspace-chat results immediately. Allow 1-3 minutes for the platform to process the commit and update its indexes.
+
+`resource_path` is a **write** parameter on `commit_slx` and `deploy_registry_codebundle` only. Query tools such as `get_workspace_config_index` accept `workspace_name` alone — do not pass `resource_path` to them.

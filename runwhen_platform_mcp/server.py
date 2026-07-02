@@ -3861,6 +3861,12 @@ async def get_workspace_config_index(
     relationships in the workspace. Useful for understanding what's
     monitored and how things are connected.
 
+    This tool accepts only ``workspace_name``. It does NOT accept
+    ``resource_path``, ``slx_name``, ``filter``, or other parameters — those
+    fail with ``unexpected_keyword_argument``. To set ``resource_path`` on an
+    SLX, use ``commit_slx`` or ``deploy_registry_codebundle``. To find SLXs at
+    a path, use ``workspace_chat`` or ``search_workspace``.
+
     NOTE: For questions like "what's monitored in namespace X?" or "how are
     resources connected?", prefer `workspace_chat` — it can traverse the
     resource graph and provide contextual answers. Use this tool only when
