@@ -1,0 +1,51 @@
+name: Sync bundled authoring from runwhen-local
+
+on:
+  workflow_dispatch:
+    inputs:
+      runwhen_local_ref:
+        description: runwhen-local git ref (branch, tag, or SHA)
+        required: false
+        default: main
+  schedule:
+    # Weekly refresh; also run manually after runwhen-local indexer/catalog changes
+    - cron: "0 6 * * 1"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/sync_bundled_authoring.py"
+      - ".github/workflows/sync-bundled-authoring.yaml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/checkout@v6
+        with:
+          repository: runwhen-contrib/runwhen-local
+          ref: ${{ github.event.inputs.runwhen_local_ref || 'main' }}
+          path: runwhen-local
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Sync bundled authoring references
+        run: python scripts/sync_bundled_authoring.py --runwhen-local runwhen-local
+
+      - name: Commit bundle updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add skills/author-generation-rules/references/
+          if git diff --staged --quiet; then
+            echo "Bundle already up to date"
+            exit 0
+          fi
+          git commit -m "chore(bundle): sync authoring reference from runwhen-local"
+          git push

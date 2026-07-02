@@ -56,6 +56,12 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 from pydantic import Field
 
+from runwhen_platform_mcp.codecollection_render import (
+    CodecollectionRenderInput,
+    render_codecollection_files,
+    write_codecollection_files,
+)
+
 load_dotenv()
 
 PAPI_URL = os.environ.get("RW_API_URL", "").rstrip("/")
@@ -6921,6 +6927,260 @@ async def delete_slx(
     return _json_response(result)
 
 
+@mcp.tool()
+async def render_codecollection_skill(
+    bundle_name: str = Field(
+        description="Codebundle directory name (kebab-case, e.g. 'azure-function-cold-start')."
+    ),
+    alias: str = Field(description="Human-readable SLX display name."),
+    statement: str = Field(description="SLX statement describing what should be true."),
+    workspace_name: str = Field(
+        description="Workspace used during tool-builder testing (provenance in review file)."
+    ),
+    script: Annotated[
+        str | None, Field(description="The full script source code (not base64).")
+    ] = None,
+    task_title: str = Field(default="", description="Human-readable task title (static literal)."),
+    interpreter: str = Field(default="python", description="'python' or 'bash'."),
+    env_vars: Annotated[
+        dict[str, str] | None,
+        Field(description="Environment variables baked into the TaskSet config."),
+    ] = None,
+    secret_vars: Annotated[
+        dict[str, str] | None, Field(description="Secret name → workspace secret key mappings.")
+    ] = None,
+    runtime_vars: Annotated[
+        list[dict] | None, Field(description="Per-run runtime variables (task-only).")
+    ] = None,
+    tags: Annotated[
+        list[dict[str, str]] | None, Field(description="Resource tags ({name, value} dicts).")
+    ] = None,
+    access: str = Field(default="read-write", description="'read-write' or 'read-only'."),
+    data: str = Field(
+        default="logs-bulk", description="'logs-bulk', 'config', or 'logs-stacktrace'."
+    ),
+    image_url: Annotated[str | None, Field(description="Icon URL for the SLX.")] = None,
+    owners: Annotated[
+        list[str] | None,
+        Field(description="Owner emails for the review file (defaults to current user)."),
+    ] = None,
+    base_name: Annotated[
+        str | None,
+        Field(description="Short SLX suffix in generation rule (<15 chars). Default: bundle_name."),
+    ] = None,
+    platform: str = Field(
+        default="runwhen",
+        description="Generation rule platform. Use 'runwhen' for workspace-scoped tool-builder.",
+    ),
+    resource_types: Annotated[
+        list[str] | None,
+        Field(description="Resource types for the generation rule (default: ['workspace'])."),
+    ] = None,
+    match_rules: Annotated[
+        list[dict] | None,
+        Field(description="Match predicates forwarded into the generation rule YAML."),
+    ] = None,
+    slx_qualifiers: Annotated[
+        list[str] | None,
+        Field(description="SLX name qualifiers (default: ['workspace'])."),
+    ] = None,
+    generic_runtime_ref: str = Field(
+        default="main",
+        description="Git ref for rw-generic-codecollection pinned in templates.",
+    ),
+    generic_runtime_repo_url: Annotated[
+        str | None,
+        Field(description="Override rw-generic-codecollection repo URL in templates."),
+    ] = None,
+    timeout_seconds: int = Field(
+        default=300, description="Task timeout passed to tool-builder runbook."
+    ),
+    include_sli: bool = Field(
+        default=False, description="Also emit an SLI template (tool-builder SLI)."
+    ),
+    sli_script: Annotated[
+        str | None,
+        Field(description="Optional separate SLI script (defaults to main script if include_sli)."),
+    ] = None,
+    sli_interpreter: Annotated[str | None, Field(description="Interpreter for SLI script.")] = None,
+    sli_interval_seconds: int = Field(
+        default=300, description="SLI interval when include_sli is true."
+    ),
+    source_slx_name: Annotated[
+        str | None, Field(description="Original inline SLX short name (provenance in review file).")
+    ] = None,
+    output_dir: Annotated[
+        str | None,
+        Field(
+            description="Write rendered files to this directory (stdio mode). "
+            "When omitted, files are returned in the tool response only."
+        ),
+    ] = None,
+    script_path: Annotated[
+        str | None,
+        Field(description="Local file path for script. **stdio mode only.**"),
+    ] = None,
+    script_base64: Annotated[
+        str | None, Field(description="UTF-8 script as standard base64.")
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None, Field(description="UTF-8 script as base64(gzip(...)).")
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(description="Local path to base64-encoded script file. **stdio mode only.**"),
+    ] = None,
+) -> str:
+    """Render a tested tool-builder task as a private Custom Discovery CodeCollection.
+
+    Skills:
+      - runwhen-skill://commit-to-codecollection (GitOps workflow)
+      - runwhen-skill://build-runwhen-task (authoring + testing first)
+
+    Emits the standard codecollection layout (generation rule + Jinja templates) for
+    workspace-builder discovery. Templates delegate runtime to
+    ``rw-generic-codecollection/codebundles/tool-builder`` with base64 ``GEN_CMD``.
+
+    Also writes ``.runwhen/README.md`` with the **decoded script** and plain-English
+    match rules so PR reviewers never need to base64-decode TaskSet templates.
+
+    This tool does **not** push to git or mutate the workspace — it renders files locally
+    (or returns them inline) for you to ``git add / commit / push``.
+
+    Default generation rule uses ``platform: runwhen`` and ``resourceTypes: [workspace]``.
+    Requires a runwhen-local release with the ``runwhen`` platform indexer (RW-1355).
+    """
+    try:
+        _validate_slx_name(bundle_name.replace("_", "-"))
+    except ValueError as exc:
+        return _json_response({"error": f"Invalid bundle_name: {exc}"})
+
+    if base_name:
+        try:
+            _validate_slx_name(base_name)
+        except ValueError as exc:
+            return _json_response({"error": f"Invalid base_name: {exc}"})
+
+    task_title_issue = _detect_unresolved_placeholders(task_title)
+    if task_title_issue:
+        return _json_response({"error": "Invalid task_title", "message": task_title_issue})
+
+    try:
+        resolved_script, _transport = _resolve_script(
+            script=script,
+            script_path=script_path,
+            script_base64=script_base64,
+            script_gzip_base64=script_gzip_base64,
+            script_base64_path=script_base64_path,
+            param_name="script",
+        )
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
+    main_warnings = _validate_script(resolved_script, interpreter, "task")
+    blocking = [w for w in main_warnings if _is_blocking_warning(w)]
+    if blocking:
+        return _json_response(
+            {
+                "error": "Script validation failed",
+                "warnings": main_warnings,
+                "blocking_warnings": blocking,
+            }
+        )
+    resolved_script, _script_fixes = _strip_runner_unsafe_blocks(resolved_script, interpreter)
+    size_warning, size_error = _assess_script_size(resolved_script, label="script")
+    if size_error:
+        return _json_response({"error": "Script too large for transport", "message": size_error})
+
+    runtime_var_errors = _validate_runtime_vars(runtime_vars)
+    if runtime_var_errors:
+        return _json_response({"error": "Invalid runtime_vars", "details": runtime_var_errors})
+
+    azure_hint = _azure_credentials_hint(resolved_script, sli_script, secret_vars)
+    if azure_hint:
+        return _json_response(
+            {"error": "Azure task missing azure_credentials secret", "message": azure_hint}
+        )
+
+    ws = await _resolve_workspace(workspace_name)
+
+    if owners is None:
+        owners = [await _get_user_email()]
+
+    try:
+        from importlib.metadata import version as pkg_version
+
+        mcp_version = pkg_version("runwhen-platform-mcp")
+    except Exception:
+        mcp_version = "unknown"
+
+    repo_url = generic_runtime_repo_url or _GENERIC_CODECOLLECTION_REPO_URL
+    render_input = CodecollectionRenderInput(
+        bundle_name=bundle_name,
+        alias=alias,
+        statement=statement,
+        task_title=task_title or alias,
+        script=resolved_script,
+        interpreter=interpreter,
+        env_vars=env_vars,
+        secret_vars=secret_vars,
+        runtime_vars=runtime_vars,
+        tags=tags,
+        access=access,
+        data=data,
+        image_url=image_url,
+        owners=owners,
+        generic_repo_url=repo_url,
+        generic_ref=generic_runtime_ref,
+        platform=platform,
+        resource_types=resource_types or ["workspace"],
+        match_rules=match_rules,
+        slx_qualifiers=slx_qualifiers or ["workspace"],
+        base_name=base_name,
+        include_sli=include_sli,
+        sli_script=sli_script,
+        sli_interpreter=sli_interpreter,
+        sli_interval_seconds=sli_interval_seconds,
+        source_workspace=ws,
+        source_slx_name=source_slx_name,
+        timeout_seconds=timeout_seconds,
+        mcp_version=mcp_version,
+    )
+
+    files = render_codecollection_files(render_input)
+    written_paths: list[str] = []
+    if output_dir:
+        if MCP_TRANSPORT != "stdio":
+            return _json_response(
+                {
+                    "error": "output_dir is only supported in stdio MCP mode",
+                    "hint": "Omit output_dir to receive file contents in this response.",
+                }
+            )
+        written_paths = write_codecollection_files(files, output_dir)
+
+    result: dict[str, Any] = {
+        "bundle_name": bundle_name,
+        "platform": platform,
+        "resource_types": render_input.resource_types,
+        "files": files,
+        "file_count": len(files),
+        "next_steps": [
+            "Review `.runwhen/README.md` for decoded script and match-rule summary.",
+            f"git add codebundles/{bundle_name} && git commit -m "
+            f"'Add {bundle_name} tool-builder bundle'",
+            "git push",
+            "Register the repo in runwhen-local workspaceInfo.yaml codeCollections",
+            "Requires runwhen-local with platform: runwhen support (RW-1355)",
+        ],
+    }
+    if written_paths:
+        result["output_dir"] = output_dir
+        result["written_paths"] = written_paths
+
+    return _json_response(result)
+
+
 _TOOL_FUNCTIONS = [
     workspace_chat,
     list_workspaces,
@@ -6965,6 +7225,7 @@ _TOOL_FUNCTIONS = [
     run_script_and_wait,
     run_slx,
     commit_slx,
+    render_codecollection_skill,
     delete_slx,
 ]
 

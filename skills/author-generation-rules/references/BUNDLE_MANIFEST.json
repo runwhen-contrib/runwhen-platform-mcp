@@ -1,0 +1,90 @@
+{
+  "synced_at": "2026-07-02T20:20:33Z",
+  "runwhen_local": "/Users/sheastewart/GIT/runwhen-contrib/runwhen-local",
+  "files": [
+    {
+      "path": "concepts.md",
+      "sha256": "3733e583c6770ded123b74383023a2f49647a11d8f4244eb625bde5a821558e8"
+    },
+    {
+      "path": "generation-rules-schema.md",
+      "sha256": "1a41257a3b1513cf9c1c98812567ae9e01f4f366b483f31aae64fc3cdce180fe"
+    },
+    {
+      "path": "generation-rules-syntax.md",
+      "sha256": "29dbeeae8e5ed146619875dc012faa4f47107ea57aea070c417ac069aa075690"
+    },
+    {
+      "path": "tag-hierarchy-contract.md",
+      "sha256": "5622c329cd5fe8908d172a68ab092a2d8978023047bb969be0970c8ed6f23f33"
+    },
+    {
+      "path": "indexed-resources-index.md",
+      "sha256": "1ed9e0da048c54853afea6d5fff71a6540f30f7bff5e47e972c27e17c8c91efd"
+    },
+    {
+      "path": "indexed-resources/azure.md",
+      "sha256": "586cd8ac53cb4be3de3b0eb837395564741b7c09714fe4e30a8e52edadb341e1"
+    },
+    {
+      "path": "indexed-resources/aws.md",
+      "sha256": "2558d21af730022c489b6e074be9ef333abdbe238e187aa086be0f6bcd631d36"
+    },
+    {
+      "path": "indexed-resources/gcp.md",
+      "sha256": "441bf5651a1ca9def833537cb5bb8e055cf19fa8f2770345062549501e1340b0"
+    },
+    {
+      "path": "indexed-resources/kubernetes.md",
+      "sha256": "774c98503aa9ca8469fd76d9eef5e93b9f3f2165c42e7089440f422627e54378"
+    },
+    {
+      "path": "indexed-resources/runwhen-platform.md",
+      "sha256": "467feb0346222006371512d09143bdf714ee4736283baac9ba066a1ece0b0b55"
+    },
+    {
+      "path": "catalogs/azure-resource-catalog.md",
+      "sha256": "b2306ae6b86c2fed895a508506bf7df11d4ddf7a57189ace1032da4f04cbb20b"
+    },
+    {
+      "path": "catalogs/aws-resource-catalog.md",
+      "sha256": "d68bb70e3019a1dddb8c62c7c4cde6acb74b42e6e1a53cdfb2ceb3b9b8770057"
+    },
+    {
+      "path": "catalogs/gcp-resource-catalog.md",
+      "sha256": "d138cc0c0d2dd375e7c1292aadfae5cefc6eaf1ea554139dae613da8efdfc490"
+    },
+    {
+      "path": "catalogs/kubernetes-resource-catalog.md",
+      "sha256": "704722165350089fcc49e943d9d0079621ca3c7f468aa6a1d161a34e2be4f8a2"
+    },
+    {
+      "path": "catalogs/runwhen-platform-resource-catalog.md",
+      "sha256": "c6325a34053493ff47fdb0ebc22b6c0bab69701e75bd0f3fae0ddc7228a05746"
+    },
+    {
+      "path": "generation-rule-schema.json",
+      "sha256": "d8fa9e8a616286965345941b9336caa3797fa4e21c4bf4d1dd259ff6e89b8f5c"
+    },
+    {
+      "path": "examples/README.md",
+      "sha256": "50e621b85e648bca82ffadd91b929324cae5fa9b354237b7f0591a006c37757c"
+    },
+    {
+      "path": "examples/azure-keyvault-slx.md",
+      "sha256": "d73ffc961fdb49294142dcbbd1be6559e8e8b3cb18b97e75a1922bedb73e556c"
+    },
+    {
+      "path": "examples/azure-vm-disk-runbook.md",
+      "sha256": "464e5c90f5da9b2b739c3b7da1b355b4e2d04b1a3471d8fd657ffe61ce0286dd"
+    },
+    {
+      "path": "examples/kubernetes-deployment-slx.md",
+      "sha256": "d0ad6fe0769fc4c2d92e25ff851f43f042c4a47ee2a641c0b54020eb76444f23"
+    },
+    {
+      "path": "examples/multi-resource-runbook.md",
+      "sha256": "cb1389c6742f90bd973d7c0e7885291ef68e51fcb2c7c698da9ac4c63f7b5d88"
+    }
+  ]
+}

@@ -30,6 +30,7 @@ if the registry has no suitable match.
 5. **Test** — `run_script_and_wait(workspace_name="my-workspace", ...)` with env_vars, secret_vars
 6. **Iterate** — Fix based on output, re-test until issues/severity/next-steps are correct
 7. **Commit** — `commit_slx(workspace_name="my-workspace", ...)` with metadata (see reference examples)
+   - **Or GitOps:** `render_codecollection_skill` via the `commit-to-codecollection` skill when storing in a private codecollection repo instead of the workspace
 8. **Wait** — Allow 1-3 minutes for reconciliation before querying the SLX
 
 > **Location auto-resolves.** You do NOT need to call
