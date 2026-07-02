@@ -65,6 +65,10 @@ platform's registry — canonical CloudQuery table names and legacy aliases
 both work (for example `virtual_machine` and
 `azure_compute_virtual_machines` resolve to the same Azure type).
 
+After discovery, confirm types and field paths in the **Workspace Explorer**
+at [http://localhost:8000/explorer/](http://localhost:8000/explorer/) (not
+legacy `resource-dump.yaml` on disk).
+
 For Kubernetes CRDs, use `plural.group[/version]` syntax as shown in
 [examples/](./examples/).
 

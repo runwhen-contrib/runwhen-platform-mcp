@@ -1,5 +1,5 @@
 {
-  "synced_at": "2026-07-02T20:20:33Z",
+  "synced_at": "2026-07-02T21:07:21Z",
   "runwhen_local": "/Users/sheastewart/GIT/runwhen-contrib/runwhen-local",
   "files": [
     {
@@ -8,11 +8,11 @@
     },
     {
       "path": "generation-rules-schema.md",
-      "sha256": "1a41257a3b1513cf9c1c98812567ae9e01f4f366b483f31aae64fc3cdce180fe"
+      "sha256": "95ea637568baeed12b5d1709c532fcc5849de505ef7c1f4784d9b4791d9a3e39"
     },
     {
       "path": "generation-rules-syntax.md",
-      "sha256": "29dbeeae8e5ed146619875dc012faa4f47107ea57aea070c417ac069aa075690"
+      "sha256": "f62e6b52ca65f448cadd7f19bdc32fcecd37789b4f1bd99a963203d8578b71b1"
     },
     {
       "path": "tag-hierarchy-contract.md",
