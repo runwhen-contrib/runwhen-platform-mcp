@@ -177,6 +177,34 @@ main() {
 """
         assert _validate_script(script, "bash", "task") == []
 
+    def test_python_task_rejects_issue_description_typo(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue desription": "y",'
+            ' "issue severity": 4, "issue next steps": "do something useful here"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue desription" in w and "issue description" in w for w in warnings)
+
+    def test_python_task_rejects_snake_case_issue_keys(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue_title": "x", "issue_description": "y",'
+            ' "issue_severity": 4, "issue_next_steps": "do something useful here"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue_title" in w and "issue title" in w for w in warnings)
+
+    def test_python_task_valid_issue_keys_not_flagged(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "do something useful here"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings)
+        assert not any("Unrecognized issue field key" in w for w in warnings)
+
 
 class TestExtractEnvVars:
     """Tests for _extract_env_vars."""

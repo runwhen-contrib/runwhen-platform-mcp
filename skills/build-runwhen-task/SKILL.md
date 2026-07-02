@@ -106,6 +106,11 @@ now both **statically** scans your script (in `validate_script` and
 | `issue next steps` | ≥ 20 chars, non-empty | Concrete remediation: a kubectl/CLI command, runbook URL, owner, or escalation path |
 | `issue severity` | 1, 2, 3, or 4 | Use the scale: 1=critical, 2=high, 3=medium, 4=informational |
 
+**Exact key spelling is required.** Keys are literal strings, not normalized aliases.
+A typo like `"issue desription"` passes some static checks but makes
+`tool-builder/runbook.robot` fail with `KeyError: 'issue description'` when the
+task runs. Copy keys from the table above character-for-character.
+
 Common anti-patterns the MCP will warn on:
 
 - ❌ `"issue description": ""` — empty literal

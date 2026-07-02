@@ -1337,9 +1337,71 @@ def _python_main_guard_has_paired_clause(script: str) -> bool:
     return skipped > 0
 
 
+_CANONICAL_ISSUE_FIELD_KEYS = frozenset(
+    {
+        "issue title",
+        "issue description",
+        "issue severity",
+        "issue next steps",
+        "issue observed at",
+    }
+)
+
+_ISSUE_KEY_CORRECTIONS: dict[str, str] = {
+    "issue desription": "issue description",
+    "issue desciption": "issue description",
+    "issue descripton": "issue description",
+    "issue descrption": "issue description",
+    "issue titel": "issue title",
+    "issue tittle": "issue title",
+    "issue_title": "issue title",
+    "issue_description": "issue description",
+    "issue_severity": "issue severity",
+    "issue next_steps": "issue next steps",
+    "issue_next_steps": "issue next steps",
+    "issue observed_at": "issue observed at",
+    "issue_observed_at": "issue observed at",
+}
+
+_ISSUE_FIELD_KEY_RE = re.compile(r'["\'](issue[^"\']+)["\']\s*:')
+
+
+def _detect_invalid_issue_field_keys(script: str, interpreter: str, task_type: str) -> list[str]:
+    """Flag misspelled or snake_case issue dict keys that break tool-builder at runtime."""
+    if task_type != "task" or interpreter not in ("python", "bash"):
+        return []
+
+    findings: list[str] = []
+    seen: set[str] = set()
+    for match in _ISSUE_FIELD_KEY_RE.finditer(script):
+        key = match.group(1)
+        if key in _CANONICAL_ISSUE_FIELD_KEYS or key in seen:
+            continue
+        seen.add(key)
+        correction = _ISSUE_KEY_CORRECTIONS.get(key)
+        if correction:
+            findings.append(
+                f"Invalid issue field key {key!r}. tool-builder expects "
+                f"{correction!r} (exact spelling). Wrong keys cause KeyError at runtime."
+            )
+        elif key.startswith("issue_"):
+            spaced = key.replace("_", " ", 1)
+            findings.append(
+                f"Invalid issue field key {key!r}. tool-builder expects spaced keys like "
+                f"{spaced!r}, not snake_case."
+            )
+        elif key.startswith("issue "):
+            allowed = ", ".join(repr(k) for k in sorted(_CANONICAL_ISSUE_FIELD_KEYS))
+            findings.append(f"Unrecognized issue field key {key!r}. Valid keys are: {allowed}.")
+    return findings
+
+
 def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]:
     """Validate a script against the RunWhen contract. Returns a list of warnings."""
     warnings: list[str] = []
+
+    if task_type == "task":
+        warnings.extend(_detect_invalid_issue_field_keys(script, interpreter, task_type))
 
     if interpreter == "python":
         if not re.search(r"^def\s+main\s*\(", script, re.MULTILINE):
