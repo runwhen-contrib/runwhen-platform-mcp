@@ -20,6 +20,13 @@ SAMPLE_SCRIPT = """def main():
 """
 
 
+SLI_SCRIPT = """import random
+
+def main():
+    return random.random()
+"""
+
+
 class TestRenderCodecollectionFiles:
     def _render(self, **kwargs):
         inp = CodecollectionRenderInput(
@@ -102,9 +109,22 @@ class TestRenderCodecollectionFiles:
         assert "common-labels.yaml" in slx
 
     def test_optional_sli_template(self) -> None:
-        files = self._render(include_sli=True)
+        files = self._render(include_sli=True, sli_script=SLI_SCRIPT, sli_interpreter="python")
         sli_path = "codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"
         assert sli_path in files
         sli_text = files[sli_path]
         assert "codebundles/tool-builder/sli.robot" in sli_text
         assert "intervalSeconds: 300" in sli_text
+
+    def test_sli_without_explicit_script_raises(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError, match="requires an explicit sli_script"):
+            self._render(include_sli=True)
+
+    def test_optional_sli_template_uses_sli_interpreter(self) -> None:
+        files = self._render(include_sli=True, sli_script=SLI_SCRIPT, sli_interpreter="bash")
+        sli_text = files["codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"]
+        assert "- name: INTERPRETER" in sli_text
+        assert "value: bash" in sli_text
+        assert "codebundles/tool-builder/sli.robot" in sli_text

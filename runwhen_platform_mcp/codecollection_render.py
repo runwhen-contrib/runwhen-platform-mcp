@@ -171,9 +171,11 @@ def _config_provided_lines(
     script_b64: str,
     *,
     include_task_title: bool,
+    interpreter: str | None = None,
 ) -> list[str]:
     env_vars = inp.env_vars or {}
     secret_vars = inp.secret_vars or {}
+    resolved_interpreter = interpreter or inp.interpreter
     lines: list[str] = []
     if include_task_title:
         lines.append("    - name: TASK_TITLE")
@@ -181,7 +183,7 @@ def _config_provided_lines(
     lines.append("    - name: GEN_CMD")
     lines.append(f"      value: {_yaml_quote(script_b64)}")
     lines.append("    - name: INTERPRETER")
-    lines.append(f"      value: {_yaml_quote(inp.interpreter)}")
+    lines.append(f"      value: {_yaml_quote(resolved_interpreter)}")
     lines.append("    - name: CONFIG_ENV_MAP")
     lines.append(f"      value: {_yaml_quote(json.dumps(env_vars))}")
     lines.append("    - name: SECRET_ENV_MAP")
@@ -253,7 +255,12 @@ def _build_taskset_template(inp: CodecollectionRenderInput, script_b64: str) -> 
 
 
 def _build_sli_template(inp: CodecollectionRenderInput, script_b64: str) -> str:
-    config_lines = "\n".join(_config_provided_lines(inp, script_b64, include_task_title=False))
+    sli_interpreter = inp.sli_interpreter or inp.interpreter
+    config_lines = "\n".join(
+        _config_provided_lines(
+            inp, script_b64, include_task_title=False, interpreter=sli_interpreter
+        )
+    )
     secret_lines = _secrets_provided_lines(inp.secret_vars)
     secret_block = "\n".join(secret_lines) if secret_lines else ""
     return textwrap.dedent(
@@ -500,8 +507,14 @@ def render_codecollection_files(inp: CodecollectionRenderInput) -> dict[str, str
     }
 
     if inp.include_sli:
-        sli_script = inp.sli_script or inp.script
-        sli_b64 = base64.b64encode(sli_script.encode("utf-8")).decode("ascii")
+        if not inp.sli_script:
+            raise ValueError(
+                "include_sli=True requires an explicit sli_script. "
+                "The SLI contract (returns float 0-1) is fundamentally different from "
+                "the task contract (returns List[Dict] of issues) — they cannot share "
+                "the same script body."
+            )
+        sli_b64 = base64.b64encode(inp.sli_script.encode("utf-8")).decode("ascii")
         files[f"{prefix}/.runwhen/templates/{inp.bundle_name}-sli.yaml"] = _build_sli_template(
             inp, sli_b64
         )

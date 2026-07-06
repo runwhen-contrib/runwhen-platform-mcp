@@ -7204,6 +7204,20 @@ async def render_codecollection_skill(
             {"error": "Azure task missing azure_credentials secret", "message": azure_hint}
         )
 
+    if include_sli:
+        sli_body = sli_script if sli_script else resolved_script
+        sli_interp = sli_interpreter or interpreter
+        sli_warnings = _validate_script(sli_body, sli_interp, "sli")
+        sli_blocking = [w for w in sli_warnings if _is_blocking_warning(w)]
+        if sli_blocking:
+            return _json_response(
+                {
+                    "error": "SLI script validation failed",
+                    "warnings": sli_warnings,
+                    "blocking_warnings": sli_blocking,
+                }
+            )
+
     ws = await _resolve_workspace(workspace_name)
 
     if owners is None:
