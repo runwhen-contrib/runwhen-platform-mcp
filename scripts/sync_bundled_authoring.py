@@ -105,6 +105,8 @@ def sync(runwhen_local: Path, check: bool = False) -> int:
         else:
             dest.write_bytes(content)
             print(f"WROTE {dest_rel}")
+        if check and not dest.exists():
+            continue
         manifest_entries.append({"path": dest_rel, "sha256": _sha256(dest)})
 
     for src_dir_rel, dest_dir_rel in _COPY_DIRS:
@@ -128,6 +130,8 @@ def sync(runwhen_local: Path, check: bool = False) -> int:
             else:
                 dest.write_bytes(content)
                 print(f"WROTE {rel}")
+            if check and not dest.exists():
+                continue
             manifest_entries.append({"path": rel, "sha256": _sha256(dest)})
 
     manifest = {

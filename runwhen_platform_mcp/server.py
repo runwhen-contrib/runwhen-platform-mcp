@@ -7205,6 +7205,13 @@ async def render_codecollection_skill(
         )
 
     if include_sli:
+        if _scripts_have_identical_content(resolved_script, sli_script):
+            return _json_response(
+                {
+                    "error": "Identical task and SLI script content",
+                    "message": _IDENTICAL_TASK_SLI_MSG,
+                }
+            )
         sli_body = sli_script if sli_script else resolved_script
         sli_interp = sli_interpreter or interpreter
         sli_warnings = _validate_script(sli_body, sli_interp, "sli")
