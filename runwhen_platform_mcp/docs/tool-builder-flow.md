@@ -477,7 +477,7 @@ accepts an explicit `codebundle_ref` parameter to override auto-detection.
 4. **Test** — Click "Run" → `POST /author/run` → poll status → fetch output artifacts
 5. **Review** — Optional AI code review; inspect issues/metrics output
 6. **Commit** — Click "Commit to SLX" → fill in alias, statement, owners, tags → `POST /branches/main/slxs/{name}`
-7. **Live** — PAPI upserts the SLX (and runbook/SLI when present) via `/api/v1/workspaces/{ws}/*/sync`; the SLX appears in Studio within ~1–3 minutes
+7. **Live** — PAPI upserts the SLX (and runbook/SLI when present) via `/api/v4/workspaces/{ws}/*/sync-typed`; the SLX appears in Studio within ~1–3 minutes
 
 ## End-to-End Flow (MCP Agent)
 

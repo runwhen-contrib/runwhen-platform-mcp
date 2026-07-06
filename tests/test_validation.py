@@ -1087,7 +1087,7 @@ class TestCommitSlxAirgapAndAzureGuards:
         mock_ref.return_value = "main"
         mock_sync.return_value = (
             201,
-            {"slx": {"status": "created", "resource_id": 1}, "runbook": {"status": "created"}},
+            {"slx": {"status": "created", "resourceId": 1}, "runbook": {"status": "created"}},
         )
         script = (
             "def main():\n"

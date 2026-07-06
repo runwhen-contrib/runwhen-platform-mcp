@@ -2532,7 +2532,12 @@ def _build_cron_sli_yaml(
 
 
 # ---------------------------------------------------------------------------
-# CRD-less sync payload builders (POST /api/v1/workspaces/{ws}/*s/sync)
+# CRD-less sync payload builders (POST /api/v4/workspaces/{ws}/*s/sync-typed)
+#
+# Payload keys stay snake_case: the v4 typed schemas set
+# ``alias_generator=to_camel`` + ``populate_by_name=True``, so field names
+# (``runner_uuid``, ``slx_id``, ``image_url``, ...) are accepted alongside
+# their camelCase aliases. Snake_case is the minimum-diff move from v1.
 # ---------------------------------------------------------------------------
 
 
@@ -2548,7 +2553,7 @@ def _build_slx_payload(
     data: str = "logs-bulk",
     additional_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build SLX sync payload for POST /api/v1/workspaces/{ws}/slxs/sync."""
+    """Build SLX sync payload for POST /api/v4/workspaces/{ws}/slxs/sync-typed."""
     return {
         "name": f"{workspace}--{slx_name}",
         "alias": alias,
@@ -2569,11 +2574,12 @@ def _build_runbook_payload(
     secrets_provided: list[dict] | None = None,
     runtime_vars: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Build Runbook sync payload for POST /api/v1/workspaces/{ws}/runbooks/sync.
+    """Build Runbook payload for POST /api/v4/workspaces/{ws}/runbooks/sync-typed.
 
     slx_id is injected by _sync_slx_resources after the SLX sync completes —
     RunbookModel is keyed by slx_id (1-to-1 with SLX), so the payload has no
-    `name` column. RW-706 strict-validates and rejects unknown top-level keys.
+    `name` column. The v4 typed schema is ``extra='forbid'`` and rejects
+    unknown top-level keys with HTTP 422.
     """
     payload: dict[str, Any] = {
         "runner_uuid": runner_uuid,
@@ -2599,7 +2605,7 @@ def _build_sli_payload(
     interval_seconds: int = 300,
     description: str | None = None,
 ) -> dict[str, Any]:
-    """Build SLI sync payload for POST /api/v1/workspaces/{ws}/slis/sync.
+    """Build SLI payload for POST /api/v4/workspaces/{ws}/slis/sync-typed.
 
     slx_id is injected by _sync_slx_resources after the SLX sync completes.
     """
@@ -2628,23 +2634,33 @@ async def _sync_slx_resources(
     runbook_payload: dict[str, Any] | None = None,
     sli_payload: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Upsert SLX and its child resources via the CRD-less sync endpoints.
+    """Upsert SLX and its child resources via the v4 sync-typed endpoints.
 
-    Syncs the SLX first, injects the returned resource_id as slx_id into
-    the runbook/SLI payloads, then syncs each child in order.
+    Migrated from the legacy ``/api/v1/workspaces/{ws}/*s/sync`` routes to the
+    typed ``/api/v4/workspaces/{ws}/*s/sync-typed`` routes. The v4 handlers
+    validate payloads through Pydantic (dropping unset fields) and are the
+    same routes the UI uses, so MCP commits now share the code path that has
+    the most production traffic and coverage.
+
+    Syncs the SLX first, injects the returned id as ``slx_id`` into the
+    runbook/SLI payloads, then syncs each child in order.
+
+    The v4 response envelope is camelCase (``resourceId`` / ``slxId``); the
+    snake_case fallback preserves compatibility with existing unit tests and
+    with any older PAPI build that still speaks the v1 shape.
 
     Returns (overall_status_code, combined_response_dict).
     """
     slx_status, slx_data = await _papi_post(
-        f"/api/v1/workspaces/{ws}/slxs/sync",
+        f"/api/v4/workspaces/{ws}/slxs/sync-typed",
         {"payload": slx_payload},
     )
     if slx_status not in (200, 201):
         return slx_status, slx_data
 
-    slx_id = slx_data.get("resource_id")
+    slx_id = _extract_resource_id(slx_data)
     if slx_id is None:
-        return 500, {"error": "SLX sync did not return resource_id"}
+        return 500, {"error": "SLX sync did not return resourceId", "response": slx_data}
 
     overall_status = slx_status
     response: dict[str, Any] = {"slx": slx_data}
@@ -2652,7 +2668,7 @@ async def _sync_slx_resources(
     if runbook_payload is not None:
         runbook_payload["slx_id"] = slx_id
         rb_status, rb_data = await _papi_post(
-            f"/api/v1/workspaces/{ws}/runbooks/sync",
+            f"/api/v4/workspaces/{ws}/runbooks/sync-typed",
             {"payload": runbook_payload},
         )
         response["runbook"] = rb_data
@@ -2662,7 +2678,7 @@ async def _sync_slx_resources(
     if sli_payload is not None:
         sli_payload["slx_id"] = slx_id
         sli_status, sli_data = await _papi_post(
-            f"/api/v1/workspaces/{ws}/slis/sync",
+            f"/api/v4/workspaces/{ws}/slis/sync-typed",
             {"payload": sli_payload},
         )
         response["sli"] = sli_data
@@ -2670,6 +2686,26 @@ async def _sync_slx_resources(
             overall_status = sli_status
 
     return overall_status, response
+
+
+def _extract_resource_id(sync_data: Any) -> int | None:
+    """Pull the SLX id out of a sync response envelope.
+
+    v4 ``/slxs/sync-typed`` returns ``{"status", "name", "resourceId"}``.
+    The legacy v1 ``/slxs/sync`` route returned ``{"status", "name",
+    "resource_id"}``. Accept either so unit-test mocks and any residual v1
+    traffic keep working during the transition.
+    """
+    if not isinstance(sync_data, dict):
+        return None
+    value = sync_data.get("resourceId")
+    if value is None:
+        value = sync_data.get("resource_id")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -6961,10 +6997,13 @@ async def delete_slx(
     branch: str = Field(default="main", description="Git branch to delete from."),
     commit_message: Annotated[str | None, Field(description="Custom commit message.")] = None,
 ) -> str:
-    """Delete an SLX from the workspace Git repo.
+    """Soft-delete an SLX from the workspace via the v4 short-name endpoint.
 
-    Removes the SLX directory (slx.yaml, runbook.yaml, sli.yaml) from the
-    workspace configuration repository.
+    Uses ``DELETE /api/v4/workspaces/{ws}/slxs/{slx_short_name}``, which
+    tombstones the SLX row (``deleted_by`` / ``deleted_at``) and lets the
+    corestate reconcile loop clean up the corresponding runbook and SLI
+    rows. This is the same endpoint the UI hits, so behaviour matches what
+    users see in the platform.
     """
     try:
         _validate_slx_name(slx_name)
@@ -6975,7 +7014,7 @@ async def delete_slx(
 
     try:
         status_code, data = await _papi_delete(
-            f"/api/v1/workspaces/{ws}/slxs/{ws}--{slx_name}",
+            f"/api/v4/workspaces/{ws}/slxs/{slx_name}",
         )
     except (ValueError, httpx.HTTPStatusError) as exc:
         return _json_response({"error": f"Failed to delete SLX: {exc}"})
