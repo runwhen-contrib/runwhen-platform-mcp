@@ -7103,8 +7103,9 @@ async def render_codecollection_skill(
     workspace-builder discovery. Templates delegate runtime to
     ``rw-generic-codecollection/codebundles/tool-builder`` with base64 ``GEN_CMD``.
 
-    Also writes ``.runwhen/README.md`` with the **decoded script** and plain-English
-    match rules so PR reviewers never need to base64-decode TaskSet templates.
+    Also writes ``.runwhen/SKILL_TEMPLATE.md`` with the **decoded script** summary
+    and ``.runwhen/raw_script.{py,sh}`` with the full decoded script so PR reviewers
+    and automated systems never need to base64-decode TaskSet templates.
 
     This tool does **not** push to git or mutate the workspace — it renders files locally
     (or returns them inline) for you to ``git add / commit / push``.
@@ -7228,7 +7229,8 @@ async def render_codecollection_skill(
         "files": files,
         "file_count": len(files),
         "next_steps": [
-            "Review `.runwhen/README.md` for decoded script and match-rule summary.",
+            "Review `.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{py,sh}` "
+            "for decoded script and match-rule summary.",
             f"git add codebundles/{bundle_name} && git commit -m "
             f"'Add {bundle_name} tool-builder bundle'",
             "git push",

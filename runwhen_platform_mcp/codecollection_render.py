@@ -315,7 +315,9 @@ def _describe_match_rule(rule: dict[str, Any]) -> str:
     return f"custom predicate type `{rule_type}`"
 
 
-def _build_review_readme(inp: CodecollectionRenderInput, base_name: str) -> str:
+def _build_skill_template(
+    inp: CodecollectionRenderInput, base_name: str, script_extension: str
+) -> str:
     match_rules = inp.match_rules if inp.match_rules is not None else _default_match_rules()
     match_descriptions = [_describe_match_rule(rule) for rule in match_rules]
     match_bullets = (
@@ -373,6 +375,12 @@ def _build_review_readme(inp: CodecollectionRenderInput, base_name: str) -> str:
         **Bundle:** `{inp.bundle_name}` · **Task title:** `{inp.task_title}` ·
         **Runtime:** tool-builder ({lang})
 
+        > **Review artifact:** See `raw_script.{script_extension}` in this directory
+        > for the decoded script content that reviewers and automated systems should
+        > inspect. Do **not** parse the base64-encoded `GEN_CMD` in the TaskSet template
+        > for review purposes — use this SKILL_TEMPLATE.md and the accompanying
+        > `raw_script.{script_extension}` file instead.
+
         ## When this SLX gets created
 
         - **Platform:** `{inp.platform}` — workspace-builder matches RunWhen platform resources
@@ -386,13 +394,8 @@ def _build_review_readme(inp: CodecollectionRenderInput, base_name: str) -> str:
 
         The task runs a {lang} script via the shared `tool-builder` codebundle in
         `rw-generic-codecollection`. The workspace-builder renders the TaskSet template with
-        a base64-encoded `GEN_CMD` at deploy time; this file shows the decoded script for review.
-
-        ### Script (decoded)
-
-        ```{lang}
-        {inp.script.rstrip()}
-        ```
+        a base64-encoded `GEN_CMD` at deploy time; the decoded script is available in
+        `raw_script.{script_extension}` in this directory for review.
 
         ### Environment variables
 
@@ -439,6 +442,7 @@ def _build_review_readme(inp: CodecollectionRenderInput, base_name: str) -> str:
 
 
 def _build_bundle_readme(inp: CodecollectionRenderInput) -> str:
+    lang = "py" if inp.interpreter == "python" else "sh"
     return textwrap.dedent(
         f"""\
         # {inp.bundle_name}
@@ -453,7 +457,8 @@ def _build_bundle_readme(inp: CodecollectionRenderInput) -> str:
 
         ```
         .runwhen/
-          README.md                 # Human-readable review (decoded script + match rules)
+          SKILL_TEMPLATE.md        # Human-readable review (decoded script + match rules)
+          raw_script.{lang}        # Decoded script for reviewers and automated inspection
           generation-rules/
             {inp.bundle_name}.yaml
           templates/
@@ -461,7 +466,8 @@ def _build_bundle_readme(inp: CodecollectionRenderInput) -> str:
             {inp.bundle_name}-taskset.yaml
         ```
 
-        See `.runwhen/README.md` for the full review artifact intended for PR reviewers.
+        See `.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{lang}` for the review
+        artifacts intended for PR reviewers and automated systems.
 
         ## References
 
@@ -475,11 +481,15 @@ def render_codecollection_files(inp: CodecollectionRenderInput) -> dict[str, str
     """Return relative path → file content for a complete codebundle directory."""
     base_name = _resolve_base_name(inp.bundle_name, inp.base_name)
     script_b64 = base64.b64encode(inp.script.encode("utf-8")).decode("ascii")
+    script_extension = "py" if inp.interpreter == "python" else "sh"
 
     prefix = f"codebundles/{inp.bundle_name}"
     files: dict[str, str] = {
         f"{prefix}/README.md": _build_bundle_readme(inp),
-        f"{prefix}/.runwhen/README.md": _build_review_readme(inp, base_name),
+        f"{prefix}/.runwhen/SKILL_TEMPLATE.md": _build_skill_template(
+            inp, base_name, script_extension
+        ),
+        f"{prefix}/.runwhen/raw_script.{script_extension}": inp.script,
         f"{prefix}/.runwhen/generation-rules/{inp.bundle_name}.yaml": _build_generation_rule_yaml(
             inp, base_name
         ),

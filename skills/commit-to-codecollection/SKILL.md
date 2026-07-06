@@ -29,7 +29,8 @@ This is the GitOps alternative to `commit_slx` (which writes inline scripts into
 1. **Build and test** — follow `build-runwhen-task` through validation and `run_script_and_wait`
 2. **Collect template inputs** — see checklist below (secrets, env vars, runtime vars, runtime repo URL)
 3. **Render** — call `render_codecollection_skill` with the **same** script + metadata used in step 1
-4. **Review** — open `codebundles/<bundle>/.runwhen/README.md` (decoded script + plain-English match rules)
+4. **Review** — open `codebundles/<bundle>/.runwhen/SKILL_TEMPLATE.md` and
+   `codebundles/<bundle>/.runwhen/raw_script.{py,sh}` (decoded script + plain-English match rules)
 5. **Commit locally** — `git add`, `git commit`, `git push` to your private codecollection repo
 6. **Wire runner** — add the repo to `workspaceInfo.yaml` `codeCollections` and reconcile runwhen-local
 
@@ -123,16 +124,18 @@ render_codecollection_skill(
 codebundles/<bundle_name>/
 ├── README.md
 └── .runwhen/
-    ├── README.md              ← human review (decoded script, match rules)
+    ├── SKILL_TEMPLATE.md         ← description + match rules (points to raw_script)
+    ├── raw_script.py             ← decoded script for reviewers/systems to inspect
     ├── generation-rules/
-    │   └── <bundle_name>.yaml ← platform: runwhen, resourceTypes: [workspace]
+    │   └── <bundle_name>.yaml    ← platform: runwhen, resourceTypes: [workspace]
     └── templates/
         ├── <bundle_name>-slx.yaml
         └── <bundle_name>-taskset.yaml   ← tool-builder GEN_CMD (base64 in YAML)
 ```
 
 Templates delegate runtime to `rw-generic-codecollection/codebundles/tool-builder`.
-The review file shows the **decoded** script — reviewers never need to base64-decode templates.
+The `raw_script.{py,sh}` file shows the **decoded** script — reviewers and automated
+systems should inspect this file and should **not** parse base64 from templates.
 
 ## Key rules
 
@@ -146,8 +149,9 @@ The review file shows the **decoded** script — reviewers never need to base64-
 
 ## Critical — GEN_CMD integrity (do not skip)
 
-The TaskSet template stores the script as **base64 `GEN_CMD`**. The review file
-(`.runwhen/README.md`) shows the **decoded** script. These two **must match**.
+The TaskSet template stores the script as **base64 `GEN_CMD`**. The review files
+(`.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{py,sh}`) show the **decoded**
+script. These **must match**.
 
 `tool-builder/runbook.robot` reads issue dict keys **exactly**:
 
@@ -167,13 +171,13 @@ The TaskSet template stores the script as **base64 `GEN_CMD`**. The review file
 python3 - <<'PY'
 import base64, re, pathlib
 taskset = pathlib.Path("codebundles/<bundle>/.runwhen/templates/<bundle>-taskset.yaml").read_text()
-review = pathlib.Path("codebundles/<bundle>/.runwhen/README.md").read_text()
+raw = pathlib.Path("codebundles/<bundle>/.runwhen/raw_script.py").read_text()
 b64 = re.search(r"name: GEN_CMD\n\s+value: ['\"]([A-Za-z0-9+/=]+)", taskset).group(1)
 decoded = base64.b64decode(b64).decode()
+assert decoded == raw, "raw_script does not match decoded GEN_CMD"
 assert "issue description" in decoded, "missing exact key issue description"
 assert "desription" not in decoded, "typo in issue description key"
 assert "def main():" in decoded or "main()" in decoded
-# Optional: assert decoded.strip() appears in review (same script as review artifact)
 print("GEN_CMD round-trip OK")
 PY
 ```
@@ -184,7 +188,7 @@ PY
 
 - ❌ Copy base64 from chat logs, truncated diffs, or an old render into a template
 - ❌ Hand-fix TaskSet YAML and guess the base64 blob
-- ❌ Trust `.runwhen/README.md` alone — the runner uses **TaskSet `GEN_CMD`**, not the review file
+- ❌ Trust `.runwhen/SKILL_TEMPLATE.md` alone — the runner uses **TaskSet `GEN_CMD`**, not the review file
 
 If `render_codecollection_skill` is unavailable (older MCP deploy), run
 `render_codecollection_files()` from `runwhen_platform_mcp.codecollection_render` locally

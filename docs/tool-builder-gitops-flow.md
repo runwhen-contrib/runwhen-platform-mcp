@@ -35,7 +35,7 @@ the decision gates that catch mistakes before they reach production.
 | Persona | Where they live | What they do here |
 |---------|----------------|--------------------|
 | **Task Author** | MCP client (Cursor / Claude) | Describes intent, iterates on the script with the agent |
-| **Reviewer** | Private git repo (PR) | Reads `.runwhen/README.md`, approves the bundle |
+| **Reviewer** | Private git repo (PR) | Reads `.runwhen/SKILL_TEMPLATE.md` and `raw_script.{py,sh}`, approves the bundle |
 | **Runner Operator** | Cluster with runwhen-local | Wires the repo into `workspaceInfo.yaml` and monitors reconciliation |
 | **Consumer** | RunWhen UI / workspace_chat | Runs the SLX and reads issues |
 
@@ -154,9 +154,10 @@ diverges from the reviewed script.
 ### Phase 4 — Review, commit, wire runner (Repo → runwhen-local lanes)
 
 **What happens.**
-1. The author (or a reviewer) opens `.runwhen/README.md` and confirms the
-   decoded script matches expectations, match rules read correctly in plain
-   English, and secrets are the right ones.
+1. The author (or a reviewer) opens `.runwhen/SKILL_TEMPLATE.md` and
+   `.runwhen/raw_script.{py,sh}` and confirms the decoded script matches
+   expectations, match rules read correctly in plain English, and secrets are
+   the right ones.
 2. A round-trip check decodes the TaskSet `GEN_CMD` and asserts the script
    contains the exact issue keys — the last defense against the base64/review
    mismatch that broke the first prototype run.
@@ -233,7 +234,7 @@ generation rule gets the same SLX automatically.
 | Failure mode | Root cause | Mitigation now in place |
 |--------------|-----------|-------------------------|
 | Runtime `KeyError: 'issue description'` | Script had `issue desription` typo | `validate_script` now blocks non-canonical issue keys |
-| TaskSet `GEN_CMD` decoded to a different script than `.runwhen/README.md` | Hand-edited YAML with stale base64 | `commit-to-codecollection` skill requires round-trip decode check; renderer is authoritative |
+| TaskSet `GEN_CMD` decoded to a different script than `raw_script.{py,sh}` | Hand-edited YAML with stale base64 | `commit-to-codecollection` skill requires round-trip decode check; renderer is authoritative |
 | Worker image doesn't include the referenced codebundle version | Template pinned a `ref` newer than the worker image; worker cannot execute | Match `generic_runtime_ref` to what's baked into the customer's runner image; ask platform team when unsure |
 | Missing secret at runtime | Wrong workspaceKey or secret not provisioned on the target runner location | `discover-secrets` step is now a required checklist item |
 | Silent discovery no-op | runwhen-local without RW-1355 indexer | Diagram calls out `platform: runwhen` indexer as a hard gate |

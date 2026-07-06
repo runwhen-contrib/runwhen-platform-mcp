@@ -41,7 +41,8 @@ class TestRenderCodecollectionFiles:
         files = self._render()
         prefix = "codebundles/my-health-check"
         assert f"{prefix}/README.md" in files
-        assert f"{prefix}/.runwhen/README.md" in files
+        assert f"{prefix}/.runwhen/SKILL_TEMPLATE.md" in files
+        assert f"{prefix}/.runwhen/raw_script.py" in files
         assert f"{prefix}/.runwhen/generation-rules/my-health-check.yaml" in files
         assert f"{prefix}/.runwhen/templates/my-health-check-slx.yaml" in files
         assert f"{prefix}/.runwhen/templates/my-health-check-taskset.yaml" in files
@@ -71,18 +72,25 @@ class TestRenderCodecollectionFiles:
         decoded = base64.b64decode(gen_match.group(1)).decode("utf-8")
         assert "def main():" in decoded
 
-    def test_review_readme_contains_decoded_script_not_base64(self) -> None:
+    def test_skill_template_points_to_raw_script_not_to_base64(self) -> None:
         files = self._render()
-        review = files["codebundles/my-health-check/.runwhen/README.md"]
-        assert "def main():" in review
-        assert "Example issue" in review
+        review = files["codebundles/my-health-check/.runwhen/SKILL_TEMPLATE.md"]
+        assert "raw_script.py" in review
+        assert "Review artifact" in review
+        assert "do **not** parse" in review.lower() or "should inspect" in review
         assert "`runwhen`" in review
         gen_b64 = base64.b64encode(SAMPLE_SCRIPT.encode()).decode()
         assert gen_b64 not in review
 
-    def test_review_readme_lists_secrets_by_name_only(self) -> None:
+    def test_raw_script_contains_exact_script(self) -> None:
         files = self._render()
-        review = files["codebundles/my-health-check/.runwhen/README.md"]
+        raw = files["codebundles/my-health-check/.runwhen/raw_script.py"]
+        assert raw == SAMPLE_SCRIPT
+        assert "def main():" in raw
+
+    def test_skill_template_lists_secrets_by_name_only(self) -> None:
+        files = self._render()
+        review = files["codebundles/my-health-check/.runwhen/SKILL_TEMPLATE.md"]
         assert "`kubeconfig`" in review
         assert "workspaceKey" not in review
 
