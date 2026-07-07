@@ -3579,7 +3579,66 @@ class TestHttpHostAllowlist:
 
             hosts, origins = _server._derive_http_host_allowlist()
         assert hosts == []
-        assert origins == []
+
+    def test_http_base_url_emits_http_origins(self) -> None:
+        # Regression for Bugbot LOW "HTTP origins forced to HTTPS" on
+        # PR #17. When MCP_BASE_URL is served over plain HTTP (e.g. an
+        # internal airgap install without a TLS-terminating proxy),
+        # legitimate clients send ``Origin: http://<host>``. Forcing
+        # ``https://`` into the allowlist would 403-Forbidden-Origin
+        # every real request. Honor the scheme.
+        env = {"MCP_BASE_URL": "http://mcp.internal.airgap:8080"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.internal.airgap"]
+        assert origins == ["http://mcp.internal.airgap"]
+
+    def test_https_base_url_emits_https_origins(self) -> None:
+        # Positive counterpart: when MCP_BASE_URL is HTTPS, only the
+        # HTTPS origin is emitted (no plaintext downgrade path).
+        env = {"MCP_BASE_URL": "https://mcp.test.shared.runwhen.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert origins == ["https://mcp.test.shared.runwhen.com"]
+        assert not any(o.startswith("http://") for o in origins)
+
+    def test_mcp_base_url_scheme_applies_to_allowed_hosts_entries(self) -> None:
+        # MCP_ALLOWED_HOSTS is host-only (no scheme). The MCP_BASE_URL
+        # scheme is the strongest signal for what protocol operators
+        # expect clients to use, so apply it to the additional hostnames
+        # too instead of hard-coding one scheme.
+        env = {
+            "MCP_BASE_URL": "http://mcp.internal.airgap",
+            "MCP_ALLOWED_HOSTS": "mcp.other.airgap,internal-alias",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.other.airgap", "internal-alias", "mcp.internal.airgap"]
+        assert origins == [
+            "http://mcp.other.airgap",
+            "http://internal-alias",
+            "http://mcp.internal.airgap",
+        ]
+
+    def test_allowed_hosts_only_emits_both_schemes(self) -> None:
+        # If the operator sets MCP_ALLOWED_HOSTS without MCP_BASE_URL we
+        # cannot infer a canonical scheme. Emit both ``https://`` and
+        # ``http://`` so a mixed HTTP/HTTPS fleet still authenticates —
+        # the ``allowed_hosts`` check is the primary DNS-rebinding gate
+        # (host must be an exact match); origin is a secondary check.
+        env = {"MCP_ALLOWED_HOSTS": "mcp.example.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.example.com"]
+        assert set(origins) == {"https://mcp.example.com", "http://mcp.example.com"}
 
 
 class TestSkillResourceReadsLiveBody:

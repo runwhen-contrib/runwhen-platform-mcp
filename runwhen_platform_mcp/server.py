@@ -7950,9 +7950,18 @@ def _derive_http_host_allowlist() -> tuple[list[str], list[str]]:
         be reachable, so auto-append it so a fresh deployment works
         end-to-end without a second env var.
 
-    Returns ``(hosts, origins)`` — origins are ``https://<host>`` for each
-    host we accept. Empty lists are returned when neither source is set,
-    which leaves the guard on its ``DEFAULT_HOSTS`` (loopback-only) list.
+    Origins honor ``MCP_BASE_URL``'s scheme when set (e.g. an internal
+    airgap install may run over plain ``http://`` without a TLS-
+    terminating proxy). Falls back to ``https://`` for the common
+    ingress-terminates-TLS shape when only ``MCP_ALLOWED_HOSTS`` is
+    set. Emits both schemes when we cannot infer one so a mixed
+    HTTP-and-HTTPS fleet (rare) still authenticates — the ``allowed_
+    hosts`` check is the primary DNS-rebinding gate; origin is a
+    secondary browser-side check.
+
+    Returns ``(hosts, origins)``. Empty lists are returned when neither
+    source is set, which leaves the guard on its ``DEFAULT_HOSTS``
+    (loopback-only) list.
     """
     from urllib.parse import urlsplit
 
@@ -7969,16 +7978,30 @@ def _derive_http_host_allowlist() -> tuple[list[str], list[str]]:
     for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(","):
         _add(h)
 
+    base_scheme: str | None = None
     base_url = os.environ.get("MCP_BASE_URL", "").strip()
     if base_url:
         try:
             parsed = urlsplit(base_url)
             if parsed.hostname:
                 _add(parsed.hostname)
+                if parsed.scheme in ("http", "https"):
+                    base_scheme = parsed.scheme
         except ValueError:
             pass
 
-    origins = [f"https://{h.split(':', 1)[0]}" for h in hosts]
+    origins: list[str] = []
+    for h in hosts:
+        bare = h.split(":", 1)[0]
+        if base_scheme:
+            origins.append(f"{base_scheme}://{bare}")
+        else:
+            # No scheme signal — emit both so an operator who has not set
+            # MCP_BASE_URL but is running over plain HTTP internally is
+            # not silently rejected. Bugbot LOW "HTTP origins forced to
+            # HTTPS" on PR #17.
+            origins.append(f"https://{bare}")
+            origins.append(f"http://{bare}")
     return hosts, origins
 
 
