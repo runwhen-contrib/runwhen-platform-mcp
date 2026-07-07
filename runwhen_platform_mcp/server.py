@@ -2182,6 +2182,110 @@ async def _get_debugslx(workspace: str) -> dict[str, Any]:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Workspace-aware code collection URL resolver
+# ---------------------------------------------------------------------------
+#
+# Tool Builder runbooks embed a ``codeBundle.repoUrl`` that PAPI clones on
+# ingestion. On airgapped installs that URL must point at the internal git
+# mirror registered with the platform (e.g. cc-catalog-svc) — the default
+# ``https://github.com/runwhen-contrib/rw-generic-codecollection.git`` is
+# unreachable, so PAPI silently drops the runbook record (SLX ends up with
+# no runbook attached).
+#
+# The MCP already accepts explicit overrides via env vars
+# (``MCP_GENERIC_CODECOLLECTION_REPO_URL`` etc.), but airgap operators rarely
+# discover that knob until they hit the exact symptom above.  Instead of
+# forcing every operator to set them, look the mirror up from the workspace's
+# registered code collections (``GET /api/v3/codecollections``) — which is
+# already the source of truth PAPI uses to decide which URLs it accepts.
+#
+# Resolution order (first match wins):
+#   1. explicit call-site argument (``generic_runtime_repo_url``)
+#   2. env override (``MCP_GENERIC_CODECOLLECTION_REPO_URL`` /
+#      ``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` etc. via ``RB_CODE_BUNDLE``)
+#   3. workspace lookup — first entry with matching ``name`` in
+#      ``/api/v3/codecollections/`` (short-TTL cached)
+#   4. hardcoded github default
+#
+# ``resolved_from`` is surfaced in tool responses so the source is obvious.
+
+_GENERIC_CODECOLLECTION_NAME = "rw-generic-codecollection"
+_WORKSPACE_UTILS_CODECOLLECTION_NAME = "rw-workspace-utils"
+
+_codecollections_lookup_cache = _TTLCache(ttl_seconds=300.0, max_size=64)
+
+
+async def _lookup_codecollection_url(name: str) -> str | None:
+    """Look up ``repo_url`` for a code collection by name via PAPI.
+
+    Uses ``GET /api/v3/codecollections`` (the same endpoint the platform UI
+    uses to populate its picker). Returns ``None`` on any failure — callers
+    fall back to env / default. Negative results are cached for the same TTL
+    to avoid hammering PAPI on every render call in a workspace that hasn't
+    registered the mirror.
+    """
+    cached = _codecollections_lookup_cache.get(name)
+    if cached is not None:
+        return cached or None
+    try:
+        data = await _papi_get("/api/v3/codecollections")
+    except Exception:
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        _codecollections_lookup_cache.set(name, "")
+        return None
+    for cc in results:
+        if not isinstance(cc, dict):
+            continue
+        if cc.get("name") != name:
+            continue
+        url = cc.get("repo_web_url")
+        if not url:
+            spec = cc.get("spec")
+            if isinstance(spec, dict):
+                url = spec.get("repoURL") or spec.get("repoUrl")
+        if url:
+            _codecollections_lookup_cache.set(name, url)
+            return url
+    _codecollections_lookup_cache.set(name, "")
+    return None
+
+
+async def _resolve_generic_codecollection_url(
+    *,
+    explicit: str | None = None,
+) -> tuple[str, str]:
+    """Resolve the URL to embed as ``codeBundle.repoUrl`` for tool-builder tasks.
+
+    Returns ``(repo_url, resolved_from)`` where ``resolved_from`` is one of
+    ``"explicit"``, ``"env"``, ``"workspace"``, or ``"default"``.
+    """
+    if explicit:
+        return explicit, "explicit"
+    if _GENERIC_CODECOLLECTION_REPO_URL != _DEFAULT_GENERIC_CODECOLLECTION_REPO:
+        return _GENERIC_CODECOLLECTION_REPO_URL, "env"
+    ws_url = await _lookup_codecollection_url(_GENERIC_CODECOLLECTION_NAME)
+    if ws_url:
+        return ws_url, "workspace"
+    return _DEFAULT_GENERIC_CODECOLLECTION_REPO, "default"
+
+
+async def _resolve_workspace_utils_url() -> tuple[str, str]:
+    """Resolve the URL for ``rw-workspace-utils`` (cron-scheduler SLI).
+
+    Returns ``(repo_url, resolved_from)``.
+    """
+    current = CRON_SLI_CODE_BUNDLE["repoUrl"]
+    if current != _DEFAULT_WORKSPACE_UTILS_REPO:
+        return current, "env"
+    ws_url = await _lookup_codecollection_url(_WORKSPACE_UTILS_CODECOLLECTION_NAME)
+    if ws_url:
+        return ws_url, "workspace"
+    return _DEFAULT_WORKSPACE_UTILS_REPO, "default"
+
+
 async def _get_authorized_locations(workspace: str) -> list[dict[str, Any]]:
     """Fetch authorized runner locations for *workspace*.
 
@@ -6950,6 +7054,12 @@ async def commit_slx(
     sli_payload: dict[str, Any] | None = None
     secret_resolution_notes: list[str] = []
 
+    # Resolve the generic-codecollection URL once per call. In airgap installs
+    # the hardcoded github URL is unreachable from PAPI (silently drops the
+    # runbook/SLI); the workspace lookup picks up the internal mirror the
+    # operator already registered with the platform.
+    generic_repo_url, generic_repo_source = await _resolve_generic_codecollection_url()
+
     if task_type == "task":
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
@@ -6969,7 +7079,7 @@ async def commit_slx(
         rb_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         runbook_payload = _build_runbook_payload(
             runner_uuid=location,
-            code_bundle_repo_url=RB_CODE_BUNDLE["repoUrl"],
+            code_bundle_repo_url=generic_repo_url,
             code_bundle_ref=codebundle_ref or RB_CODE_BUNDLE["ref"],
             code_bundle_path=RB_CODE_BUNDLE["pathToRobot"],
             config_provided=rb_config,
@@ -6991,7 +7101,7 @@ async def commit_slx(
                 sli_config.append({"name": k, "value": v})
             sli_payload = _build_sli_payload(
                 runner_uuid=location,
-                code_bundle_repo_url=SLI_CODE_BUNDLE["repoUrl"],
+                code_bundle_repo_url=generic_repo_url,
                 code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
                 code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
                 config_provided=sli_config,
@@ -7005,9 +7115,10 @@ async def commit_slx(
                 {"name": "CRON_SCHEDULE", "value": cron_schedule},
                 {"name": "DRY_RUN", "value": "false"},
             ]
+            cron_repo_url, _cron_repo_source = await _resolve_workspace_utils_url()
             sli_payload = _build_sli_payload(
                 runner_uuid=location,
-                code_bundle_repo_url=CRON_SLI_CODE_BUNDLE["repoUrl"],
+                code_bundle_repo_url=cron_repo_url,
                 code_bundle_ref=CRON_SLI_CODE_BUNDLE["ref"],
                 code_bundle_path=CRON_SLI_CODE_BUNDLE["pathToRobot"],
                 config_provided=cron_config,
@@ -7033,7 +7144,7 @@ async def commit_slx(
         sli_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         sli_payload = _build_sli_payload(
             runner_uuid=location,
-            code_bundle_repo_url=SLI_CODE_BUNDLE["repoUrl"],
+            code_bundle_repo_url=generic_repo_url,
             code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
             code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
             config_provided=sli_config,
@@ -7059,6 +7170,8 @@ async def commit_slx(
         "workspace": ws,
         "codebundle_ref": codebundle_ref,
         "committed_types": type_label,
+        "generic_repo_url": generic_repo_url,
+        "generic_repo_resolved_from": generic_repo_source,
         "response": resp_data,
     }
     size_warnings: list[str] = []
@@ -7400,7 +7513,9 @@ async def render_codecollection_skill(
     except Exception:
         mcp_version = "unknown"
 
-    repo_url = generic_runtime_repo_url or _GENERIC_CODECOLLECTION_REPO_URL
+    repo_url, generic_repo_source = await _resolve_generic_codecollection_url(
+        explicit=generic_runtime_repo_url,
+    )
     resolved_resource_path = _enforce_custom_resource_path(resource_path)
     render_input = CodecollectionRenderInput(
         bundle_name=bundle_name,
@@ -7453,6 +7568,8 @@ async def render_codecollection_skill(
         "platform": platform,
         "resource_types": render_input.resource_types,
         "file_count": len(files),
+        "generic_repo_url": repo_url,
+        "generic_repo_resolved_from": generic_repo_source,
         "next_steps": [
             "Review `.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{py,sh}` "
             "for decoded script and match-rule summary.",

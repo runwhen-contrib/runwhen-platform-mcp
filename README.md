@@ -428,7 +428,7 @@ The server exposes these tools, grouped by use case.
 | `RUNWHEN_REGISTRY_TIMEOUT_S` | No | HTTP timeout (seconds) for registry calls. Default `10`. Lowered from the PAPI default so an unreachable registry fails fast and is reported gracefully. |
 | `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` | No | Soft warning threshold for script payload size. Default `10240` (10KB). Scripts above this size produce an advisory warning in `validate_script` / `run_script_and_wait` — MCP HTTP intermediaries often truncate base64 payloads above ~13KB. |
 | `RUNWHEN_SCRIPT_HARD_MAX_BYTES` | No | Hard cap for script payload size. Default `65536` (64KB). `commit_slx` / `run_script*` reject scripts above this with an error and suggest using a registry codebundle, `script_gzip_base64`, or `script_path`. |
-| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Internal git URL for `rw-generic-codecollection` (airgap). Shared default for Tool Builder runbook + SLI bundles. |
+| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Force a specific `rw-generic-codecollection` mirror URL for Tool Builder runbooks + SLIs, overriding workspace auto-detection. Typically **only needed when the workspace lookup should be bypassed** (e.g. testing a fork). See [Tool Builder repo resolution](#tool-builder-repo-resolution) below. |
 | `MCP_GENERIC_CODECOLLECTION_REF` | No | Git ref for the generic codecollection mirror (default: `main`). |
 | `MCP_TOOL_BUILDER_RUNBOOK_*` | No | Override Tool Builder runbook code bundle (`REPO_URL`, `REF`, `PATH`). |
 | `MCP_TOOL_BUILDER_SLI_*` | No | Override Tool Builder SLI code bundle (`REPO_URL`, `REF`, `PATH`). |
@@ -448,6 +448,21 @@ The server exposes these tools, grouped by use case.
 | `MCP_AUTH0_*` | Legacy | Auth0 OIDC alternative if RunWhen OAuth client vars are not used. |
 
 See `.env.example` in the repo.
+
+### Tool Builder repo resolution
+
+`commit_slx` and `render_codecollection_skill` embed a `codeBundle.repoUrl` into every runbook / SLI they produce. PAPI **clones that URL on ingestion** to index tasks, so it must be reachable from the PAPI cluster — on airgap installs that means the internal mirror registered with the platform, not `github.com`.
+
+The MCP resolves the URL for `rw-generic-codecollection` (Tool Builder runbook + SLI) and `rw-workspace-utils` (cron-scheduler SLI) in this order:
+
+1. **Explicit call argument** — `generic_runtime_repo_url` on `render_codecollection_skill`.
+2. **Env override** — `MCP_GENERIC_CODECOLLECTION_REPO_URL` / `MCP_TOOL_BUILDER_*_REPO_URL` / `MCP_CRON_SLI_REPO_URL`.
+3. **Workspace lookup** — the MCP queries `GET /api/v3/codecollections` (the same list the platform UI's picker uses) and, if the workspace has an entry named `rw-generic-codecollection` (or `rw-workspace-utils`), uses that URL. Results are cached in-process for 5 minutes.
+4. **Hardcoded `github.com` default**.
+
+Both `commit_slx` and `render_codecollection_skill` return `generic_repo_url` + `generic_repo_resolved_from` (`explicit` / `env` / `workspace` / `default`) in their response so you can see which source won.
+
+**Airgap operators typically need no env vars** — once the internal mirror is registered with PAPI, the workspace lookup finds it automatically.
 
 ### Getting a token
 

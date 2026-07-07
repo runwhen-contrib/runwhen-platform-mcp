@@ -74,10 +74,26 @@ These become `secretsProvided` in the TaskSet template and names in `SECRET_ENV_
 
 ### 4. Runtime repo URL (`generic_runtime_repo_url`)
 
-- Default: public `rw-generic-codecollection` on GitHub
-- **Airgap / private runners:** override with the in-cluster catalog URL, e.g.
-  `http://rw-airgap-cc-catalog-svc.runwhen-env-airgap:8080/git/rw-generic-codecollection.git`
-- **Ask the user** which environment the bundle targets before rendering
+The MCP resolves this automatically. Resolution order:
+
+1. **Explicit call arg** — `generic_runtime_repo_url` you pass in
+2. **Env override** — `MCP_GENERIC_CODECOLLECTION_REPO_URL` on the MCP server
+3. **Workspace lookup** — the MCP queries `GET /api/v3/codecollections` (the
+   same list the platform UI uses) and picks the entry named
+   `rw-generic-codecollection`. In airgap workspaces this is already set to
+   the internal catalog URL (e.g.
+   `http://rw-airgap-cc-catalog-svc.<namespace>:8080/git/rw-generic-codecollection.git`).
+4. **`github.com` default**
+
+Practical rules:
+
+- **Public / SaaS workspaces:** leave `generic_runtime_repo_url` unset — the
+  workspace lookup or the github default is correct.
+- **Airgap / private catalogs:** leave `generic_runtime_repo_url` unset — the
+  workspace lookup finds the registered mirror. Only pass an explicit override
+  if you're deliberately targeting a fork.
+- Check `generic_repo_resolved_from` in the render response to confirm which
+  source won (`explicit` / `env` / `workspace` / `default`).
 
 ### 5. Other render fields (confirm with user when non-obvious)
 
@@ -97,7 +113,7 @@ Before calling `render_codecollection_skill`, verify:
 - [ ] Same `script` string that passed `validate_script` and `run_script_and_wait`
 - [ ] Same `interpreter`, `env_vars`, `secret_vars`, `runtime_vars` as the successful test
 - [ ] User confirmed secrets are provisioned on runners that will execute this bundle
-- [ ] `generic_runtime_repo_url` matches the environment (airgap vs public)
+- [ ] `generic_runtime_repo_url` left unset (MCP auto-resolves) unless deliberately targeting a fork
 
 ## Example
 
