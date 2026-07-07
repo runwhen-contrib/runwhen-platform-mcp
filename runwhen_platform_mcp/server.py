@@ -7198,6 +7198,30 @@ async def render_codecollection_skill(
     if runtime_var_errors:
         return _json_response({"error": "Invalid runtime_vars", "details": runtime_var_errors})
 
+    if runtime_vars and env_vars:
+        overlap = {rv["name"] for rv in runtime_vars if rv.get("name")} & set(env_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both env_vars and runtime_vars: "
+                        f"{sorted(overlap)}. A name must be in one or the other."
+                    ),
+                }
+            )
+
+    if runtime_vars and secret_vars:
+        overlap = {rv["name"] for rv in runtime_vars if rv.get("name")} & set(secret_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both secret_vars and runtime_vars: "
+                        f"{sorted(overlap)}. A name must be in one or the other."
+                    ),
+                }
+            )
+
     azure_hint = _azure_credentials_hint(resolved_script, sli_script, secret_vars)
     if azure_hint:
         return _json_response(
@@ -7306,7 +7330,6 @@ async def render_codecollection_skill(
         "bundle_name": bundle_name,
         "platform": platform,
         "resource_types": render_input.resource_types,
-        "files": files,
         "file_count": len(files),
         "next_steps": [
             "Review `.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{py,sh}` "
@@ -7321,6 +7344,8 @@ async def render_codecollection_skill(
     if written_paths:
         result["output_dir"] = output_dir
         result["written_paths"] = written_paths
+    else:
+        result["files"] = files
 
     return _json_response(result)
 
