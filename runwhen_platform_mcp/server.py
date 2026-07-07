@@ -7110,6 +7110,12 @@ async def render_codecollection_skill(
     source_slx_name: Annotated[
         str | None, Field(description="Original inline SLX short name (provenance in review file).")
     ] = None,
+    resource_path: Annotated[
+        str | None, Field(description="Resource path for search indexing.")
+    ] = None,
+    hierarchy: Annotated[
+        list[str] | None, Field(description="Tag names for hierarchical grouping.")
+    ] = None,
     output_dir: Annotated[
         str | None,
         Field(
@@ -7282,6 +7288,7 @@ async def render_codecollection_skill(
         mcp_version = "unknown"
 
     repo_url = generic_runtime_repo_url or _GENERIC_CODECOLLECTION_REPO_URL
+    resolved_resource_path = _enforce_custom_resource_path(resource_path)
     render_input = CodecollectionRenderInput(
         bundle_name=bundle_name,
         alias=alias,
@@ -7310,6 +7317,8 @@ async def render_codecollection_skill(
         sli_interval_seconds=sli_interval_seconds,
         source_workspace=ws,
         source_slx_name=source_slx_name,
+        resource_path=resolved_resource_path,
+        hierarchy=hierarchy,
         timeout_seconds=timeout_seconds,
         mcp_version=mcp_version,
     )

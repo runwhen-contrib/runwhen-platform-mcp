@@ -57,6 +57,8 @@ class CodecollectionRenderInput:
     sli_interval_seconds: int = 300
     source_workspace: str | None = None
     source_slx_name: str | None = None
+    resource_path: str | None = None
+    hierarchy: list[str] | None = None
     mcp_version: str = MCP_PACKAGE_VERSION
 
 
@@ -145,6 +147,15 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
     )
     alias = inp.alias.replace('"', '\\"')
     statement = inp.statement.replace("\n", " ")
+    additional_context_lines = [
+        '            qualified_name: "{{ match_resource.qualified_name }}"',
+    ]
+    if inp.resource_path:
+        additional_context_lines.append(f'            resourcePath: "{inp.resource_path}"')
+    if inp.hierarchy:
+        hierarchy_yaml = yaml.dump(inp.hierarchy, default_flow_style=True).strip()
+        additional_context_lines.append(f"            hierarchy: {hierarchy_yaml}")
+    additional_context_block = "\n".join(additional_context_lines)
     return textwrap.dedent(
         f"""\
         apiVersion: runwhen.com/v1
@@ -165,7 +176,7 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
           statement: >-
             {statement}
           additionalContext:
-            qualified_name: "{{{{ match_resource.qualified_name }}}}"
+{additional_context_block}
           tags:
 {tag_lines}
         """
