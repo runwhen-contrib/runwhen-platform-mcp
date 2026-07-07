@@ -3439,6 +3439,87 @@ class TestSkillResourcesRegisteredOnHttpServer:
         assert skill_uris == discovered
 
 
+class TestHttpHostAllowlist:
+    """Regression: FastMCP's ``HostOriginGuardMiddleware`` (fastmcp 3.4+)
+    422s any request whose ``Host`` header isn't in its allow-list. The
+    middleware's ``DEFAULT_HOSTS`` is loopback-only (``127.0.0.1``,
+    ``localhost``, ``::1``), and its "server bind host" auto-add is
+    skipped when we bind on ``0.0.0.0`` (unspecified). Without threading
+    ``allowed_hosts`` through ``FastMCP.run(...)``, every remote request
+    to the public ingress hostname (``mcp.<env>.shared.runwhen.com``) is
+    rejected with ``421 Misdirected Request`` — including the OAuth
+    handshake, so login fails with ``needsAuth`` / ``Misdirected Request``
+    in Cursor's ``[Shared MCP process]`` logs.
+
+    ``_derive_http_host_allowlist`` composes the allow-list from
+    ``MCP_ALLOWED_HOSTS`` + the ``MCP_BASE_URL`` hostname so a fresh
+    deployment works end-to-end with just the OAuth env vars set.
+    """
+
+    def test_empty_when_nothing_set(self) -> None:
+        env = {}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == []
+        assert origins == []
+
+    def test_derives_from_mcp_base_url(self) -> None:
+        # A fresh deployment usually only has MCP_BASE_URL set (needed
+        # for OAuth discovery). That hostname MUST be accepted by the
+        # guard middleware or every external POST to /mcp returns 421.
+        env = {"MCP_BASE_URL": "https://mcp.test.shared.runwhen.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.test.shared.runwhen.com"]
+        assert origins == ["https://mcp.test.shared.runwhen.com"]
+
+    def test_mcp_allowed_hosts_env_appends(self) -> None:
+        env = {
+            "MCP_BASE_URL": "https://mcp.test.shared.runwhen.com",
+            "MCP_ALLOWED_HOSTS": "mcp.other.shared.runwhen.com,internal-mcp",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, _origins = _server._derive_http_host_allowlist()
+        # MCP_ALLOWED_HOSTS entries come first (operator-explicit), the
+        # MCP_BASE_URL host is auto-appended as a safety net.
+        assert hosts == [
+            "mcp.other.shared.runwhen.com",
+            "internal-mcp",
+            "mcp.test.shared.runwhen.com",
+        ]
+
+    def test_deduplicates_across_sources(self) -> None:
+        # If MCP_ALLOWED_HOSTS already includes the base URL host, don't
+        # add it twice (guard middleware doesn't care but keeps the list
+        # stable for logs/tests).
+        env = {
+            "MCP_BASE_URL": "https://mcp.test.shared.runwhen.com",
+            "MCP_ALLOWED_HOSTS": "mcp.test.shared.runwhen.com,other",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, _origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.test.shared.runwhen.com", "other"]
+
+    def test_malformed_mcp_base_url_is_ignored(self) -> None:
+        # A garbled MCP_BASE_URL must not blow up startup — we log-and-
+        # fall-back rather than crash the pod.
+        env = {"MCP_BASE_URL": "not a url"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == []
+        assert origins == []
+
+
 class TestSkillResourceReadsLiveBody:
     """Skill resources must reflect on-disk edits after ``reload=True``.
 

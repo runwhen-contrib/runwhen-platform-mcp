@@ -282,7 +282,11 @@ The server exposes:
 | `MCP_HOST` | No | Bind address (default: `0.0.0.0`). |
 | `MCP_PORT` | No | Listen port (default: `8000`). |
 | `FASTMCP_STATELESS_HTTP` | No | Set to `true` for horizontal scaling behind a load balancer. |
+| `MCP_ALLOWED_HOSTS` | No | Comma-separated Host allowlist for FastMCP's `HostOriginGuardMiddleware`. Only needed when the public hostname differs from `MCP_BASE_URL`'s hostname (which is auto-added). Without a match, external requests are rejected with `421 Misdirected Request`. |
+| `MCP_HOST_ORIGIN_PROTECTION` | No | Set to `false` to disable the Host/Origin guard middleware (defer to the ingress). Defaults to enabled. |
 | `RW_API_URL` | Yes | RunWhen API base URL. Used for token verification and API calls. |
+
+> **Note — 421 Misdirected Request troubleshooting.** FastMCP 3.4+ ships a Host/Origin guard middleware whose default allow-list is loopback-only (`127.0.0.1`, `localhost`, `::1`). Any request whose `Host` header doesn't match returns `421 Misdirected Request` — including OAuth handshakes, which surfaces in Cursor as `[Shared MCP process] Streamable HTTP error: Error POSTing to endpoint: Misdirected Request`. This server automatically appends the `MCP_BASE_URL` hostname to the allow-list, so the OAuth-configured install works out of the box. If the public hostname on your ingress differs from `MCP_BASE_URL` (rare), set `MCP_ALLOWED_HOSTS` explicitly.
 
 ### OAuth for remote HTTP deployments
 

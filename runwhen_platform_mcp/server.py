@@ -7849,6 +7849,18 @@ def main() -> None:
       - MCP_HOST: Bind address (default: 0.0.0.0)
       - MCP_PORT: Listen port (default: 8000)
       - FASTMCP_STATELESS_HTTP: Set to "true" for horizontal scaling
+      - MCP_ALLOWED_HOSTS: Optional comma-separated Host allowlist for
+        FastMCP's ``HostOriginGuardMiddleware`` (e.g.
+        ``mcp.test.shared.runwhen.com,mcp.staging.shared.runwhen.com``).
+        The middleware's ``DEFAULT_HOSTS`` (``127.0.0.1``, ``localhost``,
+        ``::1``) allow-list does NOT include the ingress hostname, and the
+        server-bind-host auto-add is skipped when we bind on ``0.0.0.0``,
+        so without this every external request 421s. If unset AND
+        ``MCP_BASE_URL`` is set, its hostname is auto-appended so the
+        public ingress hostname is always accepted.
+      - MCP_HOST_ORIGIN_PROTECTION: Optional ``"false"`` to disable the
+        Host/Origin guard middleware entirely (rely on the ingress /
+        reverse proxy to validate). Defaults to enabled.
       - MCP_BASE_URL, MCP_PAPI_OAUTH_CLIENT_ID, MCP_PAPI_OAUTH_CLIENT_SECRET:
         optional; enable remote OAuth (see README "OAuth for remote HTTP deployments")
     """
@@ -7857,10 +7869,75 @@ def main() -> None:
         port = int(os.environ.get("MCP_PORT", "8000"))
         stateless = os.environ.get("FASTMCP_STATELESS_HTTP", "true").lower() == "true"
 
+        # FastMCP 3.4+ ships a HostOriginGuardMiddleware that 421s any
+        # request whose Host header isn't in ``DEFAULT_HOSTS`` (loopback
+        # only) + ``allowed_hosts`` + the bound server host (skipped when
+        # bound on 0.0.0.0). Without an explicit allowlist that includes
+        # the public ingress hostname, every remote call is rejected —
+        # even the OAuth handshake. Compose the allowlist from
+        # ``MCP_ALLOWED_HOSTS`` and (as a safety net) the ``MCP_BASE_URL``
+        # hostname so operators only need to set one of them.
+        host_origin_protection = (
+            os.environ.get("MCP_HOST_ORIGIN_PROTECTION", "true").lower() != "false"
+        )
+        allowed_hosts, allowed_origins = _derive_http_host_allowlist()
+
         http_mcp = _build_http_server()
-        http_mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
+        http_mcp.run(
+            transport="http",
+            host=host,
+            port=port,
+            stateless_http=stateless,
+            host_origin_protection=host_origin_protection,
+            allowed_hosts=allowed_hosts or None,
+            allowed_origins=allowed_origins or None,
+        )
     else:
         mcp.run()
+
+
+def _derive_http_host_allowlist() -> tuple[list[str], list[str]]:
+    """Compose ``allowed_hosts`` and ``allowed_origins`` for the HTTP guard.
+
+    Sources (all optional, deduplicated with insertion-order):
+      - ``MCP_ALLOWED_HOSTS`` — comma-separated hostnames operators
+        explicitly trust (e.g. multiple public ingress hostnames sharing
+        the same MCP fleet).
+      - ``MCP_BASE_URL`` — the public URL advertised for OAuth discovery
+        (``.well-known/oauth-authorization-server``). Its hostname MUST
+        be reachable, so auto-append it so a fresh deployment works
+        end-to-end without a second env var.
+
+    Returns ``(hosts, origins)`` — origins are ``https://<host>`` for each
+    host we accept. Empty lists are returned when neither source is set,
+    which leaves the guard on its ``DEFAULT_HOSTS`` (loopback-only) list.
+    """
+    from urllib.parse import urlsplit
+
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    def _add(h: str) -> None:
+        h = h.strip()
+        if not h or h in seen:
+            return
+        seen.add(h)
+        hosts.append(h)
+
+    for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(","):
+        _add(h)
+
+    base_url = os.environ.get("MCP_BASE_URL", "").strip()
+    if base_url:
+        try:
+            parsed = urlsplit(base_url)
+            if parsed.hostname:
+                _add(parsed.hostname)
+        except ValueError:
+            pass
+
+    origins = [f"https://{h.split(':', 1)[0]}" for h in hosts]
+    return hosts, origins
 
 
 _install_tool_tracing(mcp)
