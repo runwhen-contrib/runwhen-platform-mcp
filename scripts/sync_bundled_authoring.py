@@ -23,6 +23,7 @@ import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_RWL = _REPO_ROOT.parent / "runwhen-local"
@@ -134,23 +135,46 @@ def sync(runwhen_local: Path, check: bool = False) -> int:
                 continue
             manifest_entries.append({"path": rel, "sha256": _sha256(dest)})
 
+    manifest_path = _BUNDLE_ROOT / "BUNDLE_MANIFEST.json"
+    runwhen_local_str = str(runwhen_local.resolve())
+
+    # Preserve the previous ``synced_at`` when the file list and source
+    # path have not changed. Bugbot LOW "Sync rewrites manifest every
+    # run" on PR #17 — the scheduled workflow was pushing a no-op
+    # ``chore(bundle): sync ...`` commit every week because the
+    # timestamp field differed even though every bundled file was
+    # byte-identical.
+    existing_manifest: dict[str, Any] | None = None
+    if manifest_path.is_file():
+        try:
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            existing_manifest = None
+    unchanged = (
+        existing_manifest is not None
+        and existing_manifest.get("files") == manifest_entries
+        and existing_manifest.get("runwhen_local") == runwhen_local_str
+    )
+    if unchanged:
+        synced_at = existing_manifest["synced_at"]  # type: ignore[index]
+    else:
+        synced_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = {
-        "synced_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "runwhen_local": str(runwhen_local.resolve()),
+        "synced_at": synced_at,
+        "runwhen_local": runwhen_local_str,
         "files": manifest_entries,
     }
-    manifest_path = _BUNDLE_ROOT / "BUNDLE_MANIFEST.json"
     if check:
         if not manifest_path.is_file():
             print("DRIFT BUNDLE_MANIFEST.json (missing)")
             drift += 1
+        elif not unchanged:
+            print("DRIFT BUNDLE_MANIFEST.json (file list changed)")
+            drift += 1
         else:
-            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if existing.get("files") != manifest_entries:
-                print("DRIFT BUNDLE_MANIFEST.json (file list changed)")
-                drift += 1
-            else:
-                print("OK   BUNDLE_MANIFEST.json")
+            print("OK   BUNDLE_MANIFEST.json")
+    elif unchanged:
+        print("OK   BUNDLE_MANIFEST.json")
     else:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print("WROTE BUNDLE_MANIFEST.json")

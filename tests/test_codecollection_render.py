@@ -493,3 +493,47 @@ class TestRenderCodecollectionSkillTool:
         assert sli_bundle_seen is False
         assert response.get("generic_repo_sli_url") is None
         assert response.get("generic_repo_sli_resolved_from") is None
+
+    def test_explicit_repo_url_applies_to_both_runbook_and_sli(self) -> None:
+        # Regression for Bugbot MED "Explicit repo URL skips SLI" on PR
+        # #17. When a caller passes ``generic_runtime_repo_url``, it must
+        # override BOTH the runbook AND the SLI resolver — otherwise a
+        # GitOps bundle can ship a taskset pointing at the operator's
+        # mirror while the SLI template still references the public
+        # github.com default (or a diverged workspace URL). Runners /
+        # PAPI then see an inconsistent runbook+SLI pair that airgap
+        # clusters cannot actually pull the SLI half of.
+        sli_bundle: list[str | None] = []
+        rb_bundle: list[str | None] = []
+
+        async def _resolver(*, explicit=None, bundle=None):
+            # Capture which bundle got the explicit arg — both must see
+            # it when include_sli=True. The resolver's contract is
+            # ``explicit`` wins over ``bundle`` when both are set, so
+            # returning the same explicit URL here matches production.
+            from runwhen_platform_mcp import server as _server
+
+            if bundle is _server.SLI_CODE_BUNDLE:
+                sli_bundle.append(explicit)
+                return explicit or "unset", "explicit"
+            if bundle is _server.RB_CODE_BUNDLE:
+                rb_bundle.append(explicit)
+                return explicit or "unset", "explicit"
+            return "unset", "default"
+
+        response = self._call_with_papi_mocked(
+            _url_resolver=_resolver,
+            include_sli=True,
+            sli_script="def main():\n    return 0.5\n",
+            sli_interpreter="python",
+            generic_runtime_repo_url="https://mirror.internal/override.git",
+        )
+        assert rb_bundle == ["https://mirror.internal/override.git"], rb_bundle
+        assert sli_bundle == ["https://mirror.internal/override.git"], sli_bundle
+        # And the rendered SLI template must reflect the explicit
+        # override — not a fallback URL — so the GitOps bundle is
+        # internally consistent.
+        sli_yaml = response["files"][
+            "codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"
+        ]
+        assert "https://mirror.internal/override.git" in sli_yaml

@@ -7606,10 +7606,11 @@ async def render_codecollection_skill(
     # SLI at different mirrors get inconsistent artifacts. Bugbot MED
     # "Render ignores SLI repo override" on PR #17.
     #
-    # The explicit ``generic_runtime_repo_url`` call arg (if provided)
-    # applies to the runbook — callers who need to override the SLI
-    # side can set ``MCP_TOOL_BUILDER_SLI_REPO_URL`` on the server, or
-    # commit the SLI separately.
+    # The explicit ``generic_runtime_repo_url`` call arg is applied to
+    # BOTH resolvers so an operator override reaches the SLI template
+    # too — the runbook and SLI both reference the same tool-builder
+    # runtime code bundle (different pathToRobot), so a single override
+    # covers both. Bugbot MED "Explicit repo URL skips SLI" on PR #17.
     repo_url, generic_repo_source = await _resolve_generic_codecollection_url(
         explicit=generic_runtime_repo_url,
         bundle=RB_CODE_BUNDLE,
@@ -7618,6 +7619,7 @@ async def render_codecollection_skill(
     sli_repo_source: str | None = None
     if include_sli:
         sli_repo_url, sli_repo_source = await _resolve_generic_codecollection_url(
+            explicit=generic_runtime_repo_url,
             bundle=SLI_CODE_BUNDLE,
         )
     resolved_resource_path = _enforce_custom_resource_path(resource_path)
