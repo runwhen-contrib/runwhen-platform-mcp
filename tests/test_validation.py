@@ -177,6 +177,126 @@ main() {
 """
         assert _validate_script(script, "bash", "task") == []
 
+    def test_python_task_rejects_issue_description_typo(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue desription": "y",'
+            ' "issue severity": 4, "issue next steps": "do something useful here"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue desription" in w and "issue description" in w for w in warnings)
+
+    def test_python_task_rejects_snake_case_issue_keys(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue_title": "x", "issue_description": "y",'
+            ' "issue_severity": 4, "issue_next_steps": "do something useful here"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue_title" in w and "issue title" in w for w in warnings)
+
+    def test_python_task_valid_issue_keys_not_flagged(self) -> None:
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "do something useful here"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings)
+        assert not any("Unrecognized issue field key" in w for w in warnings)
+
+    def test_python_task_ignores_typo_mentioned_in_docstring(self) -> None:
+        # Regression: bugbot flagged that the raw regex scan matched quoted
+        # typos inside docstrings/comments. The real dict below uses valid
+        # keys, so no warning should fire.
+        script = (
+            "def main():\n"
+            '    """Return issues.\n'
+            "\n"
+            '    Common typo hint: users sometimes write "issue desription"\n'
+            '    instead of "issue description" — the tool-builder rejects that.\n'
+            '    """\n'
+            '    # historical mistake: "issue desription": "..."\n'
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "steps"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings)
+        assert not any("Unrecognized issue field key" in w for w in warnings)
+
+    def test_bash_task_ignores_typo_in_comment(self) -> None:
+        script = (
+            "main() {\n"
+            '  # note: users sometimes type "issue desription" by mistake\n'
+            '  echo \'[{"issue title":"x","issue description":"y",'
+            '"issue severity":4,"issue next steps":"z"}]\' >&3\n'
+            "}\n"
+        )
+        warnings = _validate_script(script, "bash", "task")
+        assert not any("issue desription" in w for w in warnings)
+
+    def test_python_task_ignores_module_level_metadata_dict(self) -> None:
+        # Regression for Bugbot MED "AST flags non-return dict keys": if the
+        # script has a module-level constant or metadata dict whose keys
+        # happen to start with ``issue`` (e.g. a docs-style mapping of
+        # snake_case → display), the validator used to blocking-flag those
+        # keys even though ``main()`` returns fully valid issues.
+        script = (
+            "ISSUE_KEY_ALIASES = {\n"
+            '    "issue_title": "issue title",\n'
+            '    "issue_desription": "issue description",\n'
+            "}\n"
+            "\n"
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings), warnings
+        assert not any("Unrecognized issue field key" in w for w in warnings), warnings
+
+    def test_python_task_ignores_unrelated_helper_dict(self) -> None:
+        # A helper defined outside main() can build a dict with a legit
+        # snake_case ``issue_id`` (unrelated to the contract's ``issue *``
+        # keys). Scoping to main() eliminates the false positive without
+        # losing coverage of the actually-returned issues.
+        script = (
+            "def _fingerprint(record):\n"
+            '    return {"issue_id": record.id, "hash": record.hash}\n'
+            "\n"
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings), warnings
+        assert not any("Unrecognized issue field key" in w for w in warnings), warnings
+
+    def test_python_task_still_flags_typo_inside_main(self) -> None:
+        # Positive regression: after narrowing scope to main(), typos inside
+        # main() must still surface. This is the case Bugbot's original
+        # detector was designed to catch.
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue desription": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue desription" in w for w in warnings), warnings
+
+    def test_python_task_flags_typo_in_main_via_intermediate_var(self) -> None:
+        # main() may build the issue dict as a local variable before
+        # returning; ast.walk over the function body picks that up because
+        # the dict literal still lives inside main()'s scope.
+        script = (
+            "def main():\n"
+            '    issue = {"issue title": "x", "issue desription": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}\n'
+            "    return [issue]\n"
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue desription" in w for w in warnings), warnings
+
 
 class TestExtractEnvVars:
     """Tests for _extract_env_vars."""
@@ -1059,7 +1179,7 @@ class TestCommitSlxAirgapAndAzureGuards:
         mock_ref.return_value = "main"
         mock_sync.return_value = (
             201,
-            {"slx": {"status": "created", "resource_id": 1}, "runbook": {"status": "created"}},
+            {"slx": {"status": "created", "resourceId": 1}, "runbook": {"status": "created"}},
         )
         script = (
             "def main():\n"
@@ -3379,6 +3499,146 @@ class TestSkillResourcesRegisteredOnHttpServer:
         resources = self._run(http_mcp.list_resources())
         skill_uris = {str(r.uri) for r in resources if str(r.uri).startswith(SKILL_URI_SCHEME)}
         assert skill_uris == discovered
+
+
+class TestHttpHostAllowlist:
+    """Regression: FastMCP's ``HostOriginGuardMiddleware`` (fastmcp 3.4+)
+    422s any request whose ``Host`` header isn't in its allow-list. The
+    middleware's ``DEFAULT_HOSTS`` is loopback-only (``127.0.0.1``,
+    ``localhost``, ``::1``), and its "server bind host" auto-add is
+    skipped when we bind on ``0.0.0.0`` (unspecified). Without threading
+    ``allowed_hosts`` through ``FastMCP.run(...)``, every remote request
+    to the public ingress hostname (``mcp.<env>.shared.runwhen.com``) is
+    rejected with ``421 Misdirected Request`` — including the OAuth
+    handshake, so login fails with ``needsAuth`` / ``Misdirected Request``
+    in Cursor's ``[Shared MCP process]`` logs.
+
+    ``_derive_http_host_allowlist`` composes the allow-list from
+    ``MCP_ALLOWED_HOSTS`` + the ``MCP_BASE_URL`` hostname so a fresh
+    deployment works end-to-end with just the OAuth env vars set.
+    """
+
+    def test_empty_when_nothing_set(self) -> None:
+        env = {}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == []
+        assert origins == []
+
+    def test_derives_from_mcp_base_url(self) -> None:
+        # A fresh deployment usually only has MCP_BASE_URL set (needed
+        # for OAuth discovery). That hostname MUST be accepted by the
+        # guard middleware or every external POST to /mcp returns 421.
+        env = {"MCP_BASE_URL": "https://mcp.test.shared.runwhen.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.test.shared.runwhen.com"]
+        assert origins == ["https://mcp.test.shared.runwhen.com"]
+
+    def test_mcp_allowed_hosts_env_appends(self) -> None:
+        env = {
+            "MCP_BASE_URL": "https://mcp.test.shared.runwhen.com",
+            "MCP_ALLOWED_HOSTS": "mcp.other.shared.runwhen.com,internal-mcp",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, _origins = _server._derive_http_host_allowlist()
+        # MCP_ALLOWED_HOSTS entries come first (operator-explicit), the
+        # MCP_BASE_URL host is auto-appended as a safety net.
+        assert hosts == [
+            "mcp.other.shared.runwhen.com",
+            "internal-mcp",
+            "mcp.test.shared.runwhen.com",
+        ]
+
+    def test_deduplicates_across_sources(self) -> None:
+        # If MCP_ALLOWED_HOSTS already includes the base URL host, don't
+        # add it twice (guard middleware doesn't care but keeps the list
+        # stable for logs/tests).
+        env = {
+            "MCP_BASE_URL": "https://mcp.test.shared.runwhen.com",
+            "MCP_ALLOWED_HOSTS": "mcp.test.shared.runwhen.com,other",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, _origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.test.shared.runwhen.com", "other"]
+
+    def test_malformed_mcp_base_url_is_ignored(self) -> None:
+        # A garbled MCP_BASE_URL must not blow up startup — we log-and-
+        # fall-back rather than crash the pod.
+        env = {"MCP_BASE_URL": "not a url"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == []
+
+    def test_http_base_url_emits_http_origins(self) -> None:
+        # Regression for Bugbot LOW "HTTP origins forced to HTTPS" on
+        # PR #17. When MCP_BASE_URL is served over plain HTTP (e.g. an
+        # internal airgap install without a TLS-terminating proxy),
+        # legitimate clients send ``Origin: http://<host>``. Forcing
+        # ``https://`` into the allowlist would 403-Forbidden-Origin
+        # every real request. Honor the scheme.
+        env = {"MCP_BASE_URL": "http://mcp.internal.airgap:8080"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.internal.airgap"]
+        assert origins == ["http://mcp.internal.airgap"]
+
+    def test_https_base_url_emits_https_origins(self) -> None:
+        # Positive counterpart: when MCP_BASE_URL is HTTPS, only the
+        # HTTPS origin is emitted (no plaintext downgrade path).
+        env = {"MCP_BASE_URL": "https://mcp.test.shared.runwhen.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert origins == ["https://mcp.test.shared.runwhen.com"]
+        assert not any(o.startswith("http://") for o in origins)
+
+    def test_mcp_base_url_scheme_applies_to_allowed_hosts_entries(self) -> None:
+        # MCP_ALLOWED_HOSTS is host-only (no scheme). The MCP_BASE_URL
+        # scheme is the strongest signal for what protocol operators
+        # expect clients to use, so apply it to the additional hostnames
+        # too instead of hard-coding one scheme.
+        env = {
+            "MCP_BASE_URL": "http://mcp.internal.airgap",
+            "MCP_ALLOWED_HOSTS": "mcp.other.airgap,internal-alias",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.other.airgap", "internal-alias", "mcp.internal.airgap"]
+        assert origins == [
+            "http://mcp.other.airgap",
+            "http://internal-alias",
+            "http://mcp.internal.airgap",
+        ]
+
+    def test_allowed_hosts_only_emits_both_schemes(self) -> None:
+        # If the operator sets MCP_ALLOWED_HOSTS without MCP_BASE_URL we
+        # cannot infer a canonical scheme. Emit both ``https://`` and
+        # ``http://`` so a mixed HTTP/HTTPS fleet still authenticates —
+        # the ``allowed_hosts`` check is the primary DNS-rebinding gate
+        # (host must be an exact match); origin is a secondary check.
+        env = {"MCP_ALLOWED_HOSTS": "mcp.example.com"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            from runwhen_platform_mcp import server as _server
+
+            hosts, origins = _server._derive_http_host_allowlist()
+        assert hosts == ["mcp.example.com"]
+        assert set(origins) == {"https://mcp.example.com", "http://mcp.example.com"}
 
 
 class TestSkillResourceReadsLiveBody:

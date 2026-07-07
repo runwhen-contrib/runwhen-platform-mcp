@@ -118,7 +118,11 @@ class TestToolParameterTypes:
         assert tool is not None
         props = tool.parameters.get("properties", {})
         assert "slx_name" in props
-        assert "branch" in props
+        assert "workspace_name" in props
+        # v4 soft-delete is workspace-global; branch / commit_message were
+        # removed because they were never wired to the endpoint.
+        assert "branch" not in props
+        assert "commit_message" not in props
 
 
 class TestRunSlxSchema:

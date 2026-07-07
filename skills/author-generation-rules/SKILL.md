@@ -1,0 +1,111 @@
+---
+name: author-generation-rules
+description: "Write Custom Discovery generation rules using bundled runwhen-local reference (airgap-safe, no network). Use when: (1) Authoring .runwhen/generation-rules/*.yaml, (2) Choosing resourceTypes or matchRules, (3) Looking up indexer resource types, (4) Fixing legacy generation-rule YAML, or (5) Validating against the bundled schema."
+---
+
+# Author Generation Rules
+
+All reference material is **bundled inside this MCP package** under
+`skills/author-generation-rules/references/`. No GitHub or internet access
+required (airgap-safe).
+
+Load **`get_skill("author-generation-rules")`** for this workflow; read bundled
+files from the MCP install tree (same paths relative to the repo / wheel).
+
+## Bundled reference index
+
+| Need | Bundled path |
+|------|----------------|
+| Concepts | `references/concepts.md` |
+| Schema (GenerationRules kind) | `references/generation-rules-schema.md` |
+| Full syntax | `references/generation-rules-syntax.md` |
+| JSON Schema | `references/generation-rule-schema.json` |
+| Tag / hierarchy | `references/tag-hierarchy-contract.md` |
+| Examples | `references/examples/*.md` |
+| Platform indexer guides | `references/indexed-resources/*.md` |
+| **Resource type catalogs** | `references/catalogs/*-resource-catalog.md` |
+
+Sync stamp: `references/BUNDLE_MANIFEST.json` (updated by MCP CI from runwhen-local).
+
+**Before writing a rule:** search the relevant catalog file for the exact
+CloudQuery table name, K8s kind, or CRD syntax. Do not guess from memory.
+
+## Real schema (never use legacy shapes)
+
+Use **`kind: GenerationRules`** (plural), one **`platform`** per file:
+
+```yaml
+apiVersion: runwhen.com/v1
+kind: GenerationRules
+spec:
+  platform: azure   # azure | aws | gcp | kubernetes | runwhen
+  generationRules:
+    - resourceTypes:
+        - azure_appservice_web_apps
+      matchRules:
+        - type: pattern
+          pattern: "prod"
+          properties: [tags]
+          mode: substring
+      slxs:
+        - baseName: az-appsvc-triage
+          qualifiers: ["resource", "resource_group"]
+          baseTemplateName: azure-appservice-triage
+          levelOfDetail: detailed
+          outputItems:
+            - type: slx
+            - type: sli
+            - type: runbook
+              templateName: azure-appservice-triage-taskset.yaml
+```
+
+### Rejected patterns (do not generate)
+
+| Legacy / aspirational | Use instead |
+|----------------------|-------------|
+| `kind: GenerationRule` (singular) | `kind: GenerationRules` |
+| `spec.match.resource_type` | `spec.platform` + `resourceTypes[]` |
+| `spec.match.predicates` with jsonpath | `matchRules[]` (`pattern`, `exists`, `and`/`or`/`not`) |
+| `spec.templates:` / `spec.context:` | `.runwhen/templates/*` + Jinja2 `match_resource` |
+| `spec.relatedResources` | IDs on primary resource in templates, or separate rules |
+| snake_case (`base_name`, `output_items`) | camelCase (`baseName`, `outputItems`) |
+
+Copy patterns from `references/examples/` — all use the real parser.
+
+## Platform quick reference
+
+| platform | resourceTypes examples | Bundled guide |
+|----------|----------------------|---------------|
+| `kubernetes` | `deployment`, `pod`, CRD `buckets.storage.gcp.upbound.io` | `indexed-resources/kubernetes.md` |
+| `azure` | `azure_compute_virtual_machines`, `azure_keyvault_vaults` | `indexed-resources/azure.md` |
+| `aws` | `aws_ec2_instances`, `aws_s3_buckets` | `indexed-resources/aws.md` |
+| `gcp` | `gcp_compute_instances`, `gcp_storage_buckets` | `indexed-resources/gcp.md` |
+| `runwhen` | `workspace` (MCP tool-builder) | `indexed-resources/runwhen-platform.md` |
+
+## Workflow
+
+1. Read `references/generation-rules-schema.md` + platform guide under `references/indexed-resources/`
+2. Grep `references/catalogs/<platform>-resource-catalog.md` for `resourceTypes`
+3. Author `.runwhen/generation-rules/*.yaml` and `.runwhen/templates/*`
+4. Test with runwhen-local workspace builder
+
+For workspace-scoped tool-builder tasks (`platform: runwhen`), use
+**`commit-to-codecollection`** / `render_codecollection_skill` unless you need
+custom `matchRules`.
+
+## Updating the bundle (maintainers, build-time only)
+
+From runwhen-platform-mcp CI or locally with both repos checked out:
+
+```bash
+python scripts/sync_bundled_authoring.py --runwhen-local /path/to/runwhen-local
+```
+
+Source of truth remains **runwhen-local** (`docs/authoring/` + catalog dumpers).
+The bundle is refreshed on MCP release CI — not at MCP request time.
+
+## Related skills
+
+- `commit-to-codecollection` — GitOps bundle for `platform: runwhen` tool-builder output
+- `find-and-deploy-codebundle` — registry Skill Templates before custom rules
+- `configure-hierarchy` / `configure-resource-path` — SLX metadata after render

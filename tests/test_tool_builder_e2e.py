@@ -207,10 +207,10 @@ def _full_flow_mocks(*, session_polls: list[dict]):
                 "slx": {
                     "status": "created",
                     "name": f"{WORKSPACE}--{SLX_NAME}",
-                    "resource_id": 1902,
+                    "resourceId": 1902,
                 },
-                "runbook": {"status": "created", "name": "1902", "resource_id": 1900},
-                "sli": {"status": "created", "name": "1902", "resource_id": 1901},
+                "runbook": {"status": "created", "slxId": 1902},
+                "sli": {"status": "created", "slxId": 1902},
             },
         )
         mock_get.side_effect = [

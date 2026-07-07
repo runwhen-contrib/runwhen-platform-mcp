@@ -55,6 +55,7 @@ EXPECTED_TOOLS = {
     "run_script_and_wait",
     "run_slx",
     "commit_slx",
+    "render_codecollection_skill",
     "delete_slx",
 }
 

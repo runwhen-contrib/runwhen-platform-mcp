@@ -36,6 +36,7 @@ Auth flow (http mode):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import gzip
@@ -55,6 +56,12 @@ import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from pydantic import Field
+
+from runwhen_platform_mcp.codecollection_render import (
+    CodecollectionRenderInput,
+    render_codecollection_files,
+    write_codecollection_files,
+)
 
 load_dotenv()
 
@@ -1331,9 +1338,188 @@ def _python_main_guard_has_paired_clause(script: str) -> bool:
     return skipped > 0
 
 
+_CANONICAL_ISSUE_FIELD_KEYS = frozenset(
+    {
+        "issue title",
+        "issue description",
+        "issue severity",
+        "issue next steps",
+        "issue observed at",
+    }
+)
+
+_ISSUE_KEY_CORRECTIONS: dict[str, str] = {
+    "issue desription": "issue description",
+    "issue desciption": "issue description",
+    "issue descripton": "issue description",
+    "issue descrption": "issue description",
+    "issue titel": "issue title",
+    "issue tittle": "issue title",
+    "issue_title": "issue title",
+    "issue_description": "issue description",
+    "issue_severity": "issue severity",
+    "issue next_steps": "issue next steps",
+    "issue_next_steps": "issue next steps",
+    "issue observed_at": "issue observed at",
+    "issue_observed_at": "issue observed at",
+}
+
+_ISSUE_FIELD_KEY_RE = re.compile(r'["\'](issue[^"\']+)["\']\s*:')
+
+
+def _extract_python_dict_issue_keys(script: str) -> list[str] | None:
+    """Return dict-literal ``issue*`` keys from the script's ``main()`` scope.
+
+    Uses ``ast`` so string keys inside comments, docstrings, or unrelated
+    string literals do not trigger false positives.
+
+    The scan is **scoped to ``def main()`` bodies** so that other dict
+    literals in the script (constants, examples, metadata blocks, unrelated
+    helpers) whose keys happen to start with ``issue`` do not produce
+    blocking validation errors — see Bugbot MED "AST flags non-return dict
+    keys" on PR #17. Every issue that reaches the runner must appear in
+    ``main()``'s returned list per the RunWhen contract, so a narrower
+    scope preserves the validator's real coverage while eliminating false
+    positives.
+
+    Returns ``None`` when the script cannot be parsed (e.g. partial
+    snippet) so callers can decide whether to fall back to a regex scan
+    or skip detection entirely. Returns ``[]`` (not ``None``) if the
+    script parses but defines no ``main()`` — no dicts to inspect.
+    """
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return None
+
+    main_bodies: list[list[ast.stmt]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "main":
+            main_bodies.append(node.body)
+
+    keys: list[str] = []
+    for body in main_bodies:
+        for stmt in body:
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Dict):
+                    continue
+                for key_node in sub.keys:
+                    if (
+                        isinstance(key_node, ast.Constant)
+                        and isinstance(key_node.value, str)
+                        and key_node.value.startswith("issue")
+                    ):
+                        keys.append(key_node.value)
+    return keys
+
+
+def _strip_bash_comments_and_heredocs(script: str) -> str:
+    """Best-effort stripper: drop ``#`` line comments and ``<<'EOF'`` heredocs.
+
+    Only used for the issue-key scan on bash scripts so that keys mentioned in
+    comments (e.g. ``# note: 'issue desription' is wrong``) don't produce
+    false-positive validation errors.
+    """
+    stripped_lines: list[str] = []
+    in_heredoc: str | None = None
+    heredoc_re = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?")
+    for line in script.splitlines():
+        if in_heredoc is not None:
+            if line.strip() == in_heredoc:
+                in_heredoc = None
+            continue
+        heredoc_match = heredoc_re.search(line)
+        if heredoc_match:
+            in_heredoc = heredoc_match.group(1)
+            line = line[: heredoc_match.start()]
+        in_single = False
+        in_double = False
+        cleaned: list[str] = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == "#" and not in_single and not in_double:
+                break
+            cleaned.append(ch)
+            i += 1
+        stripped_lines.append("".join(cleaned))
+    return "\n".join(stripped_lines)
+
+
+def _classify_issue_key(key: str) -> str | None:
+    """Return a validation message for an unrecognized issue field key, or None."""
+    if key in _CANONICAL_ISSUE_FIELD_KEYS:
+        return None
+    correction = _ISSUE_KEY_CORRECTIONS.get(key)
+    if correction:
+        return (
+            f"Invalid issue field key {key!r}. tool-builder expects "
+            f"{correction!r} (exact spelling). Wrong keys cause KeyError at runtime."
+        )
+    if key.startswith("issue_"):
+        spaced = key.replace("_", " ", 1)
+        return (
+            f"Invalid issue field key {key!r}. tool-builder expects spaced keys like "
+            f"{spaced!r}, not snake_case."
+        )
+    if key.startswith("issue "):
+        allowed = ", ".join(repr(k) for k in sorted(_CANONICAL_ISSUE_FIELD_KEYS))
+        return f"Unrecognized issue field key {key!r}. Valid keys are: {allowed}."
+    return None
+
+
+def _detect_invalid_issue_field_keys(script: str, interpreter: str, task_type: str) -> list[str]:
+    """Flag misspelled or snake_case issue dict keys that break tool-builder at runtime.
+
+    For Python, uses ``ast`` to inspect only real dict literal keys, so keys
+    mentioned inside docstrings, comments, or unrelated string literals no
+    longer produce false positives. Falls back to a regex scan only when the
+    Python source cannot be parsed (partial snippet), and even then skips
+    string-literal contexts by stripping triple-quoted blocks first. For Bash,
+    strips ``#`` line comments and heredoc bodies before scanning.
+    """
+    if task_type != "task" or interpreter not in ("python", "bash"):
+        return []
+
+    keys: list[str]
+    if interpreter == "python":
+        parsed = _extract_python_dict_issue_keys(script)
+        if parsed is None:
+            # Best effort on unparseable snippets: strip triple-quoted string
+            # literals (docstrings, long strings) and single-line comments so
+            # that human-readable examples of typos do not trigger errors.
+            scrubbed = re.sub(r'"""[\s\S]*?"""', "", script)
+            scrubbed = re.sub(r"'''[\s\S]*?'''", "", scrubbed)
+            scrubbed = re.sub(r"(?m)#.*$", "", scrubbed)
+            keys = [m.group(1) for m in _ISSUE_FIELD_KEY_RE.finditer(scrubbed)]
+        else:
+            keys = parsed
+    else:  # bash
+        scrubbed = _strip_bash_comments_and_heredocs(script)
+        keys = [m.group(1) for m in _ISSUE_FIELD_KEY_RE.finditer(scrubbed)]
+
+    findings: list[str] = []
+    seen: set[str] = set()
+    for key in keys:
+        if key in seen:
+            continue
+        seen.add(key)
+        message = _classify_issue_key(key)
+        if message is not None:
+            findings.append(message)
+    return findings
+
+
 def _validate_script(script: str, interpreter: str, task_type: str) -> list[str]:
     """Validate a script against the RunWhen contract. Returns a list of warnings."""
     warnings: list[str] = []
+
+    if task_type == "task":
+        warnings.extend(_detect_invalid_issue_field_keys(script, interpreter, task_type))
 
     if interpreter == "python":
         if not re.search(r"^def\s+main\s*\(", script, re.MULTILINE):
@@ -2016,6 +2202,156 @@ async def _get_debugslx(workspace: str) -> dict[str, Any]:
     return {}
 
 
+# ---------------------------------------------------------------------------
+# Workspace-aware code collection URL resolver
+# ---------------------------------------------------------------------------
+#
+# Tool Builder runbooks embed a ``codeBundle.repoUrl`` that PAPI clones on
+# ingestion. On airgapped installs that URL must point at the internal git
+# mirror registered with the platform (e.g. cc-catalog-svc) — the default
+# ``https://github.com/runwhen-contrib/rw-generic-codecollection.git`` is
+# unreachable, so PAPI silently drops the runbook record (SLX ends up with
+# no runbook attached).
+#
+# The MCP already accepts explicit overrides via env vars
+# (``MCP_GENERIC_CODECOLLECTION_REPO_URL`` etc.), but airgap operators rarely
+# discover that knob until they hit the exact symptom above.  Instead of
+# forcing every operator to set them, look the mirror up from the workspace's
+# registered code collections (``GET /api/v3/codecollections``) — which is
+# already the source of truth PAPI uses to decide which URLs it accepts.
+#
+# Resolution order (first match wins):
+#   1. explicit call-site argument (``generic_runtime_repo_url``)
+#   2. env override (``MCP_GENERIC_CODECOLLECTION_REPO_URL`` /
+#      ``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` etc. via ``RB_CODE_BUNDLE``)
+#   3. workspace lookup — first entry with matching ``name`` in
+#      ``/api/v3/codecollections/`` (short-TTL cached)
+#   4. hardcoded github default
+#
+# ``resolved_from`` is surfaced in tool responses so the source is obvious.
+
+_GENERIC_CODECOLLECTION_NAME = "rw-generic-codecollection"
+_WORKSPACE_UTILS_CODECOLLECTION_NAME = "rw-workspace-utils"
+
+_codecollections_lookup_cache = _TTLCache(ttl_seconds=300.0, max_size=64)
+
+
+def _codecollection_cache_key(name: str) -> str:
+    """Cache key for ``_lookup_codecollection_url`` that is auth-scoped.
+
+    In HTTP mode each request carries its own Bearer token
+    (``_request_token.get()``); a shared server may see many different
+    principals within the 5-minute TTL. Keying only by ``name`` would let
+    User A's resolved mirror URL be reused for User B's ``commit_slx`` /
+    ``render_codecollection_skill`` call. Fold a hash of the current token
+    into the key so each principal has its own resolution namespace.
+    ``_get_token()`` returns the global ``RUNWHEN_TOKEN`` in stdio mode, so
+    single-user local installs still hit the cache normally.
+
+    We hash the token instead of concatenating it directly so token material
+    never lives verbatim in the cache dict, even though the cache is
+    in-process only.
+    """
+    try:
+        token = _get_token()
+    except Exception:
+        # No token available (e.g. discovery / metadata paths). Fall back to
+        # an anonymous namespace so the caller still gets caching but never
+        # collides with an authenticated principal's cached entry.
+        token = ""
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else "anon"
+    return f"{token_hash}:{name}"
+
+
+async def _lookup_codecollection_url(name: str) -> str | None:
+    """Look up ``repo_url`` for a code collection by name via PAPI.
+
+    Uses ``GET /api/v3/codecollections`` (the same endpoint the platform UI
+    uses to populate its picker). Returns ``None`` on any failure — callers
+    fall back to env / default. Negative results are cached for the same TTL
+    to avoid hammering PAPI on every render call in a workspace that hasn't
+    registered the mirror.
+
+    Cache is auth-scoped via ``_codecollection_cache_key`` so a shared HTTP
+    MCP instance never serves one user's resolved URL to another.
+    """
+    cache_key = _codecollection_cache_key(name)
+    cached = _codecollections_lookup_cache.get(cache_key)
+    if cached is not None:
+        return cached or None
+    try:
+        data = await _papi_get("/api/v3/codecollections")
+    except Exception:
+        return None
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        _codecollections_lookup_cache.set(cache_key, "")
+        return None
+    for cc in results:
+        if not isinstance(cc, dict):
+            continue
+        if cc.get("name") != name:
+            continue
+        url = cc.get("repo_web_url")
+        if not url:
+            spec = cc.get("spec")
+            if isinstance(spec, dict):
+                url = spec.get("repoURL") or spec.get("repoUrl")
+        if url:
+            _codecollections_lookup_cache.set(cache_key, url)
+            return url
+    _codecollections_lookup_cache.set(cache_key, "")
+    return None
+
+
+async def _resolve_generic_codecollection_url(
+    *,
+    explicit: str | None = None,
+    bundle: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Resolve the URL to embed as ``codeBundle.repoUrl`` for tool-builder tasks.
+
+    Returns ``(repo_url, resolved_from)`` where ``resolved_from`` is one of
+    ``"explicit"``, ``"env"``, ``"workspace"``, or ``"default"``.
+
+    ``bundle`` optionally supplies the per-bundle codeBundle dict
+    (``RB_CODE_BUNDLE`` / ``SLI_CODE_BUNDLE``). Per-bundle env overrides
+    (``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` /
+    ``MCP_TOOL_BUILDER_SLI_REPO_URL``) are baked into that dict's
+    ``repoUrl`` field by ``_code_bundle_from_env`` at import time, so a
+    value that differs from the hardcoded default IS an env override —
+    honor it before falling through to workspace lookup. The global
+    ``MCP_GENERIC_CODECOLLECTION_REPO_URL`` acts as the fallback for
+    bundles that didn't set their own per-bundle override.
+    """
+    if explicit:
+        return explicit, "explicit"
+    if bundle is not None:
+        bundle_url = bundle.get("repoUrl")
+        if bundle_url and bundle_url != _DEFAULT_GENERIC_CODECOLLECTION_REPO:
+            return bundle_url, "env"
+    if _GENERIC_CODECOLLECTION_REPO_URL != _DEFAULT_GENERIC_CODECOLLECTION_REPO:
+        return _GENERIC_CODECOLLECTION_REPO_URL, "env"
+    ws_url = await _lookup_codecollection_url(_GENERIC_CODECOLLECTION_NAME)
+    if ws_url:
+        return ws_url, "workspace"
+    return _DEFAULT_GENERIC_CODECOLLECTION_REPO, "default"
+
+
+async def _resolve_workspace_utils_url() -> tuple[str, str]:
+    """Resolve the URL for ``rw-workspace-utils`` (cron-scheduler SLI).
+
+    Returns ``(repo_url, resolved_from)``.
+    """
+    current = CRON_SLI_CODE_BUNDLE["repoUrl"]
+    if current != _DEFAULT_WORKSPACE_UTILS_REPO:
+        return current, "env"
+    ws_url = await _lookup_codecollection_url(_WORKSPACE_UTILS_CODECOLLECTION_NAME)
+    if ws_url:
+        return ws_url, "workspace"
+    return _DEFAULT_WORKSPACE_UTILS_REPO, "default"
+
+
 async def _get_authorized_locations(workspace: str) -> list[dict[str, Any]]:
     """Fetch authorized runner locations for *workspace*.
 
@@ -2464,7 +2800,12 @@ def _build_cron_sli_yaml(
 
 
 # ---------------------------------------------------------------------------
-# CRD-less sync payload builders (POST /api/v1/workspaces/{ws}/*s/sync)
+# CRD-less sync payload builders (POST /api/v4/workspaces/{ws}/*s/sync-typed)
+#
+# Payload keys stay snake_case: the v4 typed schemas set
+# ``alias_generator=to_camel`` + ``populate_by_name=True``, so field names
+# (``runner_uuid``, ``slx_id``, ``image_url``, ...) are accepted alongside
+# their camelCase aliases. Snake_case is the minimum-diff move from v1.
 # ---------------------------------------------------------------------------
 
 
@@ -2480,7 +2821,7 @@ def _build_slx_payload(
     data: str = "logs-bulk",
     additional_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build SLX sync payload for POST /api/v1/workspaces/{ws}/slxs/sync."""
+    """Build SLX sync payload for POST /api/v4/workspaces/{ws}/slxs/sync-typed."""
     return {
         "name": f"{workspace}--{slx_name}",
         "alias": alias,
@@ -2501,11 +2842,12 @@ def _build_runbook_payload(
     secrets_provided: list[dict] | None = None,
     runtime_vars: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Build Runbook sync payload for POST /api/v1/workspaces/{ws}/runbooks/sync.
+    """Build Runbook payload for POST /api/v4/workspaces/{ws}/runbooks/sync-typed.
 
     slx_id is injected by _sync_slx_resources after the SLX sync completes —
     RunbookModel is keyed by slx_id (1-to-1 with SLX), so the payload has no
-    `name` column. RW-706 strict-validates and rejects unknown top-level keys.
+    `name` column. The v4 typed schema is ``extra='forbid'`` and rejects
+    unknown top-level keys with HTTP 422.
     """
     payload: dict[str, Any] = {
         "runner_uuid": runner_uuid,
@@ -2531,7 +2873,7 @@ def _build_sli_payload(
     interval_seconds: int = 300,
     description: str | None = None,
 ) -> dict[str, Any]:
-    """Build SLI sync payload for POST /api/v1/workspaces/{ws}/slis/sync.
+    """Build SLI payload for POST /api/v4/workspaces/{ws}/slis/sync-typed.
 
     slx_id is injected by _sync_slx_resources after the SLX sync completes.
     """
@@ -2560,23 +2902,33 @@ async def _sync_slx_resources(
     runbook_payload: dict[str, Any] | None = None,
     sli_payload: dict[str, Any] | None = None,
 ) -> tuple[int, dict[str, Any]]:
-    """Upsert SLX and its child resources via the CRD-less sync endpoints.
+    """Upsert SLX and its child resources via the v4 sync-typed endpoints.
 
-    Syncs the SLX first, injects the returned resource_id as slx_id into
-    the runbook/SLI payloads, then syncs each child in order.
+    Migrated from the legacy ``/api/v1/workspaces/{ws}/*s/sync`` routes to the
+    typed ``/api/v4/workspaces/{ws}/*s/sync-typed`` routes. The v4 handlers
+    validate payloads through Pydantic (dropping unset fields) and are the
+    same routes the UI uses, so MCP commits now share the code path that has
+    the most production traffic and coverage.
+
+    Syncs the SLX first, injects the returned id as ``slx_id`` into the
+    runbook/SLI payloads, then syncs each child in order.
+
+    The v4 response envelope is camelCase (``resourceId`` / ``slxId``); the
+    snake_case fallback preserves compatibility with existing unit tests and
+    with any older PAPI build that still speaks the v1 shape.
 
     Returns (overall_status_code, combined_response_dict).
     """
     slx_status, slx_data = await _papi_post(
-        f"/api/v1/workspaces/{ws}/slxs/sync",
+        f"/api/v4/workspaces/{ws}/slxs/sync-typed",
         {"payload": slx_payload},
     )
     if slx_status not in (200, 201):
         return slx_status, slx_data
 
-    slx_id = slx_data.get("resource_id")
+    slx_id = _extract_resource_id(slx_data)
     if slx_id is None:
-        return 500, {"error": "SLX sync did not return resource_id"}
+        return 500, {"error": "SLX sync did not return resourceId", "response": slx_data}
 
     overall_status = slx_status
     response: dict[str, Any] = {"slx": slx_data}
@@ -2584,7 +2936,7 @@ async def _sync_slx_resources(
     if runbook_payload is not None:
         runbook_payload["slx_id"] = slx_id
         rb_status, rb_data = await _papi_post(
-            f"/api/v1/workspaces/{ws}/runbooks/sync",
+            f"/api/v4/workspaces/{ws}/runbooks/sync-typed",
             {"payload": runbook_payload},
         )
         response["runbook"] = rb_data
@@ -2594,7 +2946,7 @@ async def _sync_slx_resources(
     if sli_payload is not None:
         sli_payload["slx_id"] = slx_id
         sli_status, sli_data = await _papi_post(
-            f"/api/v1/workspaces/{ws}/slis/sync",
+            f"/api/v4/workspaces/{ws}/slis/sync-typed",
             {"payload": sli_payload},
         )
         response["sli"] = sli_data
@@ -2602,6 +2954,26 @@ async def _sync_slx_resources(
             overall_status = sli_status
 
     return overall_status, response
+
+
+def _extract_resource_id(sync_data: Any) -> int | None:
+    """Pull the SLX id out of a sync response envelope.
+
+    v4 ``/slxs/sync-typed`` returns ``{"status", "name", "resourceId"}``.
+    The legacy v1 ``/slxs/sync`` route returned ``{"status", "name",
+    "resource_id"}``. Accept either so unit-test mocks and any residual v1
+    traffic keep working during the transition.
+    """
+    if not isinstance(sync_data, dict):
+        return None
+    value = sync_data.get("resourceId")
+    if value is None:
+        value = sync_data.get("resource_id")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -3860,6 +4232,12 @@ async def get_workspace_config_index(
     Returns an overview of all configured resources, SLXs, and their
     relationships in the workspace. Useful for understanding what's
     monitored and how things are connected.
+
+    This tool accepts only ``workspace_name``. It does NOT accept
+    ``resource_path``, ``slx_name``, ``filter``, or other parameters — those
+    fail with ``unexpected_keyword_argument``. To set ``resource_path`` on an
+    SLX, use ``commit_slx`` or ``deploy_registry_codebundle``. To find SLXs at
+    a path, use ``workspace_chat`` or ``search_workspace``.
 
     NOTE: For questions like "what's monitored in namespace X?" or "how are
     resources connected?", prefer `workspace_chat` — it can traverse the
@@ -6742,6 +7120,24 @@ async def commit_slx(
     sli_payload: dict[str, Any] | None = None
     secret_resolution_notes: list[str] = []
 
+    # Resolve the generic-codecollection URL per bundle. In airgap installs
+    # the hardcoded github URL is unreachable from PAPI (silently drops the
+    # runbook/SLI); the workspace lookup picks up the internal mirror the
+    # operator already registered with the platform. Per-bundle overrides
+    # (``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` / ``MCP_TOOL_BUILDER_SLI_REPO_URL``)
+    # win over the workspace fallback — resolve each bundle independently
+    # so operators can point runbook vs. SLI at different mirrors.
+    runbook_repo_url, runbook_repo_source = await _resolve_generic_codecollection_url(
+        bundle=RB_CODE_BUNDLE,
+    )
+    sli_repo_url, sli_repo_source = await _resolve_generic_codecollection_url(
+        bundle=SLI_CODE_BUNDLE,
+    )
+    # Expose the runbook source in the response for backwards compatibility;
+    # HTTP-mode callers can still read the SLI source from `generic_repo_sli_*`.
+    generic_repo_url = runbook_repo_url
+    generic_repo_source = runbook_repo_source
+
     if task_type == "task":
         env_vars = env_vars or {}
         secret_vars = secret_vars or {}
@@ -6761,7 +7157,7 @@ async def commit_slx(
         rb_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         runbook_payload = _build_runbook_payload(
             runner_uuid=location,
-            code_bundle_repo_url=RB_CODE_BUNDLE["repoUrl"],
+            code_bundle_repo_url=runbook_repo_url,
             code_bundle_ref=codebundle_ref or RB_CODE_BUNDLE["ref"],
             code_bundle_path=RB_CODE_BUNDLE["pathToRobot"],
             config_provided=rb_config,
@@ -6783,7 +7179,7 @@ async def commit_slx(
                 sli_config.append({"name": k, "value": v})
             sli_payload = _build_sli_payload(
                 runner_uuid=location,
-                code_bundle_repo_url=SLI_CODE_BUNDLE["repoUrl"],
+                code_bundle_repo_url=sli_repo_url,
                 code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
                 code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
                 config_provided=sli_config,
@@ -6797,9 +7193,10 @@ async def commit_slx(
                 {"name": "CRON_SCHEDULE", "value": cron_schedule},
                 {"name": "DRY_RUN", "value": "false"},
             ]
+            cron_repo_url, _cron_repo_source = await _resolve_workspace_utils_url()
             sli_payload = _build_sli_payload(
                 runner_uuid=location,
-                code_bundle_repo_url=CRON_SLI_CODE_BUNDLE["repoUrl"],
+                code_bundle_repo_url=cron_repo_url,
                 code_bundle_ref=CRON_SLI_CODE_BUNDLE["ref"],
                 code_bundle_path=CRON_SLI_CODE_BUNDLE["pathToRobot"],
                 config_provided=cron_config,
@@ -6825,7 +7222,7 @@ async def commit_slx(
         sli_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         sli_payload = _build_sli_payload(
             runner_uuid=location,
-            code_bundle_repo_url=SLI_CODE_BUNDLE["repoUrl"],
+            code_bundle_repo_url=sli_repo_url,
             code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
             code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
             config_provided=sli_config,
@@ -6851,6 +7248,15 @@ async def commit_slx(
         "workspace": ws,
         "codebundle_ref": codebundle_ref,
         "committed_types": type_label,
+        "generic_repo_url": generic_repo_url,
+        "generic_repo_resolved_from": generic_repo_source,
+        # Per-bundle resolution so operators using per-bundle env overrides
+        # (MCP_TOOL_BUILDER_RUNBOOK_REPO_URL / MCP_TOOL_BUILDER_SLI_REPO_URL)
+        # can confirm each side picked up the intended mirror.
+        "generic_repo_runbook_url": runbook_repo_url,
+        "generic_repo_runbook_resolved_from": runbook_repo_source,
+        "generic_repo_sli_url": sli_repo_url,
+        "generic_repo_sli_resolved_from": sli_repo_source,
         "response": resp_data,
     }
     size_warnings: list[str] = []
@@ -6884,13 +7290,20 @@ async def commit_slx(
 async def delete_slx(
     slx_name: str = Field(description="Short name of the SLX to delete (e.g. 'k8s-pod-health')."),
     workspace_name: str = Field(description="The workspace to delete from (e.g. 't-oncall')."),
-    branch: str = Field(default="main", description="Git branch to delete from."),
-    commit_message: Annotated[str | None, Field(description="Custom commit message.")] = None,
 ) -> str:
-    """Delete an SLX from the workspace Git repo.
+    """Soft-delete an SLX from the workspace via the v4 short-name endpoint.
 
-    Removes the SLX directory (slx.yaml, runbook.yaml, sli.yaml) from the
-    workspace configuration repository.
+    Uses ``DELETE /api/v4/workspaces/{ws}/slxs/{slx_short_name}``, which
+    tombstones the SLX row (``deleted_by`` / ``deleted_at``) and lets the
+    corestate reconcile loop clean up the corresponding runbook and SLI
+    rows. This is the same endpoint the UI hits, so behaviour matches what
+    users see in the platform.
+
+    Deletion is **workspace-global** — it is *not* scoped to a Git branch.
+    The v4 endpoint tombstones the SLX row in PAPI; there is no per-branch
+    variant. Callers previously wired to a Git-oriented delete path should
+    stop passing ``branch`` / ``commit_message`` (both removed) and rely on
+    the workspace-scoped soft delete.
     """
     try:
         _validate_slx_name(slx_name)
@@ -6901,7 +7314,7 @@ async def delete_slx(
 
     try:
         status_code, data = await _papi_delete(
-            f"/api/v1/workspaces/{ws}/slxs/{ws}--{slx_name}",
+            f"/api/v4/workspaces/{ws}/slxs/{slx_name}",
         )
     except (ValueError, httpx.HTTPStatusError) as exc:
         return _json_response({"error": f"Failed to delete SLX: {exc}"})
@@ -6912,6 +7325,381 @@ async def delete_slx(
         "workspace": ws,
         "response": data,
     }
+    return _json_response(result)
+
+
+@mcp.tool()
+async def render_codecollection_skill(
+    bundle_name: str = Field(
+        description="Codebundle directory name (kebab-case, e.g. 'azure-function-cold-start')."
+    ),
+    alias: str = Field(description="Human-readable SLX display name."),
+    statement: str = Field(description="SLX statement describing what should be true."),
+    workspace_name: str = Field(
+        description="Workspace used during tool-builder testing (provenance in review file)."
+    ),
+    script: Annotated[
+        str | None, Field(description="The full script source code (not base64).")
+    ] = None,
+    task_title: str = Field(default="", description="Human-readable task title (static literal)."),
+    interpreter: str = Field(default="python", description="'python' or 'bash'."),
+    env_vars: Annotated[
+        dict[str, str] | None,
+        Field(description="Environment variables baked into the TaskSet config."),
+    ] = None,
+    secret_vars: Annotated[
+        dict[str, str] | None, Field(description="Secret name → workspace secret key mappings.")
+    ] = None,
+    runtime_vars: Annotated[
+        list[dict] | None, Field(description="Per-run runtime variables (task-only).")
+    ] = None,
+    tags: Annotated[
+        list[dict[str, str]] | None, Field(description="Resource tags ({name, value} dicts).")
+    ] = None,
+    access: str = Field(default="read-write", description="'read-write' or 'read-only'."),
+    data: str = Field(
+        default="logs-bulk", description="'logs-bulk', 'config', or 'logs-stacktrace'."
+    ),
+    image_url: Annotated[str | None, Field(description="Icon URL for the SLX.")] = None,
+    owners: Annotated[
+        list[str] | None,
+        Field(description="Owner emails for the review file (defaults to current user)."),
+    ] = None,
+    base_name: Annotated[
+        str | None,
+        Field(description="Short SLX suffix in generation rule (<15 chars). Default: bundle_name."),
+    ] = None,
+    platform: str = Field(
+        default="runwhen",
+        description="Generation rule platform. Use 'runwhen' for workspace-scoped tool-builder.",
+    ),
+    resource_types: Annotated[
+        list[str] | None,
+        Field(description="Resource types for the generation rule (default: ['workspace'])."),
+    ] = None,
+    match_rules: Annotated[
+        list[dict] | None,
+        Field(description="Match predicates forwarded into the generation rule YAML."),
+    ] = None,
+    slx_qualifiers: Annotated[
+        list[str] | None,
+        Field(description="SLX name qualifiers (default: ['workspace'])."),
+    ] = None,
+    generic_runtime_ref: str = Field(
+        default="main",
+        description="Git ref for rw-generic-codecollection pinned in templates.",
+    ),
+    generic_runtime_repo_url: Annotated[
+        str | None,
+        Field(description="Override rw-generic-codecollection repo URL in templates."),
+    ] = None,
+    timeout_seconds: int = Field(
+        default=300, description="Task timeout passed to tool-builder runbook."
+    ),
+    include_sli: bool = Field(
+        default=False, description="Also emit an SLI template (tool-builder SLI)."
+    ),
+    sli_script: Annotated[
+        str | None,
+        Field(description="Optional separate SLI script (defaults to main script if include_sli)."),
+    ] = None,
+    sli_interpreter: Annotated[str | None, Field(description="Interpreter for SLI script.")] = None,
+    sli_interval_seconds: int = Field(
+        default=300, description="SLI interval when include_sli is true."
+    ),
+    source_slx_name: Annotated[
+        str | None, Field(description="Original inline SLX short name (provenance in review file).")
+    ] = None,
+    resource_path: Annotated[
+        str | None, Field(description="Resource path for search indexing.")
+    ] = None,
+    hierarchy: Annotated[
+        list[str] | None, Field(description="Tag names for hierarchical grouping.")
+    ] = None,
+    output_dir: Annotated[
+        str | None,
+        Field(
+            description="Write rendered files to this directory (stdio mode). "
+            "When omitted, files are returned in the tool response only."
+        ),
+    ] = None,
+    script_path: Annotated[
+        str | None,
+        Field(description="Local file path for script. **stdio mode only.**"),
+    ] = None,
+    script_base64: Annotated[
+        str | None, Field(description="UTF-8 script as standard base64.")
+    ] = None,
+    script_gzip_base64: Annotated[
+        str | None, Field(description="UTF-8 script as base64(gzip(...)).")
+    ] = None,
+    script_base64_path: Annotated[
+        str | None,
+        Field(description="Local path to base64-encoded script file. **stdio mode only.**"),
+    ] = None,
+) -> str:
+    """Render a tested tool-builder task as a private Custom Discovery CodeCollection.
+
+    Skills:
+      - runwhen-skill://commit-to-codecollection (GitOps workflow)
+      - runwhen-skill://build-runwhen-task (authoring + testing first)
+
+    Emits the standard codecollection layout (generation rule + Jinja templates) for
+    workspace-builder discovery. Templates delegate runtime to
+    ``rw-generic-codecollection/codebundles/tool-builder`` with base64 ``GEN_CMD``.
+
+    Also writes ``.runwhen/SKILL_TEMPLATE.md`` with the **decoded script** summary
+    and ``.runwhen/raw_script.{py,sh}`` with the full decoded script so PR reviewers
+    and automated systems never need to base64-decode TaskSet templates.
+
+    This tool does **not** push to git or mutate the workspace — it renders files locally
+    (or returns them inline) for you to ``git add / commit / push``.
+
+    Default generation rule uses ``platform: runwhen`` and ``resourceTypes: [workspace]``.
+    Requires a runwhen-local release with the ``runwhen`` platform indexer (RW-1355).
+    """
+    try:
+        _validate_slx_name(bundle_name)
+    except ValueError as exc:
+        return _json_response(
+            {
+                "error": f"Invalid bundle_name: {exc}",
+                "hint": (
+                    "bundle_name must be kebab-case (lowercase letters, digits, "
+                    "and hyphens) — same rule as SLX short names, since the "
+                    "value is used verbatim for the codebundles/<bundle_name>/ "
+                    "directory and generation-rule filenames. Rename e.g. "
+                    "'foo_bar' → 'foo-bar'."
+                ),
+            }
+        )
+
+    if base_name:
+        try:
+            _validate_slx_name(base_name)
+        except ValueError as exc:
+            return _json_response({"error": f"Invalid base_name: {exc}"})
+
+    task_title_issue = _detect_unresolved_placeholders(task_title)
+    if task_title_issue:
+        return _json_response({"error": "Invalid task_title", "message": task_title_issue})
+
+    try:
+        resolved_script = _resolve_script(
+            script=script,
+            script_path=script_path,
+            script_base64=script_base64,
+            script_gzip_base64=script_gzip_base64,
+            script_base64_path=script_base64_path,
+            label="script",
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        return _json_response({"error": str(exc)})
+
+    main_warnings = _validate_script(resolved_script, interpreter, "task")
+    blocking = [w for w in main_warnings if _is_blocking_warning(w)]
+    if blocking:
+        return _json_response(
+            {
+                "error": "Script validation failed",
+                "warnings": main_warnings,
+                "blocking_warnings": blocking,
+            }
+        )
+    resolved_script, _script_fixes = _strip_runner_unsafe_blocks(resolved_script, interpreter)
+    size_warning, size_error = _assess_script_size(resolved_script, label="script")
+    if size_error:
+        return _json_response({"error": "Script too large for transport", "message": size_error})
+
+    runtime_var_errors = _validate_runtime_vars(runtime_vars)
+    if runtime_var_errors:
+        return _json_response({"error": "Invalid runtime_vars", "details": runtime_var_errors})
+
+    if runtime_vars and env_vars:
+        overlap = {rv["name"] for rv in runtime_vars if rv.get("name")} & set(env_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both env_vars and runtime_vars: "
+                        f"{sorted(overlap)}. A name must be in one or the other."
+                    ),
+                }
+            )
+
+    if runtime_vars and secret_vars:
+        overlap = {rv["name"] for rv in runtime_vars if rv.get("name")} & set(secret_vars)
+        if overlap:
+            return _json_response(
+                {
+                    "error": (
+                        f"Names appear in both secret_vars and runtime_vars: "
+                        f"{sorted(overlap)}. A name must be in one or the other."
+                    ),
+                }
+            )
+
+    azure_hint = _azure_credentials_hint(resolved_script, sli_script, secret_vars)
+    if azure_hint:
+        return _json_response(
+            {"error": "Azure task missing azure_credentials secret", "message": azure_hint}
+        )
+
+    resolved_sli_script: str | None = sli_script
+    if include_sli:
+        if _scripts_have_identical_content(resolved_script, sli_script):
+            return _json_response(
+                {
+                    "error": "Identical task and SLI script content",
+                    "message": _IDENTICAL_TASK_SLI_MSG,
+                }
+            )
+        if not sli_script:
+            return _json_response(
+                {
+                    "error": "include_sli requires explicit sli_script",
+                    "message": (
+                        "When include_sli=True you must provide an sli_script. "
+                        "The SLI contract (returns float 0-1) is fundamentally "
+                        "different from the task contract (returns List[Dict] of "
+                        "issues) — they cannot share the same script body."
+                    ),
+                }
+            )
+        sli_interp = sli_interpreter or interpreter
+        sli_warnings = _validate_script(sli_script, sli_interp, "sli")
+        sli_blocking = [w for w in sli_warnings if _is_blocking_warning(w)]
+        if sli_blocking:
+            return _json_response(
+                {
+                    "error": "SLI script validation failed",
+                    "warnings": sli_warnings,
+                    "blocking_warnings": sli_blocking,
+                }
+            )
+        resolved_sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
+
+    ws = await _resolve_workspace(workspace_name)
+
+    if owners is None:
+        owners = [await _get_user_email()]
+
+    resolved_secret_vars = secret_vars or {}
+    if resolved_secret_vars:
+        resolved_secret_vars, _notes = await _prepare_secret_vars_for_author(
+            ws, resolved_secret_vars
+        )
+
+    try:
+        from importlib.metadata import version as pkg_version
+
+        mcp_version = pkg_version("runwhen-platform-mcp")
+    except Exception:
+        mcp_version = "unknown"
+
+    # Resolve runbook and SLI repo URLs independently so per-bundle env
+    # overrides (``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` /
+    # ``MCP_TOOL_BUILDER_SLI_REPO_URL`` — baked into ``RB_CODE_BUNDLE`` /
+    # ``SLI_CODE_BUNDLE`` at import time) flow through to the rendered
+    # GitOps output. ``commit_slx`` already resolves them separately;
+    # rendering must match, otherwise operators who point runbook and
+    # SLI at different mirrors get inconsistent artifacts. Bugbot MED
+    # "Render ignores SLI repo override" on PR #17.
+    #
+    # The explicit ``generic_runtime_repo_url`` call arg is applied to
+    # BOTH resolvers so an operator override reaches the SLI template
+    # too — the runbook and SLI both reference the same tool-builder
+    # runtime code bundle (different pathToRobot), so a single override
+    # covers both. Bugbot MED "Explicit repo URL skips SLI" on PR #17.
+    repo_url, generic_repo_source = await _resolve_generic_codecollection_url(
+        explicit=generic_runtime_repo_url,
+        bundle=RB_CODE_BUNDLE,
+    )
+    sli_repo_url: str | None = None
+    sli_repo_source: str | None = None
+    if include_sli:
+        sli_repo_url, sli_repo_source = await _resolve_generic_codecollection_url(
+            explicit=generic_runtime_repo_url,
+            bundle=SLI_CODE_BUNDLE,
+        )
+    resolved_resource_path = _enforce_custom_resource_path(resource_path)
+    render_input = CodecollectionRenderInput(
+        bundle_name=bundle_name,
+        alias=alias,
+        statement=statement,
+        task_title=task_title or alias,
+        script=resolved_script,
+        interpreter=interpreter,
+        env_vars=env_vars,
+        secret_vars=resolved_secret_vars,
+        runtime_vars=runtime_vars,
+        tags=tags,
+        access=access,
+        data=data,
+        image_url=image_url,
+        owners=owners,
+        generic_repo_url=repo_url,
+        generic_sli_repo_url=sli_repo_url,
+        generic_ref=generic_runtime_ref,
+        platform=platform,
+        resource_types=resource_types or ["workspace"],
+        match_rules=match_rules,
+        slx_qualifiers=slx_qualifiers or ["workspace"],
+        base_name=base_name,
+        include_sli=include_sli,
+        sli_script=resolved_sli_script,
+        sli_interpreter=sli_interpreter,
+        sli_interval_seconds=sli_interval_seconds,
+        source_workspace=ws,
+        source_slx_name=source_slx_name,
+        resource_path=resolved_resource_path,
+        hierarchy=hierarchy,
+        timeout_seconds=timeout_seconds,
+        mcp_version=mcp_version,
+    )
+
+    files = render_codecollection_files(render_input)
+    written_paths: list[str] = []
+    if output_dir:
+        if MCP_TRANSPORT != "stdio":
+            return _json_response(
+                {
+                    "error": "output_dir is only supported in stdio MCP mode",
+                    "hint": "Omit output_dir to receive file contents in this response.",
+                }
+            )
+        written_paths = write_codecollection_files(files, output_dir)
+
+    result: dict[str, Any] = {
+        "bundle_name": bundle_name,
+        "platform": platform,
+        "resource_types": render_input.resource_types,
+        "file_count": len(files),
+        "generic_repo_url": repo_url,
+        "generic_repo_resolved_from": generic_repo_source,
+        # Per-bundle resolution (parity with ``commit_slx``): operators
+        # using ``MCP_TOOL_BUILDER_SLI_REPO_URL`` can confirm the
+        # rendered SLI template points at the intended mirror.
+        "generic_repo_runbook_url": repo_url,
+        "generic_repo_runbook_resolved_from": generic_repo_source,
+        "generic_repo_sli_url": sli_repo_url,
+        "generic_repo_sli_resolved_from": sli_repo_source,
+        "next_steps": [
+            "Review `.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{py,sh}` "
+            "for decoded script and match-rule summary.",
+            f"git add codebundles/{bundle_name} && git commit -m "
+            f"'Add {bundle_name} tool-builder bundle'",
+            "git push",
+            "Register the repo in runwhen-local workspaceInfo.yaml codeCollections",
+            "Requires runwhen-local with platform: runwhen support (RW-1355)",
+        ],
+    }
+    if written_paths:
+        result["output_dir"] = output_dir
+        result["written_paths"] = written_paths
+    else:
+        result["files"] = files
+
     return _json_response(result)
 
 
@@ -6959,6 +7747,7 @@ _TOOL_FUNCTIONS = [
     run_script_and_wait,
     run_slx,
     commit_slx,
+    render_codecollection_skill,
     delete_slx,
 ]
 
@@ -7104,6 +7893,18 @@ def main() -> None:
       - MCP_HOST: Bind address (default: 0.0.0.0)
       - MCP_PORT: Listen port (default: 8000)
       - FASTMCP_STATELESS_HTTP: Set to "true" for horizontal scaling
+      - MCP_ALLOWED_HOSTS: Optional comma-separated Host allowlist for
+        FastMCP's ``HostOriginGuardMiddleware`` (e.g.
+        ``mcp.test.shared.runwhen.com,mcp.staging.shared.runwhen.com``).
+        The middleware's ``DEFAULT_HOSTS`` (``127.0.0.1``, ``localhost``,
+        ``::1``) allow-list does NOT include the ingress hostname, and the
+        server-bind-host auto-add is skipped when we bind on ``0.0.0.0``,
+        so without this every external request 421s. If unset AND
+        ``MCP_BASE_URL`` is set, its hostname is auto-appended so the
+        public ingress hostname is always accepted.
+      - MCP_HOST_ORIGIN_PROTECTION: Optional ``"false"`` to disable the
+        Host/Origin guard middleware entirely (rely on the ingress /
+        reverse proxy to validate). Defaults to enabled.
       - MCP_BASE_URL, MCP_PAPI_OAUTH_CLIENT_ID, MCP_PAPI_OAUTH_CLIENT_SECRET:
         optional; enable remote OAuth (see README "OAuth for remote HTTP deployments")
     """
@@ -7112,10 +7913,98 @@ def main() -> None:
         port = int(os.environ.get("MCP_PORT", "8000"))
         stateless = os.environ.get("FASTMCP_STATELESS_HTTP", "true").lower() == "true"
 
+        # FastMCP 3.4+ ships a HostOriginGuardMiddleware that 421s any
+        # request whose Host header isn't in ``DEFAULT_HOSTS`` (loopback
+        # only) + ``allowed_hosts`` + the bound server host (skipped when
+        # bound on 0.0.0.0). Without an explicit allowlist that includes
+        # the public ingress hostname, every remote call is rejected —
+        # even the OAuth handshake. Compose the allowlist from
+        # ``MCP_ALLOWED_HOSTS`` and (as a safety net) the ``MCP_BASE_URL``
+        # hostname so operators only need to set one of them.
+        host_origin_protection = (
+            os.environ.get("MCP_HOST_ORIGIN_PROTECTION", "true").lower() != "false"
+        )
+        allowed_hosts, allowed_origins = _derive_http_host_allowlist()
+
         http_mcp = _build_http_server()
-        http_mcp.run(transport="http", host=host, port=port, stateless_http=stateless)
+        http_mcp.run(
+            transport="http",
+            host=host,
+            port=port,
+            stateless_http=stateless,
+            host_origin_protection=host_origin_protection,
+            allowed_hosts=allowed_hosts or None,
+            allowed_origins=allowed_origins or None,
+        )
     else:
         mcp.run()
+
+
+def _derive_http_host_allowlist() -> tuple[list[str], list[str]]:
+    """Compose ``allowed_hosts`` and ``allowed_origins`` for the HTTP guard.
+
+    Sources (all optional, deduplicated with insertion-order):
+      - ``MCP_ALLOWED_HOSTS`` — comma-separated hostnames operators
+        explicitly trust (e.g. multiple public ingress hostnames sharing
+        the same MCP fleet).
+      - ``MCP_BASE_URL`` — the public URL advertised for OAuth discovery
+        (``.well-known/oauth-authorization-server``). Its hostname MUST
+        be reachable, so auto-append it so a fresh deployment works
+        end-to-end without a second env var.
+
+    Origins honor ``MCP_BASE_URL``'s scheme when set (e.g. an internal
+    airgap install may run over plain ``http://`` without a TLS-
+    terminating proxy). Falls back to ``https://`` for the common
+    ingress-terminates-TLS shape when only ``MCP_ALLOWED_HOSTS`` is
+    set. Emits both schemes when we cannot infer one so a mixed
+    HTTP-and-HTTPS fleet (rare) still authenticates — the ``allowed_
+    hosts`` check is the primary DNS-rebinding gate; origin is a
+    secondary browser-side check.
+
+    Returns ``(hosts, origins)``. Empty lists are returned when neither
+    source is set, which leaves the guard on its ``DEFAULT_HOSTS``
+    (loopback-only) list.
+    """
+    from urllib.parse import urlsplit
+
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    def _add(h: str) -> None:
+        h = h.strip()
+        if not h or h in seen:
+            return
+        seen.add(h)
+        hosts.append(h)
+
+    for h in os.environ.get("MCP_ALLOWED_HOSTS", "").split(","):
+        _add(h)
+
+    base_scheme: str | None = None
+    base_url = os.environ.get("MCP_BASE_URL", "").strip()
+    if base_url:
+        try:
+            parsed = urlsplit(base_url)
+            if parsed.hostname:
+                _add(parsed.hostname)
+                if parsed.scheme in ("http", "https"):
+                    base_scheme = parsed.scheme
+        except ValueError:
+            pass
+
+    origins: list[str] = []
+    for h in hosts:
+        bare = h.split(":", 1)[0]
+        if base_scheme:
+            origins.append(f"{base_scheme}://{bare}")
+        else:
+            # No scheme signal — emit both so an operator who has not set
+            # MCP_BASE_URL but is running over plain HTTP internally is
+            # not silently rejected. Bugbot LOW "HTTP origins forced to
+            # HTTPS" on PR #17.
+            origins.append(f"https://{bare}")
+            origins.append(f"http://{bare}")
+    return hosts, origins
 
 
 _install_tool_tracing(mcp)

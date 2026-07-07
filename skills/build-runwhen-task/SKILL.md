@@ -30,6 +30,7 @@ if the registry has no suitable match.
 5. **Test** — `run_script_and_wait(workspace_name="my-workspace", ...)` with env_vars, secret_vars
 6. **Iterate** — Fix based on output, re-test until issues/severity/next-steps are correct
 7. **Commit** — `commit_slx(workspace_name="my-workspace", ...)` with metadata (see reference examples)
+   - **Or GitOps:** `render_codecollection_skill` via the `commit-to-codecollection` skill when storing in a private codecollection repo instead of the workspace
 8. **Wait** — Allow 1-3 minutes for reconciliation before querying the SLX
 
 > **Location auto-resolves.** You do NOT need to call
@@ -104,6 +105,11 @@ now both **statically** scans your script (in `validate_script` and
 | `issue description` | ≥ 40 chars, non-empty | Observed numbers, names, timestamps, thresholds — interpolated from runtime values |
 | `issue next steps` | ≥ 20 chars, non-empty | Concrete remediation: a kubectl/CLI command, runbook URL, owner, or escalation path |
 | `issue severity` | 1, 2, 3, or 4 | Use the scale: 1=critical, 2=high, 3=medium, 4=informational |
+
+**Exact key spelling is required.** Keys are literal strings, not normalized aliases.
+A typo like `"issue desription"` passes some static checks but makes
+`tool-builder/runbook.robot` fail with `KeyError: 'issue description'` when the
+task runs. Copy keys from the table above character-for-character.
 
 Common anti-patterns the MCP will warn on:
 

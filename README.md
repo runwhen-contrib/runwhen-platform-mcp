@@ -282,7 +282,11 @@ The server exposes:
 | `MCP_HOST` | No | Bind address (default: `0.0.0.0`). |
 | `MCP_PORT` | No | Listen port (default: `8000`). |
 | `FASTMCP_STATELESS_HTTP` | No | Set to `true` for horizontal scaling behind a load balancer. |
+| `MCP_ALLOWED_HOSTS` | No | Comma-separated Host allowlist for FastMCP's `HostOriginGuardMiddleware`. Only needed when the public hostname differs from `MCP_BASE_URL`'s hostname (which is auto-added). Without a match, external requests are rejected with `421 Misdirected Request`. |
+| `MCP_HOST_ORIGIN_PROTECTION` | No | Set to `false` to disable the Host/Origin guard middleware (defer to the ingress). Defaults to enabled. |
 | `RW_API_URL` | Yes | RunWhen API base URL. Used for token verification and API calls. |
+
+> **Note — 421 Misdirected Request troubleshooting.** FastMCP 3.4+ ships a Host/Origin guard middleware whose default allow-list is loopback-only (`127.0.0.1`, `localhost`, `::1`). Any request whose `Host` header doesn't match returns `421 Misdirected Request` — including OAuth handshakes, which surfaces in Cursor as `[Shared MCP process] Streamable HTTP error: Error POSTing to endpoint: Misdirected Request`. This server automatically appends the `MCP_BASE_URL` hostname to the allow-list, so the OAuth-configured install works out of the box. If the public hostname on your ingress differs from `MCP_BASE_URL` (rare), set `MCP_ALLOWED_HOSTS` explicitly.
 
 ### OAuth for remote HTTP deployments
 
@@ -428,7 +432,7 @@ The server exposes these tools, grouped by use case.
 | `RUNWHEN_REGISTRY_TIMEOUT_S` | No | HTTP timeout (seconds) for registry calls. Default `10`. Lowered from the PAPI default so an unreachable registry fails fast and is reported gracefully. |
 | `RUNWHEN_SCRIPT_SOFT_MAX_BYTES` | No | Soft warning threshold for script payload size. Default `10240` (10KB). Scripts above this size produce an advisory warning in `validate_script` / `run_script_and_wait` — MCP HTTP intermediaries often truncate base64 payloads above ~13KB. |
 | `RUNWHEN_SCRIPT_HARD_MAX_BYTES` | No | Hard cap for script payload size. Default `65536` (64KB). `commit_slx` / `run_script*` reject scripts above this with an error and suggest using a registry codebundle, `script_gzip_base64`, or `script_path`. |
-| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Internal git URL for `rw-generic-codecollection` (airgap). Shared default for Tool Builder runbook + SLI bundles. |
+| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | No | Force a specific `rw-generic-codecollection` mirror URL for Tool Builder runbooks + SLIs, overriding workspace auto-detection. Typically **only needed when the workspace lookup should be bypassed** (e.g. testing a fork). See [Tool Builder repo resolution](#tool-builder-repo-resolution) below. |
 | `MCP_GENERIC_CODECOLLECTION_REF` | No | Git ref for the generic codecollection mirror (default: `main`). |
 | `MCP_TOOL_BUILDER_RUNBOOK_*` | No | Override Tool Builder runbook code bundle (`REPO_URL`, `REF`, `PATH`). |
 | `MCP_TOOL_BUILDER_SLI_*` | No | Override Tool Builder SLI code bundle (`REPO_URL`, `REF`, `PATH`). |
@@ -448,6 +452,51 @@ The server exposes these tools, grouped by use case.
 | `MCP_AUTH0_*` | Legacy | Auth0 OIDC alternative if RunWhen OAuth client vars are not used. |
 
 See `.env.example` in the repo.
+
+### Airgap deployments
+
+The MCP is designed to run in airgapped clusters with **minimal configuration**. In most installs the only variable operators need to set is:
+
+```env
+RUNWHEN_AIRGAP=true
+```
+
+This turns off the CodeBundle Registry (`search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call).
+
+Every other airgap-sensitive knob has a workspace-aware default and only needs to be set for override / debugging purposes.
+
+#### How Tool Builder resolves code-bundle URLs
+
+`commit_slx` and `render_codecollection_skill` embed a `codeBundle.repoUrl` into every runbook / SLI they produce. **PAPI clones that URL on ingestion** to index tasks, so it must be reachable from the PAPI cluster — on airgap installs that means the internal mirror registered with the platform (e.g. `http://rw-airgap-cc-catalog-svc.<namespace>:8080/git/rw-generic-codecollection.git`), not `github.com`.
+
+The MCP resolves the URL for `rw-generic-codecollection` (Tool Builder runbook + SLI) and `rw-workspace-utils` (cron-scheduler SLI) in this order:
+
+1. **Explicit call argument** — `generic_runtime_repo_url` on `render_codecollection_skill`.
+2. **Env override** — `MCP_GENERIC_CODECOLLECTION_REPO_URL` / `MCP_TOOL_BUILDER_*_REPO_URL` / `MCP_CRON_SLI_REPO_URL` (see table below).
+3. **Workspace lookup** — the MCP queries `GET /api/v3/codecollections` (the same list the platform UI's picker uses) and, if the workspace has an entry named `rw-generic-codecollection` (or `rw-workspace-utils`), uses that URL. Results are cached in-process for 5 minutes.
+4. **Hardcoded `github.com` default**.
+
+Both `commit_slx` and `render_codecollection_skill` return `generic_repo_url` + `generic_repo_resolved_from` (`explicit` / `env` / `workspace` / `default`) in their response so you can see which source won at a glance.
+
+**Airgap operators typically need no code-bundle env vars** — once the internal mirror is registered with PAPI (which the platform-airgap install does automatically), the workspace lookup finds it on every `commit_slx` / `render_codecollection_skill` call.
+
+#### Airgap env-var reference
+
+Set only what you need to override.
+
+| Variable | When to set | Description |
+|----------|-------------|-------------|
+| `RUNWHEN_AIRGAP` | **Always in airgap.** | Set to `true`. Disables outbound registry calls (`search_registry`, `get_registry_codebundle`). |
+| `RW_API_URL` | Always. | Internal PAPI URL, e.g. `http://papi.<namespace>.svc.cluster.local` or `https://papi.<airgap-domain>`. Agent URL is auto-derived (`papi` → `agentfarm`). |
+| `RUNWHEN_APP_URL` | If `RW_API_URL` is an internal `.svc.cluster.local` URL. | Public UI origin used in `workspace_chat` responses so the returned `chatUrl` opens in the browser. |
+| `MCP_BASE_URL` | HTTP transport with OAuth. | Public origin of the MCP server (e.g. `https://mcp.<airgap-domain>`) — used for OAuth discovery + redirect. |
+| `MCP_GENERIC_CODECOLLECTION_REPO_URL` | Rarely. | Force a specific `rw-generic-codecollection` mirror URL for **both** Tool Builder runbooks and SLIs. Only needed when you want to bypass the workspace lookup (e.g. targeting a fork or a URL not yet registered with PAPI). |
+| `MCP_GENERIC_CODECOLLECTION_REF` | Rarely. | Git ref for the generic codecollection mirror. Default: `main`. |
+| `MCP_TOOL_BUILDER_RUNBOOK_REPO_URL` / `_REF` / `_PATH` | Rarely. | Per-bundle override for Tool Builder runbook. `_PATH` defaults to `codebundles/tool-builder/runbook.robot`. Takes precedence over `MCP_GENERIC_CODECOLLECTION_*`. |
+| `MCP_TOOL_BUILDER_SLI_REPO_URL` / `_REF` / `_PATH` | Rarely. | Per-bundle override for Tool Builder SLI. `_PATH` defaults to `codebundles/tool-builder/sli.robot`. Takes precedence over `MCP_GENERIC_CODECOLLECTION_*`. |
+| `MCP_CRON_SLI_REPO_URL` / `_REF` / `_PATH` | Rarely. | Per-bundle override for the cron-scheduler SLI (`rw-workspace-utils`). The workspace lookup auto-selects the mirror by default, so only set this to force a fork. |
+| `MCP_GENERIC_SLX_ICON` | Optional. | Default SLX icon shown in the platform UI. Point at an internal HTTPS/GCS-equivalent URL if the default asset host isn't reachable. |
+| `MCP_SERVER_LABEL` | Optional. | Human-readable label baked into the MCP server name (e.g. `airgap`, `beta`). Helps agents distinguish which server targets which environment when several are configured side-by-side. |
 
 ### Getting a token
 
