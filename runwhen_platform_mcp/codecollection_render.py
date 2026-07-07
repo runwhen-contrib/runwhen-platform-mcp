@@ -141,17 +141,35 @@ def _build_generation_rule_yaml(inp: CodecollectionRenderInput, base_name: str) 
 
 
 def _build_slx_template(inp: CodecollectionRenderInput) -> str:
-    tag_lines = "\n".join(_tag_lines(inp.tags, inp.access, inp.data))
+    base_tags = _tag_lines(inp.tags, inp.access, inp.data)
+    if inp.hierarchy:
+        existing_tag_names = {t["name"] for t in inp.tags or []}
+        hierarchy_tags: list[str] = []
+        for level in inp.hierarchy:
+            if level != "platform" and level not in existing_tag_names:
+                hierarchy_tags.append(f"            - name: {level}")
+                hierarchy_tags.append("              value: {{ workspace.name }}")
+        if hierarchy_tags:
+            base_tags.extend(hierarchy_tags)
+    tag_lines = "\n".join(base_tags)
     image_url = inp.image_url or (
         "https://storage.googleapis.com/runwhen-nonprod-shared-images/icons/runwhen.svg"
     )
     alias = inp.alias.replace('"', '\\"')
     statement = inp.statement.replace("\n", " ")
+    statement = (
+        statement.replace("{{", "{ {")
+        .replace("}}", "} }")
+        .replace("{%", "{ %")
+        .replace("%}", "% }")
+    )
     additional_context_lines = [
         '            qualified_name: "{{ match_resource.qualified_name }}"',
     ]
     if inp.resource_path:
-        additional_context_lines.append(f'            resourcePath: "{inp.resource_path}"')
+        additional_context_lines.append(
+            f"            resourcePath: {_yaml_quote(inp.resource_path)}"
+        )
     if inp.hierarchy:
         hierarchy_yaml = yaml.dump(inp.hierarchy, default_flow_style=True).strip()
         additional_context_lines.append(f"            hierarchy: {hierarchy_yaml}")
@@ -218,8 +236,8 @@ def _secrets_provided_lines(secret_vars: dict[str, str] | None) -> list[str]:
         return []
     lines = ["          secretsProvided:"]
     for name, workspace_key in secret_vars.items():
-        lines.append(f"            - name: {name}")
-        lines.append(f"              workspaceKey: {workspace_key}")
+        lines.append(f"    - name: {name}")
+        lines.append(f"      workspaceKey: {_yaml_quote(workspace_key)}")
     return lines
 
 
