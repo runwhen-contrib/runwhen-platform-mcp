@@ -2216,6 +2216,33 @@ _WORKSPACE_UTILS_CODECOLLECTION_NAME = "rw-workspace-utils"
 _codecollections_lookup_cache = _TTLCache(ttl_seconds=300.0, max_size=64)
 
 
+def _codecollection_cache_key(name: str) -> str:
+    """Cache key for ``_lookup_codecollection_url`` that is auth-scoped.
+
+    In HTTP mode each request carries its own Bearer token
+    (``_request_token.get()``); a shared server may see many different
+    principals within the 5-minute TTL. Keying only by ``name`` would let
+    User A's resolved mirror URL be reused for User B's ``commit_slx`` /
+    ``render_codecollection_skill`` call. Fold a hash of the current token
+    into the key so each principal has its own resolution namespace.
+    ``_get_token()`` returns the global ``RUNWHEN_TOKEN`` in stdio mode, so
+    single-user local installs still hit the cache normally.
+
+    We hash the token instead of concatenating it directly so token material
+    never lives verbatim in the cache dict, even though the cache is
+    in-process only.
+    """
+    try:
+        token = _get_token()
+    except Exception:
+        # No token available (e.g. discovery / metadata paths). Fall back to
+        # an anonymous namespace so the caller still gets caching but never
+        # collides with an authenticated principal's cached entry.
+        token = ""
+    token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()[:16] if token else "anon"
+    return f"{token_hash}:{name}"
+
+
 async def _lookup_codecollection_url(name: str) -> str | None:
     """Look up ``repo_url`` for a code collection by name via PAPI.
 
@@ -2224,8 +2251,12 @@ async def _lookup_codecollection_url(name: str) -> str | None:
     fall back to env / default. Negative results are cached for the same TTL
     to avoid hammering PAPI on every render call in a workspace that hasn't
     registered the mirror.
+
+    Cache is auth-scoped via ``_codecollection_cache_key`` so a shared HTTP
+    MCP instance never serves one user's resolved URL to another.
     """
-    cached = _codecollections_lookup_cache.get(name)
+    cache_key = _codecollection_cache_key(name)
+    cached = _codecollections_lookup_cache.get(cache_key)
     if cached is not None:
         return cached or None
     try:
@@ -2234,7 +2265,7 @@ async def _lookup_codecollection_url(name: str) -> str | None:
         return None
     results = data.get("results") if isinstance(data, dict) else None
     if not isinstance(results, list):
-        _codecollections_lookup_cache.set(name, "")
+        _codecollections_lookup_cache.set(cache_key, "")
         return None
     for cc in results:
         if not isinstance(cc, dict):
@@ -2247,23 +2278,38 @@ async def _lookup_codecollection_url(name: str) -> str | None:
             if isinstance(spec, dict):
                 url = spec.get("repoURL") or spec.get("repoUrl")
         if url:
-            _codecollections_lookup_cache.set(name, url)
+            _codecollections_lookup_cache.set(cache_key, url)
             return url
-    _codecollections_lookup_cache.set(name, "")
+    _codecollections_lookup_cache.set(cache_key, "")
     return None
 
 
 async def _resolve_generic_codecollection_url(
     *,
     explicit: str | None = None,
+    bundle: dict[str, str] | None = None,
 ) -> tuple[str, str]:
     """Resolve the URL to embed as ``codeBundle.repoUrl`` for tool-builder tasks.
 
     Returns ``(repo_url, resolved_from)`` where ``resolved_from`` is one of
     ``"explicit"``, ``"env"``, ``"workspace"``, or ``"default"``.
+
+    ``bundle`` optionally supplies the per-bundle codeBundle dict
+    (``RB_CODE_BUNDLE`` / ``SLI_CODE_BUNDLE``). Per-bundle env overrides
+    (``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` /
+    ``MCP_TOOL_BUILDER_SLI_REPO_URL``) are baked into that dict's
+    ``repoUrl`` field by ``_code_bundle_from_env`` at import time, so a
+    value that differs from the hardcoded default IS an env override —
+    honor it before falling through to workspace lookup. The global
+    ``MCP_GENERIC_CODECOLLECTION_REPO_URL`` acts as the fallback for
+    bundles that didn't set their own per-bundle override.
     """
     if explicit:
         return explicit, "explicit"
+    if bundle is not None:
+        bundle_url = bundle.get("repoUrl")
+        if bundle_url and bundle_url != _DEFAULT_GENERIC_CODECOLLECTION_REPO:
+            return bundle_url, "env"
     if _GENERIC_CODECOLLECTION_REPO_URL != _DEFAULT_GENERIC_CODECOLLECTION_REPO:
         return _GENERIC_CODECOLLECTION_REPO_URL, "env"
     ws_url = await _lookup_codecollection_url(_GENERIC_CODECOLLECTION_NAME)
@@ -7054,11 +7100,23 @@ async def commit_slx(
     sli_payload: dict[str, Any] | None = None
     secret_resolution_notes: list[str] = []
 
-    # Resolve the generic-codecollection URL once per call. In airgap installs
+    # Resolve the generic-codecollection URL per bundle. In airgap installs
     # the hardcoded github URL is unreachable from PAPI (silently drops the
     # runbook/SLI); the workspace lookup picks up the internal mirror the
-    # operator already registered with the platform.
-    generic_repo_url, generic_repo_source = await _resolve_generic_codecollection_url()
+    # operator already registered with the platform. Per-bundle overrides
+    # (``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` / ``MCP_TOOL_BUILDER_SLI_REPO_URL``)
+    # win over the workspace fallback — resolve each bundle independently
+    # so operators can point runbook vs. SLI at different mirrors.
+    runbook_repo_url, runbook_repo_source = await _resolve_generic_codecollection_url(
+        bundle=RB_CODE_BUNDLE,
+    )
+    sli_repo_url, sli_repo_source = await _resolve_generic_codecollection_url(
+        bundle=SLI_CODE_BUNDLE,
+    )
+    # Expose the runbook source in the response for backwards compatibility;
+    # HTTP-mode callers can still read the SLI source from `generic_repo_sli_*`.
+    generic_repo_url = runbook_repo_url
+    generic_repo_source = runbook_repo_source
 
     if task_type == "task":
         env_vars = env_vars or {}
@@ -7079,7 +7137,7 @@ async def commit_slx(
         rb_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         runbook_payload = _build_runbook_payload(
             runner_uuid=location,
-            code_bundle_repo_url=generic_repo_url,
+            code_bundle_repo_url=runbook_repo_url,
             code_bundle_ref=codebundle_ref or RB_CODE_BUNDLE["ref"],
             code_bundle_path=RB_CODE_BUNDLE["pathToRobot"],
             config_provided=rb_config,
@@ -7101,7 +7159,7 @@ async def commit_slx(
                 sli_config.append({"name": k, "value": v})
             sli_payload = _build_sli_payload(
                 runner_uuid=location,
-                code_bundle_repo_url=generic_repo_url,
+                code_bundle_repo_url=sli_repo_url,
                 code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
                 code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
                 config_provided=sli_config,
@@ -7144,7 +7202,7 @@ async def commit_slx(
         sli_secrets = [{"name": k, "workspaceKey": v} for k, v in secret_vars.items()]
         sli_payload = _build_sli_payload(
             runner_uuid=location,
-            code_bundle_repo_url=generic_repo_url,
+            code_bundle_repo_url=sli_repo_url,
             code_bundle_ref=codebundle_ref or SLI_CODE_BUNDLE["ref"],
             code_bundle_path=SLI_CODE_BUNDLE["pathToRobot"],
             config_provided=sli_config,
@@ -7172,6 +7230,13 @@ async def commit_slx(
         "committed_types": type_label,
         "generic_repo_url": generic_repo_url,
         "generic_repo_resolved_from": generic_repo_source,
+        # Per-bundle resolution so operators using per-bundle env overrides
+        # (MCP_TOOL_BUILDER_RUNBOOK_REPO_URL / MCP_TOOL_BUILDER_SLI_REPO_URL)
+        # can confirm each side picked up the intended mirror.
+        "generic_repo_runbook_url": runbook_repo_url,
+        "generic_repo_runbook_resolved_from": runbook_repo_source,
+        "generic_repo_sli_url": sli_repo_url,
+        "generic_repo_sli_resolved_from": sli_repo_source,
         "response": resp_data,
     }
     size_warnings: list[str] = []
@@ -7512,8 +7577,14 @@ async def render_codecollection_skill(
     except Exception:
         mcp_version = "unknown"
 
+    # The render output writes a single ``codeBundle.repoUrl`` for both the
+    # runbook and (optional) SLI template, so we resolve using the RB bundle
+    # — that honors ``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` (and the global
+    # ``MCP_GENERIC_CODECOLLECTION_REPO_URL`` fallback baked into it), while
+    # still falling through to workspace lookup / hardcoded default.
     repo_url, generic_repo_source = await _resolve_generic_codecollection_url(
         explicit=generic_runtime_repo_url,
+        bundle=RB_CODE_BUNDLE,
     )
     resolved_resource_path = _enforce_custom_resource_path(resource_path)
     render_input = CodecollectionRenderInput(

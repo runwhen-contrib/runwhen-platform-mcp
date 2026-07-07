@@ -370,6 +370,170 @@ class TestResolveGenericCodecollectionUrl:
         assert url == _DEFAULT_GENERIC_CODECOLLECTION_REPO
         assert source == "default"
 
+    def test_per_bundle_env_override_wins_over_workspace(self) -> None:
+        # Regression: bugbot flagged that per-bundle env vars
+        # (MCP_TOOL_BUILDER_RUNBOOK_REPO_URL / MCP_TOOL_BUILDER_SLI_REPO_URL,
+        # applied to RB_CODE_BUNDLE / SLI_CODE_BUNDLE by _code_bundle_from_env)
+        # were silently ignored once the resolver switched to workspace lookup.
+        # Passing the bundle in should honor its non-default repoUrl before
+        # falling through to a workspace lookup.
+        _clear_cc_cache()
+        rb_bundle = {
+            "repoUrl": "http://env-override.example/rb-mirror.git",
+            "ref": "main",
+            "pathToRobot": "codebundles/tool-builder/runbook.robot",
+        }
+        papi_response = {
+            "results": [
+                {
+                    "name": "rw-generic-codecollection",
+                    "repo_web_url": "http://cc.internal/rw-generic-codecollection.git",
+                },
+            ],
+        }
+        with (
+            patch.object(
+                server_mod,
+                "_GENERIC_CODECOLLECTION_REPO_URL",
+                _DEFAULT_GENERIC_CODECOLLECTION_REPO,
+            ),
+            patch.object(
+                server_mod,
+                "_papi_get",
+                new=AsyncMock(return_value=papi_response),
+            ) as mock_get,
+        ):
+            url, source = _run(_resolve_generic_codecollection_url(bundle=rb_bundle))
+
+        assert url == "http://env-override.example/rb-mirror.git"
+        assert source == "env"
+        # No workspace round-trip when the per-bundle override is already set.
+        mock_get.assert_not_awaited()
+
+    def test_per_bundle_default_falls_through_to_workspace(self) -> None:
+        # When the caller passes a bundle whose repoUrl is still the hardcoded
+        # default (no per-bundle env override), the resolver must NOT treat
+        # that as an env override and must fall through to workspace lookup.
+        _clear_cc_cache()
+        rb_bundle = {
+            "repoUrl": _DEFAULT_GENERIC_CODECOLLECTION_REPO,
+            "ref": "main",
+            "pathToRobot": "codebundles/tool-builder/runbook.robot",
+        }
+        papi_response = {
+            "results": [
+                {
+                    "name": "rw-generic-codecollection",
+                    "repo_web_url": "http://cc.internal/rw-generic-codecollection.git",
+                },
+            ],
+        }
+        with (
+            patch.object(
+                server_mod,
+                "_GENERIC_CODECOLLECTION_REPO_URL",
+                _DEFAULT_GENERIC_CODECOLLECTION_REPO,
+            ),
+            patch.object(
+                server_mod,
+                "_papi_get",
+                new=AsyncMock(return_value=papi_response),
+            ),
+        ):
+            url, source = _run(_resolve_generic_codecollection_url(bundle=rb_bundle))
+
+        assert url == "http://cc.internal/rw-generic-codecollection.git"
+        assert source == "workspace"
+
+    def test_per_bundle_env_wins_over_global_env(self) -> None:
+        # If BOTH the per-bundle override and the global MCP_GENERIC_...
+        # override are set, the per-bundle value should win — that's the
+        # whole point of the per-bundle knob (e.g. RB and SLI mirrors served
+        # by different repos).
+        _clear_cc_cache()
+        rb_bundle = {
+            "repoUrl": "http://env-override.example/rb-mirror.git",
+            "ref": "main",
+            "pathToRobot": "codebundles/tool-builder/runbook.robot",
+        }
+        with patch.object(
+            server_mod,
+            "_GENERIC_CODECOLLECTION_REPO_URL",
+            "http://env-override.example/global-generic.git",
+        ):
+            url, source = _run(_resolve_generic_codecollection_url(bundle=rb_bundle))
+
+        assert url == "http://env-override.example/rb-mirror.git"
+        assert source == "env"
+
+
+class TestCodecollectionCacheAuthScoping:
+    """Cache must not leak one principal's resolved URL to another."""
+
+    def _install_token(self, token: str):
+        """Force ``_get_token`` to return ``token`` for the duration of the test."""
+        return patch.object(server_mod, "_get_token", return_value=token)
+
+    def test_cache_key_differs_per_token(self) -> None:
+        # Regression: bugbot flagged that the codecollections cache was keyed
+        # only by codecollection name. On a shared HTTP MCP instance each
+        # request carries its own Bearer token (contextvar), so User A's
+        # resolved mirror could be served to User B within the 5-minute TTL.
+        # The auth-scoped cache key must produce different keys for different
+        # tokens targeting the same codecollection name.
+        with self._install_token("token-user-a"):
+            key_a = server_mod._codecollection_cache_key("rw-generic-codecollection")
+        with self._install_token("token-user-b"):
+            key_b = server_mod._codecollection_cache_key("rw-generic-codecollection")
+
+        assert key_a != key_b, "cache key must vary by token to prevent cross-user leakage"
+        assert key_a.endswith(":rw-generic-codecollection")
+        assert key_b.endswith(":rw-generic-codecollection")
+        # Token material must not appear verbatim in the cache key (the hash
+        # buys us defence-in-depth if the cache dict is ever surfaced in logs).
+        assert "token-user-a" not in key_a
+        assert "token-user-b" not in key_b
+
+    def test_cache_key_stable_for_same_token(self) -> None:
+        # Same token → same key (otherwise we'd never hit the cache).
+        with self._install_token("token-same"):
+            key1 = server_mod._codecollection_cache_key("rw-generic-codecollection")
+            key2 = server_mod._codecollection_cache_key("rw-generic-codecollection")
+        assert key1 == key2
+
+    def test_lookup_does_not_leak_across_tokens(self) -> None:
+        # Full end-to-end: User A's lookup populates the cache; User B's
+        # lookup with a different token must issue its own PAPI call
+        # (different result), not reuse User A's cached URL.
+        _clear_cc_cache()
+        papi_response_a = {
+            "results": [
+                {"name": "rw-generic-codecollection", "repo_web_url": "http://a.git"},
+            ],
+        }
+        papi_response_b = {
+            "results": [
+                {"name": "rw-generic-codecollection", "repo_web_url": "http://b.git"},
+            ],
+        }
+        mock_get = AsyncMock(side_effect=[papi_response_a, papi_response_b])
+        with (
+            patch.object(server_mod, "_papi_get", new=mock_get),
+            self._install_token("token-user-a"),
+        ):
+            url_a = _run(_lookup_codecollection_url("rw-generic-codecollection"))
+        with (
+            patch.object(server_mod, "_papi_get", new=mock_get),
+            self._install_token("token-user-b"),
+        ):
+            url_b = _run(_lookup_codecollection_url("rw-generic-codecollection"))
+
+        assert url_a == "http://a.git"
+        assert url_b == "http://b.git"
+        # Each principal must have made its own PAPI call — the cache must
+        # NOT have short-circuited User B with User A's cached URL.
+        assert mock_get.await_count == 2
+
 
 class TestResolveWorkspaceUtilsUrl:
     def test_env_override_wins(self) -> None:
