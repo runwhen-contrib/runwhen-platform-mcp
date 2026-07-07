@@ -7460,6 +7460,7 @@ async def render_codecollection_skill(
             {"error": "Azure task missing azure_credentials secret", "message": azure_hint}
         )
 
+    resolved_sli_script: str | None = sli_script
     if include_sli:
         if _scripts_have_identical_content(resolved_script, sli_script):
             return _json_response(
@@ -7492,8 +7493,6 @@ async def render_codecollection_skill(
                 }
             )
         resolved_sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
-    else:
-        resolved_sli_script = sli_script
 
     ws = await _resolve_workspace(workspace_name)
 
