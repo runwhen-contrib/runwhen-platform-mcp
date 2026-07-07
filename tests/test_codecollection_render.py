@@ -200,3 +200,87 @@ class TestRenderCodecollectionFiles:
         secrets = parsed["spec"]["secretsProvided"]
         assert secrets[0]["name"] == "KUBECONFIG"
         assert secrets[0]["workspaceKey"] == "k8s:file@secret/kube.config"
+
+    def test_taskset_template_neutralises_jinja_in_task_title(self) -> None:
+        # Regression: bugbot flagged that TASK_TITLE was written into the
+        # taskset Jinja template with YAML quoting only, while alias/statement
+        # were `_escape_jinja`-neutralised. A title containing `{{` or `{%`
+        # was still parsed as template syntax at workspace-builder render time.
+        files = self._render_minimal(task_title="Run {{ probe }} for {% team %}")
+        taskset = files[
+            "codebundles/my-health-check/.runwhen/templates/my-health-check-taskset.yaml"
+        ]
+        stripped = re.sub(r"\{%.*?%\}", "_placeholder: 1", taskset)
+        stripped = re.sub(r"\{\{[^}]+\}\}", "X", stripped)
+        parsed = yaml.safe_load(stripped)
+        env_pairs = {
+            item["name"]: item["value"]
+            for item in parsed["spec"]["configProvided"]
+            if isinstance(item, dict)
+        }
+        assert env_pairs["TASK_TITLE"] == "Run { { probe } } for { % team % }"
+
+    def test_sli_template_neutralises_jinja_in_alias(self) -> None:
+        # Regression: bugbot flagged that when include_sli=True the SLI Jinja
+        # template embedded `inp.alias` raw in spec.description, so an alias
+        # with `{{` or `{%` broke SLI rendering (the SLX template already
+        # neutralises it).
+        files = self._render_minimal(
+            alias="SRE {{ team }} probe",
+            include_sli=True,
+            sli_script=SLI_SCRIPT,
+            sli_interpreter="python",
+        )
+        sli_text = files["codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"]
+        # Raw Jinja must not survive into the SLI template.
+        assert "{{ team }}" not in sli_text
+        assert "SRE { { team } } probe" in sli_text
+        stripped = re.sub(r"\{%.*?%\}", "_placeholder: 1", sli_text)
+        stripped = re.sub(r"\{\{[^}]+\}\}", "X", stripped)
+        parsed = yaml.safe_load(stripped)
+        assert parsed["spec"]["description"] == "Tool Builder SLI for SRE { { team } } probe"
+
+
+class TestRenderCodecollectionSkillTool:
+    """Server-level tests for the render_codecollection_skill MCP tool."""
+
+    def _call(self, **kwargs) -> dict:
+        import asyncio
+        import json as _json
+
+        from runwhen_platform_mcp.server import render_codecollection_skill
+
+        defaults = dict(
+            bundle_name="my-health-check",
+            alias="My Health Check",
+            statement="The service should stay healthy.",
+            workspace_name="dev-ws",
+            script=SAMPLE_SCRIPT,
+            task_title="Run my health check",
+            interpreter="python",
+        )
+        defaults.update(kwargs)
+        result = asyncio.run(render_codecollection_skill(**defaults))
+        return _json.loads(result)
+
+    def test_bundle_name_with_underscore_is_rejected(self) -> None:
+        # Regression: bugbot flagged that render_codecollection_skill silently
+        # rewrote `foo_bar` → `foo-bar` for validation but still emitted
+        # `codebundles/foo_bar/`. The name must be rejected outright so the
+        # user renames to kebab-case before any filesystem side effects.
+        response = self._call(bundle_name="foo_bar")
+        assert "error" in response
+        assert "Invalid bundle_name" in response["error"]
+        assert "foo_bar" in response["error"]
+
+    def test_bundle_name_uppercase_is_rejected(self) -> None:
+        response = self._call(bundle_name="FooBar")
+        assert "error" in response
+        assert "Invalid bundle_name" in response["error"]
+
+    def test_valid_kebab_bundle_name_is_accepted(self) -> None:
+        response = self._call(bundle_name="foo-bar")
+        # Accepted names produce a normal render result (files map), not an
+        # "Invalid bundle_name" error. Any downstream error is fine — we only
+        # care that the name-validation gate itself passes.
+        assert response.get("error", "").startswith("Invalid bundle_name") is False

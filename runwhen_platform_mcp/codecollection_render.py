@@ -220,8 +220,13 @@ def _config_provided_lines(
     resolved_interpreter = interpreter or inp.interpreter
     lines: list[str] = []
     if include_task_title:
+        # `task_title` lands in a Jinja-rendered runbook template just like
+        # `alias` / `statement` in the SLX, so it needs the same delimiter
+        # neutralisation. Without this, `{{ ... }}` or `{% ... %}` in a title
+        # is interpreted by workspace-builder at render time and bakes the
+        # wrong string (or errors) into the deployed runbook.
         lines.append("            - name: TASK_TITLE")
-        lines.append(f"              value: {_yaml_quote(inp.task_title)}")
+        lines.append(f"              value: {_yaml_quote(_escape_jinja(inp.task_title))}")
     lines.append("            - name: GEN_CMD")
     lines.append(f"              value: {_yaml_quote(script_b64)}")
     lines.append("            - name: INTERPRETER")
@@ -305,6 +310,9 @@ def _build_sli_template(inp: CodecollectionRenderInput, script_b64: str) -> str:
     )
     secret_lines = _secrets_provided_lines(inp.secret_vars)
     secret_block = "\n".join(secret_lines) if secret_lines else ""
+    # Neutralise Jinja in the alias before embedding it in the SLI description
+    # (the SLX template does the same for its own alias/statement fields).
+    sli_alias = _escape_jinja(inp.alias)
     return textwrap.dedent(
         f"""\
         apiVersion: runwhen.com/v1
@@ -321,7 +329,7 @@ def _build_sli_template(inp: CodecollectionRenderInput, script_b64: str) -> str:
           locations:
             - {{{{default_location}}}}
           description: >-
-            Tool Builder SLI for {inp.alias}
+            Tool Builder SLI for {sli_alias}
           codeBundle:
             repoUrl: {inp.generic_repo_url}
             ref: {inp.generic_ref}

@@ -7261,9 +7261,20 @@ async def render_codecollection_skill(
     Requires a runwhen-local release with the ``runwhen`` platform indexer (RW-1355).
     """
     try:
-        _validate_slx_name(bundle_name.replace("_", "-"))
+        _validate_slx_name(bundle_name)
     except ValueError as exc:
-        return _json_response({"error": f"Invalid bundle_name: {exc}"})
+        return _json_response(
+            {
+                "error": f"Invalid bundle_name: {exc}",
+                "hint": (
+                    "bundle_name must be kebab-case (lowercase letters, digits, "
+                    "and hyphens) — same rule as SLX short names, since the "
+                    "value is used verbatim for the codebundles/<bundle_name>/ "
+                    "directory and generation-rule filenames. Rename e.g. "
+                    "'foo_bar' → 'foo-bar'."
+                ),
+            }
+        )
 
     if base_name:
         try:
