@@ -87,13 +87,19 @@ def _tag_lines(tags: list[dict[str, str]] | None, access: str, data: str) -> lis
     merged.append({"name": "data", "value": data})
     lines: list[str] = []
     for tag in merged:
-        lines.append(f"    - name: {tag['name']}")
-        lines.append(f"      value: {tag['value']}")
+        lines.append(f"            - name: {tag['name']}")
+        lines.append(f"              value: {tag['value']}")
     return lines
 
 
 def _yaml_quote(value: str) -> str:
-    return yaml.dump(value, default_flow_style=True).strip()
+    raw = yaml.dump(value, default_flow_style=True, width=1_000_000)
+    # yaml.dump emits a trailing '...\n' document-end marker — remove it
+    if raw.endswith("...\n"):
+        raw = raw[:-4]
+    elif raw.endswith("..."):
+        raw = raw[:-3]
+    return raw.rstrip("\n")
 
 
 def _build_generation_rule_yaml(inp: CodecollectionRenderInput, base_name: str) -> str:
@@ -161,7 +167,7 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
           additionalContext:
             qualified_name: "{{{{ match_resource.qualified_name }}}}"
           tags:
-        {tag_lines}
+{tag_lines}
         """
     )
 
@@ -178,49 +184,49 @@ def _config_provided_lines(
     resolved_interpreter = interpreter or inp.interpreter
     lines: list[str] = []
     if include_task_title:
-        lines.append("    - name: TASK_TITLE")
-        lines.append(f"      value: {_yaml_quote(inp.task_title)}")
-    lines.append("    - name: GEN_CMD")
-    lines.append(f"      value: {_yaml_quote(script_b64)}")
-    lines.append("    - name: INTERPRETER")
-    lines.append(f"      value: {_yaml_quote(resolved_interpreter)}")
-    lines.append("    - name: CONFIG_ENV_MAP")
-    lines.append(f"      value: {_yaml_quote(json.dumps(env_vars))}")
-    lines.append("    - name: SECRET_ENV_MAP")
-    lines.append(f"      value: {_yaml_quote(json.dumps(list(secret_vars.keys())))}")
-    lines.append("    - name: TIMEOUT_SECONDS")
-    lines.append(f"      value: {_yaml_quote(str(inp.timeout_seconds))}")
+        lines.append("            - name: TASK_TITLE")
+        lines.append(f"              value: {_yaml_quote(inp.task_title)}")
+    lines.append("            - name: GEN_CMD")
+    lines.append(f"              value: {_yaml_quote(script_b64)}")
+    lines.append("            - name: INTERPRETER")
+    lines.append(f"              value: {_yaml_quote(resolved_interpreter)}")
+    lines.append("            - name: CONFIG_ENV_MAP")
+    lines.append(f"              value: {_yaml_quote(json.dumps(env_vars))}")
+    lines.append("            - name: SECRET_ENV_MAP")
+    lines.append(f"              value: {_yaml_quote(json.dumps(list(secret_vars.keys())))}")
+    lines.append("            - name: TIMEOUT_SECONDS")
+    lines.append(f"              value: {_yaml_quote(str(inp.timeout_seconds))}")
     for key, value in env_vars.items():
-        lines.append(f"    - name: {key}")
-        lines.append(f"      value: {_yaml_quote(value)}")
+        lines.append(f"            - name: {key}")
+        lines.append(f"              value: {_yaml_quote(value)}")
     return lines
 
 
 def _secrets_provided_lines(secret_vars: dict[str, str] | None) -> list[str]:
     if not secret_vars:
         return []
-    lines = ["  secretsProvided:"]
+    lines = ["          secretsProvided:"]
     for name, workspace_key in secret_vars.items():
-        lines.append(f"    - name: {name}")
-        lines.append(f"      workspaceKey: {workspace_key}")
+        lines.append(f"            - name: {name}")
+        lines.append(f"              workspaceKey: {workspace_key}")
     return lines
 
 
 def _runtime_vars_lines(runtime_vars: list[dict[str, Any]] | None) -> list[str]:
     if not runtime_vars:
         return []
-    lines = ["  runtimeVarsProvided:"]
+    lines = ["          runtimeVarsProvided:"]
     for rv in runtime_vars:
-        lines.append("    - name: " + rv["name"])
-        lines.append("      default: " + _yaml_quote(rv.get("default", "")))
-        lines.append("      description: " + _yaml_quote(rv.get("description", "")))
+        lines.append("            - name: " + rv["name"])
+        lines.append("              default: " + _yaml_quote(rv.get("default", "")))
+        lines.append("              description: " + _yaml_quote(rv.get("description", "")))
         validation = rv.get("validation") or {}
-        lines.append("      validation:")
-        lines.append("        type: " + _yaml_quote(str(validation.get("type", "regex"))))
+        lines.append("              validation:")
+        lines.append("                type: " + _yaml_quote(str(validation.get("type", "regex"))))
         if validation.get("pattern"):
-            lines.append("        pattern: " + _yaml_quote(str(validation["pattern"])))
+            lines.append("                pattern: " + _yaml_quote(str(validation["pattern"])))
         if validation.get("values"):
-            lines.append("        values: " + json.dumps(validation["values"]))
+            lines.append("                values: " + json.dumps(validation["values"]))
     return lines
 
 
@@ -247,9 +253,9 @@ def _build_taskset_template(inp: CodecollectionRenderInput, script_b64: str) -> 
             ref: {inp.generic_ref}
             pathToRobot: {TOOL_BUILDER_RUNBOOK_PATH}
           configProvided:
-        {config_lines}
-        {secret_block}
-        {runtime_block}
+{config_lines}
+{secret_block}
+{runtime_block}
         """
     )
 
@@ -287,8 +293,8 @@ def _build_sli_template(inp: CodecollectionRenderInput, script_b64: str) -> str:
           intervalStrategy: intermezzo
           intervalSeconds: {inp.sli_interval_seconds}
           configProvided:
-        {config_lines}
-        {secret_block}
+{config_lines}
+{secret_block}
           alertConfig:
             tasks:
               persona: eager-edgar

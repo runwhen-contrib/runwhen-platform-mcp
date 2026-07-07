@@ -7212,9 +7212,20 @@ async def render_codecollection_skill(
                     "message": _IDENTICAL_TASK_SLI_MSG,
                 }
             )
-        sli_body = sli_script if sli_script else resolved_script
+        if not sli_script:
+            return _json_response(
+                {
+                    "error": "include_sli requires explicit sli_script",
+                    "message": (
+                        "When include_sli=True you must provide an sli_script. "
+                        "The SLI contract (returns float 0-1) is fundamentally "
+                        "different from the task contract (returns List[Dict] of "
+                        "issues) — they cannot share the same script body."
+                    ),
+                }
+            )
         sli_interp = sli_interpreter or interpreter
-        sli_warnings = _validate_script(sli_body, sli_interp, "sli")
+        sli_warnings = _validate_script(sli_script, sli_interp, "sli")
         sli_blocking = [w for w in sli_warnings if _is_blocking_warning(w)]
         if sli_blocking:
             return _json_response(
