@@ -235,6 +235,68 @@ main() {
         warnings = _validate_script(script, "bash", "task")
         assert not any("issue desription" in w for w in warnings)
 
+    def test_python_task_ignores_module_level_metadata_dict(self) -> None:
+        # Regression for Bugbot MED "AST flags non-return dict keys": if the
+        # script has a module-level constant or metadata dict whose keys
+        # happen to start with ``issue`` (e.g. a docs-style mapping of
+        # snake_case → display), the validator used to blocking-flag those
+        # keys even though ``main()`` returns fully valid issues.
+        script = (
+            "ISSUE_KEY_ALIASES = {\n"
+            '    "issue_title": "issue title",\n'
+            '    "issue_desription": "issue description",\n'
+            "}\n"
+            "\n"
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings), warnings
+        assert not any("Unrecognized issue field key" in w for w in warnings), warnings
+
+    def test_python_task_ignores_unrelated_helper_dict(self) -> None:
+        # A helper defined outside main() can build a dict with a legit
+        # snake_case ``issue_id`` (unrelated to the contract's ``issue *``
+        # keys). Scoping to main() eliminates the false positive without
+        # losing coverage of the actually-returned issues.
+        script = (
+            "def _fingerprint(record):\n"
+            '    return {"issue_id": record.id, "hash": record.hash}\n'
+            "\n"
+            "def main():\n"
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings), warnings
+        assert not any("Unrecognized issue field key" in w for w in warnings), warnings
+
+    def test_python_task_still_flags_typo_inside_main(self) -> None:
+        # Positive regression: after narrowing scope to main(), typos inside
+        # main() must still surface. This is the case Bugbot's original
+        # detector was designed to catch.
+        script = (
+            "def main():\n"
+            '    return [{"issue title": "x", "issue desription": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue desription" in w for w in warnings), warnings
+
+    def test_python_task_flags_typo_in_main_via_intermediate_var(self) -> None:
+        # main() may build the issue dict as a local variable before
+        # returning; ast.walk over the function body picks that up because
+        # the dict literal still lives inside main()'s scope.
+        script = (
+            "def main():\n"
+            '    issue = {"issue title": "x", "issue desription": "y",'
+            ' "issue severity": 4, "issue next steps": "z"}\n'
+            "    return [issue]\n"
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert any("issue desription" in w for w in warnings), warnings
+
 
 class TestExtractEnvVars:
     """Tests for _extract_env_vars."""

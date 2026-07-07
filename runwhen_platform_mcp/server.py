@@ -1368,28 +1368,48 @@ _ISSUE_FIELD_KEY_RE = re.compile(r'["\'](issue[^"\']+)["\']\s*:')
 
 
 def _extract_python_dict_issue_keys(script: str) -> list[str] | None:
-    """Return dict-literal string keys starting with ``issue`` from a Python script.
+    """Return dict-literal ``issue*`` keys from the script's ``main()`` scope.
 
     Uses ``ast`` so string keys inside comments, docstrings, or unrelated
-    string literals do not trigger false positives. Returns ``None`` when the
-    script cannot be parsed (e.g. partial snippet) so callers can decide
-    whether to fall back to a regex scan or skip detection entirely.
+    string literals do not trigger false positives.
+
+    The scan is **scoped to ``def main()`` bodies** so that other dict
+    literals in the script (constants, examples, metadata blocks, unrelated
+    helpers) whose keys happen to start with ``issue`` do not produce
+    blocking validation errors — see Bugbot MED "AST flags non-return dict
+    keys" on PR #17. Every issue that reaches the runner must appear in
+    ``main()``'s returned list per the RunWhen contract, so a narrower
+    scope preserves the validator's real coverage while eliminating false
+    positives.
+
+    Returns ``None`` when the script cannot be parsed (e.g. partial
+    snippet) so callers can decide whether to fall back to a regex scan
+    or skip detection entirely. Returns ``[]`` (not ``None``) if the
+    script parses but defines no ``main()`` — no dicts to inspect.
     """
     try:
         tree = ast.parse(script)
     except SyntaxError:
         return None
+
+    main_bodies: list[list[ast.stmt]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == "main":
+            main_bodies.append(node.body)
+
     keys: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict):
-            continue
-        for key_node in node.keys:
-            if (
-                isinstance(key_node, ast.Constant)
-                and isinstance(key_node.value, str)
-                and key_node.value.startswith("issue")
-            ):
-                keys.append(key_node.value)
+    for body in main_bodies:
+        for stmt in body:
+            for sub in ast.walk(stmt):
+                if not isinstance(sub, ast.Dict):
+                    continue
+                for key_node in sub.keys:
+                    if (
+                        isinstance(key_node, ast.Constant)
+                        and isinstance(key_node.value, str)
+                        and key_node.value.startswith("issue")
+                    ):
+                        keys.append(key_node.value)
     return keys
 
 
@@ -7577,15 +7597,29 @@ async def render_codecollection_skill(
     except Exception:
         mcp_version = "unknown"
 
-    # The render output writes a single ``codeBundle.repoUrl`` for both the
-    # runbook and (optional) SLI template, so we resolve using the RB bundle
-    # — that honors ``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` (and the global
-    # ``MCP_GENERIC_CODECOLLECTION_REPO_URL`` fallback baked into it), while
-    # still falling through to workspace lookup / hardcoded default.
+    # Resolve runbook and SLI repo URLs independently so per-bundle env
+    # overrides (``MCP_TOOL_BUILDER_RUNBOOK_REPO_URL`` /
+    # ``MCP_TOOL_BUILDER_SLI_REPO_URL`` — baked into ``RB_CODE_BUNDLE`` /
+    # ``SLI_CODE_BUNDLE`` at import time) flow through to the rendered
+    # GitOps output. ``commit_slx`` already resolves them separately;
+    # rendering must match, otherwise operators who point runbook and
+    # SLI at different mirrors get inconsistent artifacts. Bugbot MED
+    # "Render ignores SLI repo override" on PR #17.
+    #
+    # The explicit ``generic_runtime_repo_url`` call arg (if provided)
+    # applies to the runbook — callers who need to override the SLI
+    # side can set ``MCP_TOOL_BUILDER_SLI_REPO_URL`` on the server, or
+    # commit the SLI separately.
     repo_url, generic_repo_source = await _resolve_generic_codecollection_url(
         explicit=generic_runtime_repo_url,
         bundle=RB_CODE_BUNDLE,
     )
+    sli_repo_url: str | None = None
+    sli_repo_source: str | None = None
+    if include_sli:
+        sli_repo_url, sli_repo_source = await _resolve_generic_codecollection_url(
+            bundle=SLI_CODE_BUNDLE,
+        )
     resolved_resource_path = _enforce_custom_resource_path(resource_path)
     render_input = CodecollectionRenderInput(
         bundle_name=bundle_name,
@@ -7603,6 +7637,7 @@ async def render_codecollection_skill(
         image_url=image_url,
         owners=owners,
         generic_repo_url=repo_url,
+        generic_sli_repo_url=sli_repo_url,
         generic_ref=generic_runtime_ref,
         platform=platform,
         resource_types=resource_types or ["workspace"],
@@ -7640,6 +7675,13 @@ async def render_codecollection_skill(
         "file_count": len(files),
         "generic_repo_url": repo_url,
         "generic_repo_resolved_from": generic_repo_source,
+        # Per-bundle resolution (parity with ``commit_slx``): operators
+        # using ``MCP_TOOL_BUILDER_SLI_REPO_URL`` can confirm the
+        # rendered SLI template points at the intended mirror.
+        "generic_repo_runbook_url": repo_url,
+        "generic_repo_runbook_resolved_from": generic_repo_source,
+        "generic_repo_sli_url": sli_repo_url,
+        "generic_repo_sli_resolved_from": sli_repo_source,
         "next_steps": [
             "Review `.runwhen/SKILL_TEMPLATE.md` and `.runwhen/raw_script.{py,sh}` "
             "for decoded script and match-rule summary.",

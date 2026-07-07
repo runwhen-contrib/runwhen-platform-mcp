@@ -45,6 +45,15 @@ class CodecollectionRenderInput:
     image_url: str | None = None
     owners: list[str] | None = None
     generic_repo_url: str = DEFAULT_GENERIC_REPO
+    # SLI-specific override for the runtime code-bundle repo. When set (and
+    # ``include_sli`` is true) the SLI template's ``codeBundle.repoUrl``
+    # uses this URL instead of ``generic_repo_url``. This mirrors how
+    # ``commit_slx`` resolves ``RB_CODE_BUNDLE`` / ``SLI_CODE_BUNDLE``
+    # independently so operators who set per-bundle env vars (e.g.
+    # ``MCP_TOOL_BUILDER_SLI_REPO_URL``) get the runbook and SLI pointed
+    # at the intended mirrors even in GitOps output. ``None`` falls back
+    # to ``generic_repo_url`` for backwards-compat with older callers.
+    generic_sli_repo_url: str | None = None
     generic_ref: str = DEFAULT_GENERIC_REF
     platform: str = "runwhen"
     resource_types: list[str] = field(default_factory=lambda: ["workspace"])
@@ -319,6 +328,13 @@ def _build_sli_template(inp: CodecollectionRenderInput, script_b64: str) -> str:
     # Neutralise Jinja in the alias before embedding it in the SLI description
     # (the SLX template does the same for its own alias/statement fields).
     sli_alias = _escape_jinja(inp.alias)
+    # Prefer an SLI-specific runtime repo (from
+    # ``MCP_TOOL_BUILDER_SLI_REPO_URL`` via ``SLI_CODE_BUNDLE``) so the
+    # rendered GitOps output honors per-bundle overrides. Falls back to
+    # ``generic_repo_url`` — the runbook mirror — so callers that only
+    # care about one URL keep working. See Bugbot MED "Render ignores
+    # SLI repo override" on PR #17.
+    sli_repo_url = inp.generic_sli_repo_url or inp.generic_repo_url
     return textwrap.dedent(
         f"""\
         apiVersion: runwhen.com/v1
@@ -337,7 +353,7 @@ def _build_sli_template(inp: CodecollectionRenderInput, script_b64: str) -> str:
           description: >-
             Tool Builder SLI for {sli_alias}
           codeBundle:
-            repoUrl: {inp.generic_repo_url}
+            repoUrl: {sli_repo_url}
             ref: {inp.generic_ref}
             pathToRobot: {TOOL_BUILDER_SLI_PATH}
           intervalStrategy: intermezzo

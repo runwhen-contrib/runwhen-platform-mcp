@@ -145,6 +145,45 @@ class TestRenderCodecollectionFiles:
         assert "value: bash" in sli_text
         assert "codebundles/tool-builder/sli.robot" in sli_text
 
+    def test_sli_template_uses_dedicated_sli_repo_when_set(self) -> None:
+        # Regression for Bugbot MED "Render ignores SLI repo override" on
+        # PR #17. commit_slx resolves runbook + SLI repos independently
+        # (RB_CODE_BUNDLE vs SLI_CODE_BUNDLE); render_codecollection_skill
+        # must do the same so per-bundle env overrides
+        # (MCP_TOOL_BUILDER_SLI_REPO_URL) flow into the GitOps SLI
+        # template. When generic_sli_repo_url is set, the SLI template
+        # must use it; the runbook (taskset) template must still use
+        # generic_repo_url.
+        files = self._render(
+            include_sli=True,
+            sli_script=SLI_SCRIPT,
+            sli_interpreter="python",
+            generic_repo_url="https://mirror.internal/runbook-mirror.git",
+            generic_sli_repo_url="https://mirror.internal/sli-mirror.git",
+        )
+        sli_text = files["codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"]
+        taskset_text = files[
+            "codebundles/my-health-check/.runwhen/templates/my-health-check-taskset.yaml"
+        ]
+        assert "https://mirror.internal/sli-mirror.git" in sli_text
+        assert "https://mirror.internal/runbook-mirror.git" not in sli_text
+        assert "https://mirror.internal/runbook-mirror.git" in taskset_text
+        assert "https://mirror.internal/sli-mirror.git" not in taskset_text
+
+    def test_sli_template_falls_back_to_runbook_repo_when_unset(self) -> None:
+        # Backwards-compat: if the caller doesn't set generic_sli_repo_url
+        # (older callers, or the runbook/SLI use the same mirror) the SLI
+        # template continues to inherit ``generic_repo_url`` — no regression
+        # for the common single-mirror case.
+        files = self._render(
+            include_sli=True,
+            sli_script=SLI_SCRIPT,
+            sli_interpreter="python",
+            generic_repo_url="https://mirror.internal/shared-mirror.git",
+        )
+        sli_text = files["codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"]
+        assert "https://mirror.internal/shared-mirror.git" in sli_text
+
     def _parse_slx_yaml(self, files: dict[str, str]) -> dict:
         slx = files["codebundles/my-health-check/.runwhen/templates/my-health-check-slx.yaml"]
         # Strip Jinja before yaml.safe_load (the workspace-builder renders them).
@@ -322,3 +361,135 @@ class TestRenderCodecollectionSkillTool:
         # "Invalid bundle_name" error. Any downstream error is fine — we only
         # care that the name-validation gate itself passes.
         assert response.get("error", "").startswith("Invalid bundle_name") is False
+
+    def _call_with_papi_mocked(self, **kwargs) -> dict:
+        # ``render_codecollection_skill`` calls ``_resolve_workspace`` /
+        # ``_get_user_email`` (both hit PAPI, both need RUNWHEN_TOKEN) before
+        # reaching the code-bundle URL resolver. Stub them so tests can
+        # exercise the resolver-plumbing logic without a live token.
+        #
+        # Also fill in every ``Field(default=...)`` value explicitly. The
+        # tool declares them via pydantic's ``Field(default=...)`` sentinel,
+        # which FastMCP unwraps at wire-time — a direct in-process call
+        # would otherwise pass ``FieldInfo`` objects through as if they
+        # were the values, breaking the render pipeline downstream (yaml
+        # dump on ``PydanticUndefined``).
+        import asyncio
+        import json as _json
+        from unittest import mock
+
+        from runwhen_platform_mcp import server as _server
+        from runwhen_platform_mcp.server import render_codecollection_skill
+
+        resolver = kwargs.pop("_url_resolver", None)
+        assert resolver is not None, "must pass _url_resolver for these tests"
+
+        defaults = dict(
+            bundle_name="my-health-check",
+            alias="My Health Check",
+            statement="The service should stay healthy.",
+            workspace_name="dev-ws",
+            script=SAMPLE_SCRIPT,
+            task_title="Run my health check",
+            interpreter="python",
+            access="read-write",
+            data="logs-bulk",
+            platform="runwhen",
+            generic_runtime_ref="main",
+            timeout_seconds=300,
+            include_sli=False,
+            sli_interval_seconds=300,
+        )
+        defaults.update(kwargs)
+
+        async def _fake_resolve_workspace(_name):
+            return "dev-ws"
+
+        async def _fake_get_user_email():
+            return "reviewer@example.com"
+
+        async def _fake_prepare_secrets(_ws, secrets):
+            return secrets, []
+
+        with (
+            mock.patch.object(_server, "_resolve_workspace", side_effect=_fake_resolve_workspace),
+            mock.patch.object(_server, "_get_user_email", side_effect=_fake_get_user_email),
+            mock.patch.object(
+                _server,
+                "_prepare_secret_vars_for_author",
+                side_effect=_fake_prepare_secrets,
+            ),
+            mock.patch.object(
+                _server,
+                "_resolve_generic_codecollection_url",
+                side_effect=resolver,
+            ),
+        ):
+            result = asyncio.run(render_codecollection_skill(**defaults))
+        return _json.loads(result)
+
+    def test_render_resolves_runbook_and_sli_repos_independently(self) -> None:
+        # Regression for Bugbot MED "Render ignores SLI repo override" on
+        # PR #17. commit_slx resolves RB_CODE_BUNDLE / SLI_CODE_BUNDLE
+        # separately so per-bundle env overrides
+        # (MCP_TOOL_BUILDER_RUNBOOK_REPO_URL vs
+        # MCP_TOOL_BUILDER_SLI_REPO_URL) flow through to the runtime.
+        # render_codecollection_skill must do the same so the GitOps
+        # output matches the runtime.
+        from runwhen_platform_mcp import server as _server
+
+        async def _resolver(*, explicit=None, bundle=None):
+            if explicit:
+                return explicit, "explicit"
+            if bundle is _server.SLI_CODE_BUNDLE:
+                return "https://mirror.internal/sli.git", "env"
+            return "https://mirror.internal/runbook.git", "env"
+
+        # Use a validator-friendly SLI body (returns a numeric literal so
+        # ``_validate_script`` doesn't emit a blocking warning about the
+        # SLI contract — the actual expression is irrelevant to this test).
+        sli_body = "def main():\n    return 0.5\n"
+        response = self._call_with_papi_mocked(
+            _url_resolver=_resolver,
+            include_sli=True,
+            sli_script=sli_body,
+            sli_interpreter="python",
+        )
+        # Both URLs must appear in the response payload so operators can
+        # confirm each side picked up the intended mirror.
+        assert response.get("generic_repo_runbook_url") == "https://mirror.internal/runbook.git"
+        assert response.get("generic_repo_sli_url") == "https://mirror.internal/sli.git"
+        # And the rendered SLI template must use the SLI mirror, not the
+        # runbook mirror.
+        sli_yaml = response["files"][
+            "codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"
+        ]
+        taskset_yaml = response["files"][
+            "codebundles/my-health-check/.runwhen/templates/my-health-check-taskset.yaml"
+        ]
+        assert "https://mirror.internal/sli.git" in sli_yaml
+        assert "https://mirror.internal/runbook.git" not in sli_yaml
+        assert "https://mirror.internal/runbook.git" in taskset_yaml
+        assert "https://mirror.internal/sli.git" not in taskset_yaml
+
+    def test_render_without_sli_does_not_resolve_sli_repo(self) -> None:
+        # When include_sli=False we don't need an SLI URL at all — the SLI
+        # template isn't emitted. Avoid the extra PAPI round-trip and
+        # confirm the response's sli fields are null.
+        from runwhen_platform_mcp import server as _server
+
+        sli_bundle_seen = False
+
+        async def _resolver(*, explicit=None, bundle=None):
+            nonlocal sli_bundle_seen
+            if bundle is _server.SLI_CODE_BUNDLE:
+                sli_bundle_seen = True
+            return "https://mirror.internal/runbook.git", "env"
+
+        response = self._call_with_papi_mocked(
+            _url_resolver=_resolver,
+            include_sli=False,
+        )
+        assert sli_bundle_seen is False
+        assert response.get("generic_repo_sli_url") is None
+        assert response.get("generic_repo_sli_resolved_from") is None
