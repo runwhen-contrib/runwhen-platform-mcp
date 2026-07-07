@@ -7235,11 +7235,20 @@ async def render_codecollection_skill(
                     "blocking_warnings": sli_blocking,
                 }
             )
+        resolved_sli_script, _sli_fixes = _strip_runner_unsafe_blocks(sli_script, sli_interp)
+    else:
+        resolved_sli_script = sli_script
 
     ws = await _resolve_workspace(workspace_name)
 
     if owners is None:
         owners = [await _get_user_email()]
+
+    resolved_secret_vars = secret_vars or {}
+    if resolved_secret_vars:
+        resolved_secret_vars, _notes = await _prepare_secret_vars_for_author(
+            ws, resolved_secret_vars
+        )
 
     try:
         from importlib.metadata import version as pkg_version
@@ -7257,7 +7266,7 @@ async def render_codecollection_skill(
         script=resolved_script,
         interpreter=interpreter,
         env_vars=env_vars,
-        secret_vars=secret_vars,
+        secret_vars=resolved_secret_vars,
         runtime_vars=runtime_vars,
         tags=tags,
         access=access,
@@ -7272,7 +7281,7 @@ async def render_codecollection_skill(
         slx_qualifiers=slx_qualifiers or ["workspace"],
         base_name=base_name,
         include_sli=include_sli,
-        sli_script=sli_script,
+        sli_script=resolved_sli_script,
         sli_interpreter=sli_interpreter,
         sli_interval_seconds=sli_interval_seconds,
         source_workspace=ws,
