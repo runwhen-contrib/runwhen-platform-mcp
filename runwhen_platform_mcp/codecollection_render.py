@@ -167,9 +167,8 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
         '            qualified_name: "{{ match_resource.qualified_name }}"',
     ]
     if inp.resource_path:
-        additional_context_lines.append(
-            f"            resourcePath: {_yaml_quote(inp.resource_path)}"
-        )
+        escaped = inp.resource_path.replace("\\", "\\\\").replace('"', '\\"')
+        additional_context_lines.append(f'            resourcePath: "{escaped}"')
     if inp.hierarchy:
         hierarchy_yaml = yaml.dump(inp.hierarchy, default_flow_style=True).strip()
         additional_context_lines.append(f"            hierarchy: {hierarchy_yaml}")
@@ -236,8 +235,8 @@ def _secrets_provided_lines(secret_vars: dict[str, str] | None) -> list[str]:
         return []
     lines = ["          secretsProvided:"]
     for name, workspace_key in secret_vars.items():
-        lines.append(f"    - name: {name}")
-        lines.append(f"      workspaceKey: {_yaml_quote(workspace_key)}")
+        lines.append(f"            - name: {name}")
+        lines.append(f"              workspaceKey: {_yaml_quote(workspace_key)}")
     return lines
 
 
