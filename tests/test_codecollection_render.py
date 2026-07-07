@@ -101,6 +101,22 @@ class TestRenderCodecollectionFiles:
         assert "`kubeconfig`" in review
         assert "workspaceKey" not in review
 
+    def test_skill_template_starts_at_column_zero(self) -> None:
+        # Regression: the previous version used a textwrap.dedent-with-f-string
+        # that mixed 8-space-indented outer lines with column-0 injected blocks
+        # (tables, provenance). Because textwrap.dedent's common prefix was
+        # then 0, the outer lines kept their 8-space indent and the resulting
+        # markdown was rendered as an indented code block instead of a
+        # heading. Guard against a recurrence by asserting the top-level
+        # markers start at column 0.
+        files = self._render()
+        review = files["codebundles/my-health-check/.runwhen/SKILL_TEMPLATE.md"]
+        for marker in ("# My Health Check", "## When this SLX gets created", "## Provenance"):
+            assert marker in review, f"missing marker: {marker!r}"
+            for line in review.splitlines():
+                if line.lstrip() == marker:
+                    assert line == marker, f"marker not at col 0: {line!r}"
+
     def test_slx_template_uses_jinja_placeholders(self) -> None:
         files = self._render()
         slx = files["codebundles/my-health-check/.runwhen/templates/my-health-check-slx.yaml"]

@@ -414,79 +414,85 @@ def _build_skill_template(
 
     resource_types = ", ".join(f"`{rt}`" for rt in inp.resource_types)
     qualifiers = ", ".join(f"`{q}`" for q in inp.slx_qualifiers)
+    provenance = "\n".join(provenance_lines)
 
-    return textwrap.dedent(
-        f"""\
-        # {inp.alias}
-
-        {inp.statement}
-
-        **Bundle:** `{inp.bundle_name}` · **Task title:** `{inp.task_title}` ·
-        **Runtime:** tool-builder ({lang})
-
-        > **Review artifact:** See `raw_script.{script_extension}` in this directory
-        > for the decoded script content that reviewers and automated systems should
-        > inspect. Do **not** parse the base64-encoded `GEN_CMD` in the TaskSet template
-        > for review purposes — use this SKILL_TEMPLATE.md and the accompanying
-        > `raw_script.{script_extension}` file instead.
-
-        ## When this SLX gets created
-
-        - **Platform:** `{inp.platform}` — workspace-builder matches RunWhen platform resources
-        - **Resource types:** {resource_types}
-        - **Match rules (plain English):**
-        {match_bullets}
-        - **Expected cardinality:** one SLX per matched resource, named `<qualifiers>-{base_name}`
-        - **Qualifiers:** {qualifiers}
-
-        ## What this SLX does
-
-        The task runs a {lang} script via the shared `tool-builder` codebundle in
-        `rw-generic-codecollection`. The workspace-builder renders the TaskSet template with
-        a base64-encoded `GEN_CMD` at deploy time; the decoded script is available in
-        `raw_script.{script_extension}` in this directory for review.
-
-        ### Environment variables
-
-        {env_table}
-
-        ### Secrets (names only — values live in RunWhen workspace secrets)
-
-        {secret_table}
-
-        ### Runtime variables (user-supplied at run time)
-
-        {runtime_table}
-
-        ## Operational metadata
-
-        - **Timeout:** {inp.timeout_seconds}s
-        - **Access:** `{inp.access}` · **Data:** `{inp.data}`
-        - **Owners:** {", ".join(owners)}
-
-        ## Provenance
-
-        {chr(10).join(provenance_lines)}
-
-        ## Deploying this codecollection
-
-        Add to your runwhen-local runner `workspaceInfo.yaml`:
-
-        ```yaml
-        codeCollections:
-          - repoURL: https://<host>/<org>/<your-private-codecollection>.git
-            ref: main
-        ```
-
-        Then reconcile (Flux example):
-
-        ```bash
-        flux reconcile hr runwhen-local -n <runner-namespace> --with-source
-        ```
-
-        > **Requires runwhen-local with `platform: runwhen` support** (RW-1355). Until that
-        > release lands, generation rules using `platform: runwhen` will not render SLXs.
-        """
+    # Written at column 0 (no leading-whitespace-then-dedent trick) because
+    # the injected blocks (env_table, secret_table, runtime_table, provenance)
+    # start at column 0 themselves — mixing them with an 8-space-indented
+    # docstring defeats textwrap.dedent and leaks the outer indent into the
+    # rendered markdown.
+    return (
+        f"# {inp.alias}\n"
+        "\n"
+        f"{inp.statement}\n"
+        "\n"
+        f"**Bundle:** `{inp.bundle_name}` · **Task title:** `{inp.task_title}` ·\n"
+        f"**Runtime:** tool-builder ({lang})\n"
+        "\n"
+        f"> **Review artifact:** See `raw_script.{script_extension}` in this directory\n"
+        "> for the decoded script content that reviewers and automated systems should\n"
+        "> inspect. Do **not** parse the base64-encoded `GEN_CMD` in the TaskSet template\n"
+        "> for review purposes — use this SKILL_TEMPLATE.md and the accompanying\n"
+        f"> `raw_script.{script_extension}` file instead.\n"
+        "\n"
+        "## When this SLX gets created\n"
+        "\n"
+        f"- **Platform:** `{inp.platform}` — workspace-builder matches RunWhen "
+        "platform resources\n"
+        f"- **Resource types:** {resource_types}\n"
+        "- **Match rules (plain English):**\n"
+        f"{match_bullets}\n"
+        f"- **Expected cardinality:** one SLX per matched resource, named "
+        f"`<qualifiers>-{base_name}`\n"
+        f"- **Qualifiers:** {qualifiers}\n"
+        "\n"
+        "## What this SLX does\n"
+        "\n"
+        f"The task runs a {lang} script via the shared `tool-builder` codebundle in\n"
+        "`rw-generic-codecollection`. The workspace-builder renders the TaskSet "
+        "template with\n"
+        "a base64-encoded `GEN_CMD` at deploy time; the decoded script is available in\n"
+        f"`raw_script.{script_extension}` in this directory for review.\n"
+        "\n"
+        "### Environment variables\n"
+        "\n"
+        f"{env_table}\n"
+        "### Secrets (names only — values live in RunWhen workspace secrets)\n"
+        "\n"
+        f"{secret_table}\n"
+        "### Runtime variables (user-supplied at run time)\n"
+        "\n"
+        f"{runtime_table}\n"
+        "## Operational metadata\n"
+        "\n"
+        f"- **Timeout:** {inp.timeout_seconds}s\n"
+        f"- **Access:** `{inp.access}` · **Data:** `{inp.data}`\n"
+        f"- **Owners:** {', '.join(owners)}\n"
+        "\n"
+        "## Provenance\n"
+        "\n"
+        f"{provenance}\n"
+        "\n"
+        "## Deploying this codecollection\n"
+        "\n"
+        "Add to your runwhen-local runner `workspaceInfo.yaml`:\n"
+        "\n"
+        "```yaml\n"
+        "codeCollections:\n"
+        "  - repoURL: https://<host>/<org>/<your-private-codecollection>.git\n"
+        "    ref: main\n"
+        "```\n"
+        "\n"
+        "Then reconcile (Flux example):\n"
+        "\n"
+        "```bash\n"
+        "flux reconcile hr runwhen-local -n <runner-namespace> --with-source\n"
+        "```\n"
+        "\n"
+        "> **Requires runwhen-local with `platform: runwhen` support** (RW-1355). "
+        "Until that\n"
+        "> release lands, generation rules using `platform: runwhen` will not "
+        "render SLXs.\n"
     )
 
 
