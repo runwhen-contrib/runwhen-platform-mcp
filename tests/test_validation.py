@@ -205,6 +205,36 @@ main() {
         assert not any("Invalid issue field key" in w for w in warnings)
         assert not any("Unrecognized issue field key" in w for w in warnings)
 
+    def test_python_task_ignores_typo_mentioned_in_docstring(self) -> None:
+        # Regression: bugbot flagged that the raw regex scan matched quoted
+        # typos inside docstrings/comments. The real dict below uses valid
+        # keys, so no warning should fire.
+        script = (
+            "def main():\n"
+            '    """Return issues.\n'
+            "\n"
+            '    Common typo hint: users sometimes write "issue desription"\n'
+            '    instead of "issue description" — the tool-builder rejects that.\n'
+            '    """\n'
+            '    # historical mistake: "issue desription": "..."\n'
+            '    return [{"issue title": "x", "issue description": "y",'
+            ' "issue severity": 4, "issue next steps": "steps"}]\n'
+        )
+        warnings = _validate_script(script, "python", "task")
+        assert not any("Invalid issue field key" in w for w in warnings)
+        assert not any("Unrecognized issue field key" in w for w in warnings)
+
+    def test_bash_task_ignores_typo_in_comment(self) -> None:
+        script = (
+            "main() {\n"
+            '  # note: users sometimes type "issue desription" by mistake\n'
+            '  echo \'[{"issue title":"x","issue description":"y",'
+            '"issue severity":4,"issue next steps":"z"}]\' >&3\n'
+            "}\n"
+        )
+        warnings = _validate_script(script, "bash", "task")
+        assert not any("issue desription" in w for w in warnings)
+
 
 class TestExtractEnvVars:
     """Tests for _extract_env_vars."""

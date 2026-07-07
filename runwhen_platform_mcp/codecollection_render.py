@@ -140,6 +140,19 @@ def _build_generation_rule_yaml(inp: CodecollectionRenderInput, base_name: str) 
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
+def _escape_jinja(value: str) -> str:
+    """Neutralise Jinja delimiters so workspace-builder treats value as literal.
+
+    The rendered SLX template is a Jinja source file consumed by
+    workspace-builder. Any ``{{ ... }}`` / ``{% ... %}`` inside a user-supplied
+    field (alias, statement, task title) would otherwise be interpreted as
+    template syntax and either fail to render or produce the wrong SLX text.
+    We swap the delimiters for whitespace-separated look-alikes that survive
+    Jinja parsing but render identically to a reader.
+    """
+    return value.replace("{{", "{ {").replace("}}", "} }").replace("{%", "{ %").replace("%}", "% }")
+
+
 def _build_slx_template(inp: CodecollectionRenderInput) -> str:
     base_tags = _tag_lines(inp.tags, inp.access, inp.data)
     if inp.hierarchy:
@@ -155,20 +168,15 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
     image_url = inp.image_url or (
         "https://storage.googleapis.com/runwhen-nonprod-shared-images/icons/runwhen.svg"
     )
-    alias = inp.alias.replace('"', '\\"')
-    statement = inp.statement.replace("\n", " ")
-    statement = (
-        statement.replace("{{", "{ {")
-        .replace("}}", "} }")
-        .replace("{%", "{ %")
-        .replace("%}", "% }")
-    )
+    alias = _yaml_quote(_escape_jinja(inp.alias))
+    statement = _escape_jinja(inp.statement.replace("\n", " "))
     additional_context_lines = [
         '            qualified_name: "{{ match_resource.qualified_name }}"',
     ]
     if inp.resource_path:
-        escaped = inp.resource_path.replace("\\", "\\\\").replace('"', '\\"')
-        additional_context_lines.append(f'            resourcePath: "{escaped}"')
+        additional_context_lines.append(
+            f"            resourcePath: {_yaml_quote(inp.resource_path)}"
+        )
     if inp.hierarchy:
         hierarchy_yaml = yaml.dump(inp.hierarchy, default_flow_style=True).strip()
         additional_context_lines.append(f"            hierarchy: {hierarchy_yaml}")

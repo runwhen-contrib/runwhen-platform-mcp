@@ -128,3 +128,59 @@ class TestRenderCodecollectionFiles:
         assert "- name: INTERPRETER" in sli_text
         assert "value: bash" in sli_text
         assert "codebundles/tool-builder/sli.robot" in sli_text
+
+    def _parse_slx_yaml(self, files: dict[str, str]) -> dict:
+        slx = files["codebundles/my-health-check/.runwhen/templates/my-health-check-slx.yaml"]
+        # Strip Jinja before yaml.safe_load (the workspace-builder renders them).
+        stripped = re.sub(r"\{%.*?%\}", "_placeholder: 1", slx)
+        stripped = re.sub(r"\{\{[^}]+\}\}", "X", stripped)
+        return yaml.safe_load(stripped)
+
+    def _render_minimal(self, **overrides) -> dict[str, str]:
+        defaults = dict(
+            bundle_name="my-health-check",
+            alias="My Health Check",
+            statement="The service should stay healthy.",
+            task_title="Run my health check",
+            script=SAMPLE_SCRIPT,
+            interpreter="python",
+        )
+        defaults.update(overrides)
+        return render_codecollection_files(CodecollectionRenderInput(**defaults))
+
+    def test_slx_template_neutralises_jinja_in_alias_and_statement(self) -> None:
+        # Regression: bugbot flagged that user text with `{{ }}` or `{% %}`
+        # was injected raw into the SLX Jinja template, which broke
+        # workspace-builder rendering.
+        files = self._render_minimal(
+            alias="SRE {{ team }} probe",
+            statement="Only failing when {% if broken %} broken {% endif %}",
+        )
+        parsed = self._parse_slx_yaml(files)
+        assert parsed["spec"]["alias"] == "SRE { { team } } probe"
+        assert (
+            parsed["spec"]["statement"]
+            == "Only failing when { % if broken % } broken { % endif % }"
+        )
+
+    def test_slx_template_yaml_quotes_resource_path_with_special_chars(self) -> None:
+        # Regression: bugbot flagged that resource_path was written as a raw
+        # double-quoted scalar without proper YAML escaping, so a path
+        # containing quotes or colons could break the template.
+        files = self._render_minimal(resource_path='custom/foo/"weird": path')
+        parsed = self._parse_slx_yaml(files)
+        assert parsed["spec"]["additionalContext"]["resourcePath"] == 'custom/foo/"weird": path'
+
+    def test_slx_template_yaml_quotes_secret_workspace_keys(self) -> None:
+        # Regression: bugbot flagged that resolved RunWhen keys (e.g.
+        # `k8s:file@secret/...`) contain colons and were written unquoted.
+        files = self._render_minimal(secret_vars={"KUBECONFIG": "k8s:file@secret/kube.config"})
+        taskset = files[
+            "codebundles/my-health-check/.runwhen/templates/my-health-check-taskset.yaml"
+        ]
+        stripped = re.sub(r"\{%.*?%\}", "_placeholder: 1", taskset)
+        stripped = re.sub(r"\{\{[^}]+\}\}", "X", stripped)
+        parsed = yaml.safe_load(stripped)
+        secrets = parsed["spec"]["secretsProvided"]
+        assert secrets[0]["name"] == "KUBECONFIG"
+        assert secrets[0]["workspaceKey"] == "k8s:file@secret/kube.config"

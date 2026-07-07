@@ -36,6 +36,7 @@ Auth flow (http mode):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import gzip
@@ -1366,33 +1367,130 @@ _ISSUE_KEY_CORRECTIONS: dict[str, str] = {
 _ISSUE_FIELD_KEY_RE = re.compile(r'["\'](issue[^"\']+)["\']\s*:')
 
 
+def _extract_python_dict_issue_keys(script: str) -> list[str] | None:
+    """Return dict-literal string keys starting with ``issue`` from a Python script.
+
+    Uses ``ast`` so string keys inside comments, docstrings, or unrelated
+    string literals do not trigger false positives. Returns ``None`` when the
+    script cannot be parsed (e.g. partial snippet) so callers can decide
+    whether to fall back to a regex scan or skip detection entirely.
+    """
+    try:
+        tree = ast.parse(script)
+    except SyntaxError:
+        return None
+    keys: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key_node in node.keys:
+            if (
+                isinstance(key_node, ast.Constant)
+                and isinstance(key_node.value, str)
+                and key_node.value.startswith("issue")
+            ):
+                keys.append(key_node.value)
+    return keys
+
+
+def _strip_bash_comments_and_heredocs(script: str) -> str:
+    """Best-effort stripper: drop ``#`` line comments and ``<<'EOF'`` heredocs.
+
+    Only used for the issue-key scan on bash scripts so that keys mentioned in
+    comments (e.g. ``# note: 'issue desription' is wrong``) don't produce
+    false-positive validation errors.
+    """
+    stripped_lines: list[str] = []
+    in_heredoc: str | None = None
+    heredoc_re = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?")
+    for line in script.splitlines():
+        if in_heredoc is not None:
+            if line.strip() == in_heredoc:
+                in_heredoc = None
+            continue
+        heredoc_match = heredoc_re.search(line)
+        if heredoc_match:
+            in_heredoc = heredoc_match.group(1)
+            line = line[: heredoc_match.start()]
+        in_single = False
+        in_double = False
+        cleaned: list[str] = []
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "'" and not in_double:
+                in_single = not in_single
+            elif ch == '"' and not in_single:
+                in_double = not in_double
+            elif ch == "#" and not in_single and not in_double:
+                break
+            cleaned.append(ch)
+            i += 1
+        stripped_lines.append("".join(cleaned))
+    return "\n".join(stripped_lines)
+
+
+def _classify_issue_key(key: str) -> str | None:
+    """Return a validation message for an unrecognized issue field key, or None."""
+    if key in _CANONICAL_ISSUE_FIELD_KEYS:
+        return None
+    correction = _ISSUE_KEY_CORRECTIONS.get(key)
+    if correction:
+        return (
+            f"Invalid issue field key {key!r}. tool-builder expects "
+            f"{correction!r} (exact spelling). Wrong keys cause KeyError at runtime."
+        )
+    if key.startswith("issue_"):
+        spaced = key.replace("_", " ", 1)
+        return (
+            f"Invalid issue field key {key!r}. tool-builder expects spaced keys like "
+            f"{spaced!r}, not snake_case."
+        )
+    if key.startswith("issue "):
+        allowed = ", ".join(repr(k) for k in sorted(_CANONICAL_ISSUE_FIELD_KEYS))
+        return f"Unrecognized issue field key {key!r}. Valid keys are: {allowed}."
+    return None
+
+
 def _detect_invalid_issue_field_keys(script: str, interpreter: str, task_type: str) -> list[str]:
-    """Flag misspelled or snake_case issue dict keys that break tool-builder at runtime."""
+    """Flag misspelled or snake_case issue dict keys that break tool-builder at runtime.
+
+    For Python, uses ``ast`` to inspect only real dict literal keys, so keys
+    mentioned inside docstrings, comments, or unrelated string literals no
+    longer produce false positives. Falls back to a regex scan only when the
+    Python source cannot be parsed (partial snippet), and even then skips
+    string-literal contexts by stripping triple-quoted blocks first. For Bash,
+    strips ``#`` line comments and heredoc bodies before scanning.
+    """
     if task_type != "task" or interpreter not in ("python", "bash"):
         return []
 
+    keys: list[str]
+    if interpreter == "python":
+        parsed = _extract_python_dict_issue_keys(script)
+        if parsed is None:
+            # Best effort on unparseable snippets: strip triple-quoted string
+            # literals (docstrings, long strings) and single-line comments so
+            # that human-readable examples of typos do not trigger errors.
+            scrubbed = re.sub(r'"""[\s\S]*?"""', "", script)
+            scrubbed = re.sub(r"'''[\s\S]*?'''", "", scrubbed)
+            scrubbed = re.sub(r"(?m)#.*$", "", scrubbed)
+            keys = [m.group(1) for m in _ISSUE_FIELD_KEY_RE.finditer(scrubbed)]
+        else:
+            keys = parsed
+    else:  # bash
+        scrubbed = _strip_bash_comments_and_heredocs(script)
+        keys = [m.group(1) for m in _ISSUE_FIELD_KEY_RE.finditer(scrubbed)]
+
     findings: list[str] = []
     seen: set[str] = set()
-    for match in _ISSUE_FIELD_KEY_RE.finditer(script):
-        key = match.group(1)
-        if key in _CANONICAL_ISSUE_FIELD_KEYS or key in seen:
+    for key in keys:
+        if key in seen:
             continue
         seen.add(key)
-        correction = _ISSUE_KEY_CORRECTIONS.get(key)
-        if correction:
-            findings.append(
-                f"Invalid issue field key {key!r}. tool-builder expects "
-                f"{correction!r} (exact spelling). Wrong keys cause KeyError at runtime."
-            )
-        elif key.startswith("issue_"):
-            spaced = key.replace("_", " ", 1)
-            findings.append(
-                f"Invalid issue field key {key!r}. tool-builder expects spaced keys like "
-                f"{spaced!r}, not snake_case."
-            )
-        elif key.startswith("issue "):
-            allowed = ", ".join(repr(k) for k in sorted(_CANONICAL_ISSUE_FIELD_KEYS))
-            findings.append(f"Unrecognized issue field key {key!r}. Valid keys are: {allowed}.")
+        message = _classify_issue_key(key)
+        if message is not None:
+            findings.append(message)
     return findings
 
 
@@ -6994,8 +7092,6 @@ async def commit_slx(
 async def delete_slx(
     slx_name: str = Field(description="Short name of the SLX to delete (e.g. 'k8s-pod-health')."),
     workspace_name: str = Field(description="The workspace to delete from (e.g. 't-oncall')."),
-    branch: str = Field(default="main", description="Git branch to delete from."),
-    commit_message: Annotated[str | None, Field(description="Custom commit message.")] = None,
 ) -> str:
     """Soft-delete an SLX from the workspace via the v4 short-name endpoint.
 
@@ -7004,6 +7100,12 @@ async def delete_slx(
     corestate reconcile loop clean up the corresponding runbook and SLI
     rows. This is the same endpoint the UI hits, so behaviour matches what
     users see in the platform.
+
+    Deletion is **workspace-global** — it is *not* scoped to a Git branch.
+    The v4 endpoint tombstones the SLX row in PAPI; there is no per-branch
+    variant. Callers previously wired to a Git-oriented delete path should
+    stop passing ``branch`` / ``commit_message`` (both removed) and rely on
+    the workspace-scoped soft delete.
     """
     try:
         _validate_slx_name(slx_name)
@@ -7174,15 +7276,15 @@ async def render_codecollection_skill(
         return _json_response({"error": "Invalid task_title", "message": task_title_issue})
 
     try:
-        resolved_script, _transport = _resolve_script(
+        resolved_script = _resolve_script(
             script=script,
             script_path=script_path,
             script_base64=script_base64,
             script_gzip_base64=script_gzip_base64,
             script_base64_path=script_base64_path,
-            param_name="script",
+            label="script",
         )
-    except ValueError as exc:
+    except (ValueError, FileNotFoundError) as exc:
         return _json_response({"error": str(exc)})
 
     main_warnings = _validate_script(resolved_script, interpreter, "task")
