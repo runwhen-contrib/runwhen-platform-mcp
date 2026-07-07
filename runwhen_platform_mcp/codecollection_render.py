@@ -165,9 +165,15 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
         if hierarchy_tags:
             base_tags.extend(hierarchy_tags)
     tag_lines = "\n".join(base_tags)
-    image_url = inp.image_url or (
+    # The SLX template is a Jinja source file consumed by workspace-builder,
+    # so every user-supplied field interpolated into it needs BOTH YAML quoting
+    # (so colons / special chars in the value don't break the YAML) AND Jinja
+    # neutralisation (so `{{ ... }}` / `{% ... %}` in the value aren't treated
+    # as workspace-builder template syntax at discovery-render time).
+    raw_image_url = inp.image_url or (
         "https://storage.googleapis.com/runwhen-nonprod-shared-images/icons/runwhen.svg"
     )
+    image_url = _yaml_quote(_escape_jinja(raw_image_url))
     alias = _yaml_quote(_escape_jinja(inp.alias))
     statement = _escape_jinja(inp.statement.replace("\n", " "))
     additional_context_lines = [
@@ -175,7 +181,7 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
     ]
     if inp.resource_path:
         additional_context_lines.append(
-            f"            resourcePath: {_yaml_quote(inp.resource_path)}"
+            f"            resourcePath: {_yaml_quote(_escape_jinja(inp.resource_path))}"
         )
     if inp.hierarchy:
         hierarchy_yaml = yaml.dump(inp.hierarchy, default_flow_style=True).strip()

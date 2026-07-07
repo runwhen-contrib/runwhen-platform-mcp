@@ -240,6 +240,44 @@ class TestRenderCodecollectionFiles:
         parsed = yaml.safe_load(stripped)
         assert parsed["spec"]["description"] == "Tool Builder SLI for SRE { { team } } probe"
 
+    def test_slx_template_neutralises_jinja_in_resource_path(self) -> None:
+        # Regression: bugbot flagged that resource_path was YAML-quoted but
+        # NOT `_escape_jinja`-neutralised, so a path containing `{{` or `{%`
+        # was still parsed as workspace-builder template syntax at
+        # discovery-render time (unlike alias / statement / task_title,
+        # which are already neutralised).
+        files = self._render_minimal(resource_path="custom/{{ tenant }}/{% shard %}")
+        parsed = self._parse_slx_yaml(files)
+        assert (
+            parsed["spec"]["additionalContext"]["resourcePath"]
+            == "custom/{ { tenant } }/{ % shard % }"
+        )
+        slx = files["codebundles/my-health-check/.runwhen/templates/my-health-check-slx.yaml"]
+        # Raw Jinja delimiters must not survive into the SLX template body —
+        # otherwise workspace-builder will try to interpret them.
+        assert "{{ tenant }}" not in slx
+        assert "{% shard %}" not in slx
+
+    def test_slx_template_neutralises_jinja_in_image_url(self) -> None:
+        # Regression: bugbot flagged that `image_url` was interpolated into
+        # the SLX Jinja template without `_escape_jinja` or `_yaml_quote`,
+        # so a user-supplied icon URL containing Jinja delimiters was
+        # treated as template syntax at render time (and the missing YAML
+        # quoting could also break the template on colons/special chars).
+        files = self._render_minimal(image_url="https://cdn/{{ theme }}/icon.svg")
+        parsed = self._parse_slx_yaml(files)
+        assert parsed["spec"]["imageURL"] == "https://cdn/{ { theme } }/icon.svg"
+        slx = files["codebundles/my-health-check/.runwhen/templates/my-health-check-slx.yaml"]
+        assert "{{ theme }}" not in slx
+
+    def test_slx_template_yaml_quotes_default_image_url(self) -> None:
+        # The default image URL contains no colons but is still a plain URL —
+        # once we YAML-quote it defensively, the parsed value should stay
+        # identical to the raw URL for the common no-override case.
+        files = self._render_minimal()
+        parsed = self._parse_slx_yaml(files)
+        assert parsed["spec"]["imageURL"].startswith("https://storage.googleapis.com/")
+
 
 class TestRenderCodecollectionSkillTool:
     """Server-level tests for the render_codecollection_skill MCP tool."""
