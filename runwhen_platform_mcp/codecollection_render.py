@@ -1,7 +1,8 @@
 """Render Custom Discovery CodeCollection files from MCP tool-builder output.
 
 Emits the layout documented at https://docs.runwhen.com/guides/custom-discovery-codecollection/
-with ``platform: runwhen`` generation rules for workspace-scoped tool-builder tasks.
+for workspace-scoped tool-builder tasks (``platform: runwhen``) and cloud/Kubernetes
+discovery platforms (``platform: kubernetes|azure|aws|gcp``).
 """
 
 from __future__ import annotations
@@ -14,6 +15,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 import yaml
+
+from runwhen_platform_mcp.codecollection_platform_profiles import (
+    PlatformOutputProfile,
+    get_platform_profile,
+)
 
 MCP_PACKAGE_VERSION = "0.0.0-dev"
 
@@ -89,8 +95,15 @@ def _resolve_base_name(bundle_name: str, base_name: str | None) -> str:
     return trimmed or "task"
 
 
-def _tag_lines(tags: list[dict[str, str]] | None, access: str, data: str) -> list[str]:
-    merged: list[dict[str, str]] = [{"name": "platform", "value": "runwhen"}]
+def _tag_lines(
+    tags: list[dict[str, str]] | None,
+    access: str,
+    data: str,
+    profile: PlatformOutputProfile,
+) -> list[str]:
+    merged: list[dict[str, str]] = []
+    if profile.inject_platform_tag:
+        merged.append({"name": "platform", "value": profile.platform})
     for tag in tags or []:
         if tag.get("name") not in ("access", "data", "platform"):
             merged.append(tag)
@@ -163,8 +176,9 @@ def _escape_jinja(value: str) -> str:
 
 
 def _build_slx_template(inp: CodecollectionRenderInput) -> str:
-    base_tags = _tag_lines(inp.tags, inp.access, inp.data)
-    if inp.hierarchy:
+    profile = get_platform_profile(inp.platform)
+    base_tags = _tag_lines(inp.tags, inp.access, inp.data, profile)
+    if profile.allow_manual_hierarchy and inp.hierarchy:
         existing_tag_names = {t["name"] for t in inp.tags or []}
         hierarchy_tags: list[str] = []
         for level in inp.hierarchy:
@@ -173,26 +187,33 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
                 hierarchy_tags.append("              value: {{ workspace.name }}")
         if hierarchy_tags:
             base_tags.extend(hierarchy_tags)
+
     tag_lines = "\n".join(base_tags)
-    # The SLX template is a Jinja source file consumed by workspace-builder,
-    # so every user-supplied field interpolated into it needs BOTH YAML quoting
-    # (so colons / special chars in the value don't break the YAML) AND Jinja
-    # neutralisation (so `{{ ... }}` / `{% ... %}` in the value aren't treated
-    # as workspace-builder template syntax at discovery-render time).
-    raw_image_url = inp.image_url or (
-        "https://storage.googleapis.com/runwhen-nonprod-shared-images/icons/runwhen.svg"
-    )
+    if profile.tag_include:
+        tag_block = (
+            f'            {{% include "{profile.tag_include}" ignore missing %}}\n{tag_lines}'
+        )
+    else:
+        tag_block = tag_lines
+
+    raw_image_url = inp.image_url or profile.default_image_url
     image_url = _yaml_quote(_escape_jinja(raw_image_url))
     alias = _yaml_quote(_escape_jinja(inp.alias))
     statement = _escape_jinja(inp.statement.replace("\n", " "))
-    additional_context_lines = [
-        '            qualified_name: "{{ match_resource.qualified_name }}"',
-    ]
-    if inp.resource_path:
+
+    additional_context_lines: list[str] = []
+    if profile.hierarchy_include:
+        additional_context_lines.append(
+            f'            {{% include "{profile.hierarchy_include}" ignore missing %}}'
+        )
+    additional_context_lines.append(
+        '            qualified_name: "{{ match_resource.qualified_name }}"'
+    )
+    if profile.allow_manual_resource_path and inp.resource_path:
         additional_context_lines.append(
             f"            resourcePath: {_yaml_quote(_escape_jinja(inp.resource_path))}"
         )
-    if inp.hierarchy:
+    if profile.allow_manual_hierarchy and inp.hierarchy:
         hierarchy_yaml = yaml.dump(inp.hierarchy, default_flow_style=True).strip()
         additional_context_lines.append(f"            hierarchy: {hierarchy_yaml}")
     additional_context_block = "\n".join(additional_context_lines)
@@ -218,7 +239,7 @@ def _build_slx_template(inp: CodecollectionRenderInput) -> str:
           additionalContext:
 {additional_context_block}
           tags:
-{tag_lines}
+{tag_block}
         """
     )
 
@@ -467,8 +488,8 @@ def _build_skill_template(
         "\n"
         "## When this SLX gets created\n"
         "\n"
-        f"- **Platform:** `{inp.platform}` — workspace-builder matches RunWhen "
-        "platform resources\n"
+        f"- **Platform:** `{inp.platform}` — workspace-builder matches "
+        f"`{inp.platform}` indexed resources\n"
         f"- **Resource types:** {resource_types}\n"
         "- **Match rules (plain English):**\n"
         f"{match_bullets}\n"
@@ -519,10 +540,9 @@ def _build_skill_template(
         "flux reconcile hr runwhen-local -n <runner-namespace> --with-source\n"
         "```\n"
         "\n"
-        "> **Requires runwhen-local with `platform: runwhen` support** (RW-1355). "
-        "Until that\n"
-        "> release lands, generation rules using `platform: runwhen` will not "
-        "render SLXs.\n"
+        "> **Requires runwhen-local** with the matching platform indexer enabled "
+        f"(`platform: {inp.platform}`). See https://docs.runwhen.com/authors/indexed-resources/ "
+        "for catalog reference.\n"
     )
 
 

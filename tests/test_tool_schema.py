@@ -55,6 +55,8 @@ EXPECTED_TOOLS = {
     "run_script_and_wait",
     "run_slx",
     "commit_slx",
+    "list_discovery_platforms",
+    "list_indexed_resource_types",
     "render_codecollection_skill",
     "delete_slx",
 }

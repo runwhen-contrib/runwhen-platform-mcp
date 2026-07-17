@@ -57,10 +57,20 @@ from dotenv import load_dotenv
 from fastmcp import FastMCP
 from pydantic import Field
 
+from runwhen_platform_mcp.codecollection_platform_profiles import (
+    get_platform_profile,
+    list_platform_profiles,
+)
 from runwhen_platform_mcp.codecollection_render import (
     CodecollectionRenderInput,
     render_codecollection_files,
     write_codecollection_files,
+)
+from runwhen_platform_mcp.indexed_resource_catalog import (
+    catalog_reference_for_agents,
+    list_resource_types_response,
+    validate_qualifiers,
+    validate_resource_types,
 )
 
 load_dotenv()
@@ -7329,6 +7339,88 @@ async def delete_slx(
 
 
 @mcp.tool()
+async def list_discovery_platforms() -> str:
+    """List supported generation-rule platforms and default render settings.
+
+    Skills:
+      - runwhen-skill://commit-to-codecollection
+      - runwhen-skill://author-generation-rules
+
+    Call this **before** ``render_codecollection_skill`` when the user has not
+    confirmed whether they want workspace-scoped output (``runwhen``) or
+    per-resource cloud/Kubernetes discovery (``kubernetes``, ``azure``, ``aws``,
+    ``gcp``). Ask the user to pick a platform and scope, then look up valid
+    ``resource_types`` with ``list_indexed_resource_types(search=...)``.
+    All catalog data is bundled offline — no docs.runwhen.com access required.
+    """
+    payload: dict[str, Any] = {
+        "platforms": list_platform_profiles(),
+        "decision_guide": {
+            "runwhen": (
+                "One SLX per workspace — MCP tool-builder tasks tested with "
+                "run_script_and_wait, no cloud discovery indexer required "
+                "(RW-1355 runwhen indexer)."
+            ),
+            "kubernetes": (
+                "One SLX per matched K8s resource (namespace, deployment, CRD, …). "
+                "Requires kubeconfig in workspaceInfo and namespace LOD configured."
+            ),
+            "azure": "One SLX per matched Azure resource (CloudQuery table names).",
+            "aws": "One SLX per matched AWS resource (CloudQuery table names).",
+            "gcp": "One SLX per matched GCP resource (CloudQuery table names).",
+        },
+        "next_step": (
+            "After the user confirms platform + scope, call "
+            "list_indexed_resource_types(platform=..., search=...) "
+            "then render_codecollection_skill."
+        ),
+    }
+    if RUNWHEN_AIRGAP:
+        payload["airgap_note"] = (
+            "Catalog lookup is fully offline. Use list_indexed_resource_types with "
+            "search= or get_skill('author-generation-rules') — no external URLs."
+        )
+    return _json_response(payload)
+
+
+@mcp.tool()
+async def list_indexed_resource_types(
+    platform: str = Field(
+        description=(
+            "Indexer platform: runwhen, kubernetes, azure, aws, or gcp. "
+            "Must match render_codecollection_skill platform."
+        ),
+    ),
+    search: str = Field(
+        default="",
+        description="Optional substring filter (e.g. 'deployment', 'azure_keyvault').",
+    ),
+    limit: int = Field(
+        default=50,
+        description="Max results (default 50). Increase for broad searches.",
+    ),
+) -> str:
+    """Search bundled indexer catalogs for valid generation-rule resourceTypes.
+
+    Skills:
+      - runwhen-skill://author-generation-rules
+      - runwhen-skill://commit-to-codecollection
+
+    Fully **offline** — reads ``catalogs/indexed-resource-types.json`` (or bundled
+    markdown catalogs) shipped with the MCP package. No network access required.
+
+    For azure/aws/gcp, ``search`` must be at least 2 characters (large catalogs).
+    Kubernetes CRD types use ``plural.group[/version]`` syntax when not listed.
+    """
+    try:
+        get_platform_profile(platform)
+    except ValueError as exc:
+        return _json_response({"error": str(exc)})
+
+    return _json_response(list_resource_types_response(platform, search=search, limit=limit))
+
+
+@mcp.tool()
 async def render_codecollection_skill(
     bundle_name: str = Field(
         description="Codebundle directory name (kebab-case, e.g. 'azure-function-cold-start')."
@@ -7371,7 +7463,12 @@ async def render_codecollection_skill(
     ] = None,
     platform: str = Field(
         default="runwhen",
-        description="Generation rule platform. Use 'runwhen' for workspace-scoped tool-builder.",
+        description=(
+            "Generation rule platform: runwhen (one SLX per workspace), "
+            "kubernetes, azure, aws, or gcp (per-resource discovery). "
+            "Call list_discovery_platforms() before choosing — agents must "
+            "confirm the user's target platform and scope."
+        ),
     ),
     resource_types: Annotated[
         list[str] | None,
@@ -7456,7 +7553,13 @@ async def render_codecollection_skill(
     (or returns them inline) for you to ``git add / commit / push``.
 
     Default generation rule uses ``platform: runwhen`` and ``resourceTypes: [workspace]``.
-    Requires a runwhen-local release with the ``runwhen`` platform indexer (RW-1355).
+    For cloud/Kubernetes discovery, set ``platform`` to ``kubernetes``, ``azure``,
+    ``aws``, or ``gcp`` and pass ``resource_types`` / ``match_rules`` /
+    ``slx_qualifiers`` from the bundled indexer catalogs
+    (``list_indexed_resource_types``). Discovery SLX templates include the
+    platform tag/hierarchy includes (e.g. ``kubernetes-tags.yaml``).
+
+    Requires runwhen-local with the matching platform indexer enabled.
     """
     try:
         _validate_slx_name(bundle_name)
@@ -7543,6 +7646,54 @@ async def render_codecollection_skill(
     if azure_hint:
         return _json_response(
             {"error": "Azure task missing azure_credentials secret", "message": azure_hint}
+        )
+
+    try:
+        profile = get_platform_profile(platform)
+    except ValueError as exc:
+        return _json_response(
+            {
+                "error": str(exc),
+                "hint": "Call list_discovery_platforms() for supported platforms and defaults.",
+            }
+        )
+
+    resolved_resource_types = (
+        list(resource_types) if resource_types else list(profile.default_resource_types)
+    )
+    resolved_slx_qualifiers = (
+        list(slx_qualifiers) if slx_qualifiers else list(profile.default_qualifiers)
+    )
+
+    platform_errors: list[str] = []
+    platform_errors.extend(validate_resource_types(platform, resolved_resource_types))
+    platform_errors.extend(validate_qualifiers(platform, resolved_slx_qualifiers))
+    if resource_path and not profile.allow_manual_resource_path:
+        platform_errors.append(
+            f"resource_path is not used for platform {platform!r}. "
+            "Discovery platforms derive resourcePath from tag/hierarchy includes."
+        )
+    if hierarchy and not profile.allow_manual_hierarchy:
+        platform_errors.append(
+            f"hierarchy is not used for platform {platform!r}. "
+            f"Use the {profile.hierarchy_include or 'platform'} include instead."
+        )
+    if platform_errors:
+        ref = catalog_reference_for_agents(profile.platform)
+        return _json_response(
+            {
+                "error": "Invalid discovery platform configuration",
+                "details": platform_errors,
+                "platform": platform,
+                "resource_types": resolved_resource_types,
+                "slx_qualifiers": resolved_slx_qualifiers,
+                "hint": (
+                    "Confirm platform format with the user, then call "
+                    "list_indexed_resource_types(platform=..., search=...) "
+                    "for valid resourceTypes."
+                ),
+                "catalog_reference": ref,
+            }
         )
 
     resolved_sli_script: str | None = sli_script
@@ -7641,10 +7792,10 @@ async def render_codecollection_skill(
         generic_repo_url=repo_url,
         generic_sli_repo_url=sli_repo_url,
         generic_ref=generic_runtime_ref,
-        platform=platform,
-        resource_types=resource_types or ["workspace"],
+        platform=profile.platform,
+        resource_types=resolved_resource_types,
         match_rules=match_rules,
-        slx_qualifiers=slx_qualifiers or ["workspace"],
+        slx_qualifiers=resolved_slx_qualifiers,
         base_name=base_name,
         include_sli=include_sli,
         sli_script=resolved_sli_script,
@@ -7672,8 +7823,13 @@ async def render_codecollection_skill(
 
     result: dict[str, Any] = {
         "bundle_name": bundle_name,
-        "platform": platform,
+        "platform": profile.platform,
+        "output_profile": {
+            "tag_include": profile.tag_include,
+            "hierarchy_include": profile.hierarchy_include,
+        },
         "resource_types": render_input.resource_types,
+        "slx_qualifiers": render_input.slx_qualifiers,
         "file_count": len(files),
         "generic_repo_url": repo_url,
         "generic_repo_resolved_from": generic_repo_source,
@@ -7691,7 +7847,7 @@ async def render_codecollection_skill(
             f"'Add {bundle_name} tool-builder bundle'",
             "git push",
             "Register the repo in runwhen-local workspaceInfo.yaml codeCollections",
-            "Requires runwhen-local with platform: runwhen support (RW-1355)",
+            f"Requires runwhen-local indexer for platform: {profile.platform}",
         ],
     }
     if written_paths:
@@ -7747,6 +7903,8 @@ _TOOL_FUNCTIONS = [
     run_script_and_wait,
     run_slx,
     commit_slx,
+    list_discovery_platforms,
+    list_indexed_resource_types,
     render_codecollection_skill,
     delete_slx,
 ]

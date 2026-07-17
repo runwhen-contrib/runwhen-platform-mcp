@@ -84,14 +84,21 @@ Copy patterns from `references/examples/` — all use the real parser.
 
 ## Workflow
 
+0. **If output target is unclear**, call `list_discovery_platforms()` and ask the user
+   whether they need workspace-scoped (`runwhen`) or per-resource discovery
+   (`kubernetes|azure|aws|gcp`). Never guess `resourceTypes`.
 1. Read `references/generation-rules-schema.md` + platform guide under `references/indexed-resources/`
-2. Grep `references/catalogs/<platform>-resource-catalog.md` for `resourceTypes`
-3. Author `.runwhen/generation-rules/*.yaml` and `.runwhen/templates/*`
-4. Test with runwhen-local workspace builder
+2. Call `list_indexed_resource_types(platform=..., search=...)` — **only** offer types from the response
+3. Grep `references/catalogs/<platform>-resource-catalog.md` for field paths when writing `matchRules`
+4. Author `.runwhen/generation-rules/*.yaml` and `.runwhen/templates/*` (or use `render_codecollection_skill`)
+5. Test with runwhen-local workspace builder
 
 For workspace-scoped tool-builder tasks (`platform: runwhen`), use
-**`commit-to-codecollection`** / `render_codecollection_skill` unless you need
-custom `matchRules`.
+**`commit-to-codecollection`** / `render_codecollection_skill`.
+
+For discovery platforms (`kubernetes`, etc.), **`render_codecollection_skill`** emits
+the correct SLX includes when you pass confirmed `platform`, `resource_types`,
+`match_rules`, and `slx_qualifiers`.
 
 ## Updating the bundle (maintainers, build-time only)
 
@@ -106,6 +113,7 @@ The bundle is refreshed on MCP release CI — not at MCP request time.
 
 ## Related skills
 
-- `commit-to-codecollection` — GitOps bundle for `platform: runwhen` tool-builder output
+- `commit-to-codecollection` — GitOps bundle for tool-builder output (workspace + discovery platforms)
+- `list_discovery_platforms` / `list_indexed_resource_types` — MCP catalog lookup before render
 - `find-and-deploy-codebundle` — registry Skill Templates before custom rules
 - `configure-hierarchy` / `configure-resource-path` — SLX metadata after render

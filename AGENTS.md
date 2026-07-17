@@ -41,7 +41,8 @@ RunWhen UI (e.g. to run tasks from the chat).
 | Need | Tool(s) |
 |------|---------|
 | **Execute** a task | `run_slx` (workspace_chat CANNOT run tasks). Always use `task_titles="*"` — never pass display titles from `get_slx_runbook` |
-| Task authoring | `validate_script`, `run_script_and_wait`, `commit_slx`, `delete_slx` |
+| Task authoring | `validate_script`, `run_script_and_wait`, `commit_slx`, `render_codecollection_skill`, `delete_slx` |
+| Discovery GitOps | `list_discovery_platforms`, `list_indexed_resource_types`, `render_codecollection_skill` |
 | Registry | `search_registry`, `get_registry_codebundle`, `deploy_registry_codebundle` |
 | Chat config CRUD | `list/get/create/update_chat_rule`, `list/get/create/update_chat_command` |
 | AI assistant (persona) CRUD | `list/get/create/update/delete_assistant` |
@@ -95,6 +96,9 @@ to interact with the platform — do not attempt to call APIs directly.
 | `get_run_output` | Get parsed output from a completed run (issues, stdout, stderr, report) |
 | `run_script_and_wait` | Execute a script and wait for results — combines run + poll + output in one call |
 | `commit_slx` | Commit a tested script as an SLX to the workspace repo (task + optional SLI) |
+| `render_codecollection_skill` | Render tested tool-builder output as a private CodeCollection (workspace **or** discovery platforms) |
+| `list_discovery_platforms` | List supported `platform` values and defaults — **ask the user before rendering** |
+| `list_indexed_resource_types` | Search bundled indexer catalogs for valid `resource_types` (never guess) |
 | `get_workspace_secrets` | List available secret key names for a workspace |
 | `get_workspace_locations` | List available runner locations for script execution |
 
@@ -108,7 +112,7 @@ Always follow this sequence when building a new task:
 4. **Discover secrets** — `get_workspace_secrets` (location auto-resolves — only call `get_workspace_locations` when multiple locations exist and you need to choose)
 5. **Test** — `run_script_and_wait` executes against live infrastructure
 6. **Iterate** — Fix based on output, re-test
-7. **Commit** — `commit_slx` writes the SLX to the workspace repo
+7. **Commit** — `commit_slx` (inline workspace SLX) **or** `render_codecollection_skill` (GitOps CodeCollection). For GitOps, call `list_discovery_platforms()` first, confirm platform with the user, then `list_indexed_resource_types()` before render.
 
 ## Script Contract
 
