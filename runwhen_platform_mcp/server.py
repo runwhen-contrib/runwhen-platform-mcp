@@ -13,9 +13,11 @@ Supports two transport modes:
 Set MCP_TRANSPORT=http to run in remote mode.
 
 The key tool is `workspace_chat` which passes through to the RunWhen Agent's
-chat endpoint, giving MCP clients access to ~25+ internal tools (issue search,
-task search, resource search, knowledge base, graphing, etc.) without needing
-to re-implement any of them.
+chat endpoint. The agent investigates on your behalf — searching (keyword,
+semantic, and fuzzy), navigating and correlating across workspace resources,
+SLXs, issues, run sessions, and the knowledge base, and returning rich
+markdown reports, diagrams, and tables — so MCP clients get investigative
+answers without re-implementing any of that.
 
 The Tool Builder tools (`run_script`, `get_run_status`, `get_run_output`,
 `commit_slx`) replicate the platform's "Create Task" / Tool Builder flow,
@@ -206,9 +208,11 @@ def _build_server_instructions() -> str:
         "(e.g. 'what's wrong in the watcher namespace?')\n"
         "  - Any question where a knowledgeable human would need to search, "
         "filter, and interpret results\n"
-        "  `workspace_chat` has internal tools (semantic search, keyword grep, "
-        "resource graph traversal) that produce materially better answers "
-        "than combining multiple direct API calls.\n"
+        "  `workspace_chat` can search (keyword, semantic, and fuzzy), navigate "
+        "and correlate across resources, SLXs, issues, run sessions, and the "
+        "knowledge base, and return rich reports, diagrams, and tables — "
+        "producing materially better answers than combining multiple direct "
+        "API calls.\n"
         "  Responses include a `chatUrl` for the user to continue in the "
         "RunWhen UI.\n\n"
         "  PREFER direct tools for:\n"
@@ -3235,9 +3239,10 @@ async def workspace_chat(
     """Ask the RunWhen AI assistant about your infrastructure.
 
     This is the PRIMARY tool for investigating infrastructure. It sends your
-    message to the RunWhen workspace AI agent which has ~25+ internal tools
-    including semantic search, keyword grep, resource graph traversal, issue
-    correlation, knowledge base lookup, and data analysis.
+    message to the RunWhen workspace AI agent, which searches (keyword,
+    semantic, and fuzzy), navigates and correlates across resources, SLXs,
+    issues, run sessions, and the knowledge base, and returns rich markdown
+    reports, diagrams, and tables.
 
     PREFER THIS TOOL over direct read/query tools (get_workspace_issues,
     get_workspace_slxs, search_workspace, etc.) for any question that
