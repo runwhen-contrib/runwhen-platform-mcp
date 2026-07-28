@@ -20,10 +20,11 @@ do not omit it or rely on defaults. If you don't know the workspace name, call
 
 ## Tool Routing — `workspace_chat` vs direct tools
 
-`workspace_chat` is the **primary investigation tool**. It has internal access
-to ~25+ tools including semantic search, keyword grep, resource graph traversal,
-knowledge base lookup, and data analysis. It produces **materially better
-answers** than combining multiple direct API calls for investigative questions.
+`workspace_chat` is the **primary investigation tool**. The agent searches
+(keyword, semantic, and fuzzy), navigates and correlates across resources,
+SLXs, issues, run sessions, and the knowledge base, and returns rich reports,
+diagrams, and tables. It produces **materially better answers** than combining
+multiple direct API calls for investigative questions.
 
 ### ALWAYS prefer `workspace_chat` for:
 
