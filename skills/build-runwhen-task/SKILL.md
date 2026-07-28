@@ -203,9 +203,8 @@ Encode `script_gzip_base64` as:
 
 ```python
 import base64, gzip
-script_gzip_base64 = base64.b64encode(
-    gzip.compress(script.encode("utf-8"))
-).decode("ascii")
+
+script_gzip_base64 = base64.b64encode(gzip.compress(script.encode("utf-8"))).decode("ascii")
 ```
 
 If you hit the soft warning or hard cap, prefer in order:

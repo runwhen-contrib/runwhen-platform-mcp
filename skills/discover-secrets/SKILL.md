@@ -85,8 +85,8 @@ commit_slx(
     slx_name="my-check",
     workspace_name="my-workspace",
     secret_vars={
-        "kubeconfig": "kubeconfig",          # env var name → workspace secret key
-        "USER_TOKEN": "BETA-USER_TOKEN",     # can differ if naming conventions vary
+        "kubeconfig": "kubeconfig",  # env var name → workspace secret key
+        "USER_TOKEN": "BETA-USER_TOKEN",  # can differ if naming conventions vary
     },
     # ... other params
 )
@@ -107,17 +107,17 @@ spec:
 
 ### Kubernetes tasks
 ```python
-secret_vars={"kubeconfig": "kubeconfig"}
+secret_vars = {"kubeconfig": "kubeconfig"}
 ```
 
 ### PAPI query tasks
 ```python
-secret_vars={"USER_TOKEN": "BETA-USER_TOKEN"}  # or PROD-USER_TOKEN
+secret_vars = {"USER_TOKEN": "BETA-USER_TOKEN"}  # or PROD-USER_TOKEN
 ```
 
 ### Multi-cloud tasks
 ```python
-secret_vars={
+secret_vars = {
     "kubeconfig": "kubeconfig",
     "AZURE_CLIENT_ID": "runwhen-nonprod-azure-clientId",
     "AZURE_CLIENT_SECRET": "runwhen-nonprod-azure-clientSecret",

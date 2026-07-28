@@ -93,6 +93,7 @@ Rules:
 ```python
 import os
 
+
 def main():
     """Must return a float between 0 and 1."""
     # ... your health check logic ...
