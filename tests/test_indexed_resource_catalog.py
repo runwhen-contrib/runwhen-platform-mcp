@@ -50,7 +50,7 @@ class TestKubernetesCatalog:
         assert "Unknown kubernetes resource type" in errors[0]
 
     def test_crd_not_in_catalog_is_accepted(self) -> None:
-        assert validate_resource_types("kubernetes", ["tyburnrecorder.apiary.example.com/v1"]) == []
+        assert validate_resource_types("kubernetes", ["mycrd.example.com/v1"]) == []
 
 
 class TestRunwhenCatalog:

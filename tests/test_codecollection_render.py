@@ -324,7 +324,7 @@ class TestKubernetesDiscoveryRender:
     ISSUE_MATCH_RULES = [
         {
             "type": "pattern",
-            "pattern": "^tyburnrecorder-apiary$",
+            "pattern": "^example-app$",
             "properties": ["name"],
             "mode": "substring",
         }
@@ -332,19 +332,17 @@ class TestKubernetesDiscoveryRender:
 
     def _render_k8s_namespace(self, **kwargs) -> dict[str, str]:
         defaults = dict(
-            bundle_name="tybr-kfk-dly",
-            alias="Check Tyburn Recorder Apiary Kafka consumption delay",
-            statement=(
-                "Tyburn Recorder Apiary Kafka consumption delay (p95) should stay below 60s."
-            ),
-            task_title="Check Tyburn Recorder Apiary Kafka consumption delay",
+            bundle_name="ex-kfk-dly",
+            alias="Check Kafka consumption delay",
+            statement=("Kafka consumption delay (p95) should stay below 60s."),
+            task_title="Check Kafka consumption delay",
             script=SAMPLE_SCRIPT,
             interpreter="python",
             platform="kubernetes",
             resource_types=["namespace"],
             match_rules=self.ISSUE_MATCH_RULES,
             slx_qualifiers=["namespace", "cluster"],
-            base_name="tybr-kfk-dly",
+            base_name="ex-kfk-dly",
             access="read-only",
             data="logs-bulk",
         )
@@ -354,7 +352,7 @@ class TestKubernetesDiscoveryRender:
     def test_generation_rule_uses_kubernetes_platform(self) -> None:
         files = self._render_k8s_namespace()
         rule = yaml.safe_load(
-            files["codebundles/tybr-kfk-dly/.runwhen/generation-rules/tybr-kfk-dly.yaml"]
+            files["codebundles/ex-kfk-dly/.runwhen/generation-rules/ex-kfk-dly.yaml"]
         )
         assert rule["spec"]["platform"] == "kubernetes"
         gen = rule["spec"]["generationRules"][0]
@@ -363,7 +361,7 @@ class TestKubernetesDiscoveryRender:
 
     def test_slx_template_includes_kubernetes_includes(self) -> None:
         files = self._render_k8s_namespace()
-        slx = files["codebundles/tybr-kfk-dly/.runwhen/templates/tybr-kfk-dly-slx.yaml"]
+        slx = files["codebundles/ex-kfk-dly/.runwhen/templates/ex-kfk-dly-slx.yaml"]
         assert '{% include "kubernetes-tags.yaml" ignore missing %}' in slx
         assert '{% include "kubernetes-hierarchy.yaml" ignore missing %}' in slx
         assert "value: runwhen" not in slx
@@ -371,7 +369,7 @@ class TestKubernetesDiscoveryRender:
 
     def test_slx_uses_kubernetes_icon_by_default(self) -> None:
         files = self._render_k8s_namespace()
-        slx = files["codebundles/tybr-kfk-dly/.runwhen/templates/tybr-kfk-dly-slx.yaml"]
+        slx = files["codebundles/ex-kfk-dly/.runwhen/templates/ex-kfk-dly-slx.yaml"]
         assert "icons/kubernetes.svg" in slx
 
 
