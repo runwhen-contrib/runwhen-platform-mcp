@@ -79,15 +79,17 @@ at the end of the task with the actual numbers (counts, breakdowns, p99s, etc.).
 def main():
     issues = []
     # ... investigation logic that may append severity 1-3 issues ...
-    issues.append({
-        "issue title": f"{TASK_TITLE} — Summary",
-        "issue description": (
-            f"Examined {total} resources; {failed} failed; "
-            f"top callers: {top_callers}; lookback={LOOKBACK_DAYS}d."
-        ),
-        "issue severity": 4,
-        "issue next steps": "Informational. Review numbers in description.",
-    })
+    issues.append(
+        {
+            "issue title": f"{TASK_TITLE} — Summary",
+            "issue description": (
+                f"Examined {total} resources; {failed} failed; "
+                f"top callers: {top_callers}; lookback={LOOKBACK_DAYS}d."
+            ),
+            "issue severity": 4,
+            "issue next steps": "Informational. Review numbers in description.",
+        }
+    )
     return issues
 ```
 
@@ -124,29 +126,33 @@ Common anti-patterns the MCP will warn on:
 
 ```python
 # BAD — runner shows "no signal" forever
-issues.append({
-    "issue title": "Pod issue",
-    "issue description": "",
-    "issue severity": 2,
-    "issue next steps": "Check pods.",
-})
+issues.append(
+    {
+        "issue title": "Pod issue",
+        "issue description": "",
+        "issue severity": 2,
+        "issue next steps": "Check pods.",
+    }
+)
 
 # GOOD — operator can act without re-running the task
-issues.append({
-    "issue title": f"Pod {pod_name} restarted {restart_count} times in {NAMESPACE}",
-    "issue description": (
-        f"Pod {pod_name} in namespace {NAMESPACE} (cluster {CONTEXT}) has "
-        f"restarted {restart_count} times in the last {LOOKBACK_MIN} minutes. "
-        f"Last termination reason: {last_reason}. Container image: {image}. "
-        f"Owner: {owner_label or 'unknown'}."
-    ),
-    "issue severity": 2,
-    "issue next steps": (
-        f"kubectl --context={CONTEXT} -n {NAMESPACE} describe pod {pod_name} | "
-        f"head -50; then check container logs: kubectl --context={CONTEXT} -n "
-        f"{NAMESPACE} logs {pod_name} -p --tail=200"
-    ),
-})
+issues.append(
+    {
+        "issue title": f"Pod {pod_name} restarted {restart_count} times in {NAMESPACE}",
+        "issue description": (
+            f"Pod {pod_name} in namespace {NAMESPACE} (cluster {CONTEXT}) has "
+            f"restarted {restart_count} times in the last {LOOKBACK_MIN} minutes. "
+            f"Last termination reason: {last_reason}. Container image: {image}. "
+            f"Owner: {owner_label or 'unknown'}."
+        ),
+        "issue severity": 2,
+        "issue next steps": (
+            f"kubectl --context={CONTEXT} -n {NAMESPACE} describe pod {pod_name} | "
+            f"head -50; then check container logs: kubectl --context={CONTEXT} -n "
+            f"{NAMESPACE} logs {pod_name} -p --tail=200"
+        ),
+    }
+)
 ```
 
 ## Task vs SLI — different output contracts, different scripts

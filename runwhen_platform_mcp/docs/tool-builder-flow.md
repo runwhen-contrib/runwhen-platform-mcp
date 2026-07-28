@@ -71,12 +71,14 @@ def main():
 
     issues = []
     # ... your logic ...
-    issues.append({
-        "issue title": "Pod CrashLooping",
-        "issue description": f"Pod xyz in {namespace} has restarted 15 times",
-        "issue severity": 2,
-        "issue next steps": "Check pod logs and events",
-    })
+    issues.append(
+        {
+            "issue title": "Pod CrashLooping",
+            "issue description": f"Pod xyz in {namespace} has restarted 15 times",
+            "issue severity": 2,
+            "issue next steps": "Check pod logs and events",
+        }
+    )
     return issues
 ```
 
