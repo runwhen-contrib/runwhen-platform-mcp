@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -73,3 +74,93 @@ jobs:
                     text: "*Repo:*\n${{ github.repository }}"
                   - type: mrkdwn
                     text: "*Commit:*\n`${{ github.sha }}`"
+
+  # ---- Local MCP smoke: starts the server, tests the full MCP protocol ----
+  # Requires RW_API_URL + RUNWHEN_TOKEN + SLACK_BOT_TOKEN secrets.
+  # Optional: RW_SMOKE_WORKSPACE secret (defaults to t-oncall).
+  # Skips silently when required secrets are unset.
+  mcp-smoke:
+    runs-on: ubuntu-latest
+    needs: [lint-and-test]
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    env:
+      MCP_TRANSPORT: http
+      MCP_HOST: 127.0.0.1
+      MCP_PORT: "8000"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Start MCP server
+        id: start-server
+        env:
+          RW_API_URL: ${{ secrets.RW_API_URL }}
+          RUNWHEN_TOKEN: ${{ secrets.RUNWHEN_TOKEN }}
+          DEFAULT_WORKSPACE: ${{ secrets.RW_SMOKE_WORKSPACE || 't-oncall' }}
+        run: |
+          if [ -z "${RW_API_URL:-}" ] || [ -z "${RUNWHEN_TOKEN:-}" ]; then
+            echo "::notice title=MCP smoke::Skipped — set RW_API_URL and RUNWHEN_TOKEN secrets."
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          runwhen-platform-mcp &
+          echo "$!" > /tmp/mcp-server.pid
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:8000/health > /dev/null 2>&1; then
+              echo "Server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -s http://127.0.0.1:8000/health
+
+      - name: Run MCP smoke tests
+        if: steps.start-server.outputs.skipped != 'true'
+        id: smoke
+        env:
+          RUNWHEN_MCP_URL: http://127.0.0.1:8000/mcp
+          RUNWHEN_TOKEN: ${{ secrets.RUNWHEN_TOKEN }}
+          RW_SMOKE_WORKSPACE: ${{ secrets.RW_SMOKE_WORKSPACE || 't-oncall' }}
+        run: |
+          pytest tests/test_mcp_http_remote_smoke.py -v --tb=short --junitxml=smoke-results.xml
+        continue-on-error: true
+
+      - name: Stop MCP server
+        if: always()
+        run: |
+          if [ -f /tmp/mcp-server.pid ]; then
+            kill "$(cat /tmp/mcp-server.pid)" 2>/dev/null || true
+          fi
+
+    outputs:
+      skipped: ${{ steps.start-server.outputs.skipped }}
+
+  mcp-smoke-notify:
+    runs-on: ubuntu-latest
+    needs: [mcp-smoke]
+    if: always() && needs.mcp-smoke.outputs.skipped != 'true'
+    steps:
+      - name: Compose status
+        id: status
+        run: |
+          if [ "${{ needs.mcp-smoke.result }}" = "success" ]; then
+            echo "text=✅ Passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "text=❌ Failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Post to Slack
+        uses: slackapi/slack-github-action@v1.19.0
+        with:
+          channel-id: "#notifications"
+          slack-message: "${{ steps.status.outputs.text }} — MCP Smoke on `${{ github.ref_name }}`.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

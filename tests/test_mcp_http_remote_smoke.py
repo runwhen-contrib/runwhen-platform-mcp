@@ -1,14 +1,19 @@
-"""Streamable HTTP MCP client smoke against a **deployed** RunWhen MCP server.
+"""Streamable HTTP MCP client smoke — runs against any MCP server endpoint.
 
 Uses the official ``mcp`` Python client (same wire protocol as Cursor). Validates
-``initialize``, ``tools/list``, and ``tools/call`` for ``list_workspaces`` and
-``get_workspace_issues`` (workspace ``t-oncall`` by default).
+``initialize``, ``tools/list``, and ``tools/call`` for ``list_workspaces``,
+``get_workspace_issues``, ``list_discovery_platforms``, and
+``list_indexed_resource_types``.
 
-Environment (repository secrets in CI):
+In CI the test runs against a **locally-started** MCP server (``localhost``).
+For post-deploy checks, point it at a deployed URL. In both cases the server
+connects to the RunWhen API using ``RW_API_URL`` + ``RUNWHEN_TOKEN``.
 
-- ``RUNWHEN_MCP_URL`` — full MCP endpoint, e.g. ``https://mcp.<env>.runwhen.com/mcp``
-  (no trailing slash; see README remote section).
-- ``RUNWHEN_TOKEN`` — Bearer token (JWT or PAT), same as MCP client ``Authorization``.
+Environment:
+
+- ``RUNWHEN_MCP_URL`` — full MCP endpoint, e.g. ``http://127.0.0.1:8000/mcp``
+  (local) or ``https://mcp.<env>.runwhen.com/mcp`` (deployed). No trailing slash.
+- ``RUNWHEN_TOKEN`` — Bearer token (JWT or PAT), same as server uses for PAPI auth.
 
 Optional:
 
@@ -131,6 +136,86 @@ def test_remote_streamable_mcp_smoke() -> None:
     _require_remote_mcp_env()
     try:
         asyncio.run(_run_remote_smoke())
+    except BaseException as exc:
+        connect_err = _connect_error(exc)
+        if connect_err is not None:
+            pytest.skip(f"Remote MCP endpoint unreachable from this runner: {connect_err}")
+        raise
+
+
+async def _run_discovery_platforms_smoke() -> None:
+    url = _mcp_url()
+    token = os.environ["RUNWHEN_TOKEN"]
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json, text/event-stream",
+    }
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    async with (
+        httpx.AsyncClient(headers=headers, timeout=timeout) as http,
+        streamable_http_client(url, http_client=http) as (read, write, _get_sid),
+        ClientSession(read, write) as session,
+    ):
+        init = await session.initialize()
+        assert init.serverInfo is not None
+
+        raw = await session.call_tool("list_discovery_platforms", {})
+        text = _tool_text(raw)
+        payload = _strict_json(text)
+        assert isinstance(payload, dict)
+        assert "platforms" in payload
+        platforms = payload["platforms"]
+        assert isinstance(platforms, list)
+        assert len(platforms) >= 2
+        names = {p["platform"] for p in platforms if isinstance(p, dict)}
+        assert "kubernetes" in names
+
+
+def test_list_discovery_platforms() -> None:
+    _require_remote_mcp_env()
+    try:
+        asyncio.run(_run_discovery_platforms_smoke())
+    except BaseException as exc:
+        connect_err = _connect_error(exc)
+        if connect_err is not None:
+            pytest.skip(f"Remote MCP endpoint unreachable from this runner: {connect_err}")
+        raise
+
+
+async def _run_indexed_resource_types_smoke() -> None:
+    url = _mcp_url()
+    token = os.environ["RUNWHEN_TOKEN"]
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json, text/event-stream",
+    }
+    timeout = httpx.Timeout(120.0, connect=30.0)
+    async with (
+        httpx.AsyncClient(headers=headers, timeout=timeout) as http,
+        streamable_http_client(url, http_client=http) as (read, write, _get_sid),
+        ClientSession(read, write) as session,
+    ):
+        init = await session.initialize()
+        assert init.serverInfo is not None
+
+        raw = await session.call_tool(
+            "list_indexed_resource_types",
+            {"platform": "kubernetes"},
+        )
+        text = _tool_text(raw)
+        payload = _strict_json(text)
+        assert isinstance(payload, dict)
+        assert "resource_types" in payload
+        assert isinstance(payload["resource_types"], list)
+        assert "namespace" in payload["resource_types"]
+
+
+def test_list_indexed_resource_types_kubernetes() -> None:
+    _require_remote_mcp_env()
+    try:
+        asyncio.run(_run_indexed_resource_types_smoke())
     except BaseException as exc:
         connect_err = _connect_error(exc)
         if connect_err is not None:
