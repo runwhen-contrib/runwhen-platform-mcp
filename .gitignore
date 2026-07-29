@@ -25,3 +25,6 @@ temp/
 
 # Local scratch / issue triage notes (not for tracking)
 .issues/
+
+# OMO agent artifacts (plans, prompts, task state)
+.omo/

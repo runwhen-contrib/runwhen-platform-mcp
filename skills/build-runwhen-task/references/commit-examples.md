@@ -47,8 +47,8 @@ commit_slx(
     interpreter="python",
     access="read-only",
     data="logs-bulk",
-    sli_script=sli_script,          # custom SLI alongside the task
-    sli_interval_seconds=120,       # check every 2 minutes
+    sli_script=sli_script,  # custom SLI alongside the task
+    sli_interval_seconds=120,  # check every 2 minutes
     secret_vars={"kubeconfig": "kubeconfig"},
 )
 ```
@@ -65,7 +65,7 @@ commit_slx(
     interpreter="bash",
     access="read-only",
     data="config",
-    cron_schedule="0 8 * * *",      # run daily at 8am
+    cron_schedule="0 8 * * *",  # run daily at 8am
     secret_vars={"kubeconfig": "kubeconfig"},
 )
 ```
@@ -80,7 +80,7 @@ commit_slx(
     script=remediation_script,
     task_title="Restart CrashLoopBackOff Pods",
     interpreter="bash",
-    access="read-write",            # modifies resources
+    access="read-write",  # modifies resources
     data="logs-bulk",
     secret_vars={"kubeconfig": "kubeconfig"},
 )

@@ -179,6 +179,15 @@ def sync(runwhen_local: Path, check: bool = False) -> int:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         print("WROTE BUNDLE_MANIFEST.json")
 
+    if not check:
+        try:
+            from runwhen_platform_mcp.indexed_resource_catalog import write_resource_type_index
+
+            index_path = write_resource_type_index(_BUNDLE_ROOT)
+            print(f"WROTE {index_path.relative_to(_BUNDLE_ROOT)}")
+        except Exception as exc:  # noqa: BLE001 — sync should report, not abort copy
+            print(f"WARN failed to write indexed-resource-types.json: {exc}", file=sys.stderr)
+
     readme = _BUNDLE_ROOT / "README.md"
     readme_text = (
         "# Bundled authoring reference (airgap)\n\n"
@@ -190,6 +199,8 @@ def sync(runwhen_local: Path, check: bool = False) -> int:
         "| `generation-rules-syntax.md` | Full matchRules / slxs reference |\n"
         "| `generation-rule-schema.json` | JSON Schema for validation |\n"
         "| `catalogs/*` | Indexer resource type catalogs |\n"
+        "| `catalogs/indexed-resource-types.json` | "
+        "Compact offline index for MCP catalog lookup |\n"
         "| `examples/*` | End-to-end generation rule examples |\n"
         "| `indexed-resources/*` | Per-platform indexer guides |\n"
     )

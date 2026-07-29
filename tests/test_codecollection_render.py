@@ -318,13 +318,89 @@ class TestRenderCodecollectionFiles:
         assert parsed["spec"]["imageURL"].startswith("https://storage.googleapis.com/")
 
 
+class TestKubernetesDiscoveryRender:
+    """Regression for customer-project-g-research#71 — kubernetes namespace bundle."""
+
+    ISSUE_MATCH_RULES = [
+        {
+            "type": "pattern",
+            "pattern": "^example-app$",
+            "properties": ["name"],
+            "mode": "substring",
+        }
+    ]
+
+    def _render_k8s_namespace(self, **kwargs) -> dict[str, str]:
+        defaults = dict(
+            bundle_name="ex-kfk-dly",
+            alias="Check Kafka consumption delay",
+            statement=("Kafka consumption delay (p95) should stay below 60s."),
+            task_title="Check Kafka consumption delay",
+            script=SAMPLE_SCRIPT,
+            interpreter="python",
+            platform="kubernetes",
+            resource_types=["namespace"],
+            match_rules=self.ISSUE_MATCH_RULES,
+            slx_qualifiers=["namespace", "cluster"],
+            base_name="ex-kfk-dly",
+            access="read-only",
+            data="logs-bulk",
+        )
+        defaults.update(kwargs)
+        return render_codecollection_files(CodecollectionRenderInput(**defaults))
+
+    def test_generation_rule_uses_kubernetes_platform(self) -> None:
+        files = self._render_k8s_namespace()
+        rule = yaml.safe_load(
+            files["codebundles/ex-kfk-dly/.runwhen/generation-rules/ex-kfk-dly.yaml"]
+        )
+        assert rule["spec"]["platform"] == "kubernetes"
+        gen = rule["spec"]["generationRules"][0]
+        assert gen["resourceTypes"] == ["namespace"]
+        assert gen["slxs"][0]["qualifiers"] == ["namespace", "cluster"]
+
+    def test_slx_template_includes_kubernetes_includes(self) -> None:
+        files = self._render_k8s_namespace()
+        slx = files["codebundles/ex-kfk-dly/.runwhen/templates/ex-kfk-dly-slx.yaml"]
+        assert '{% include "kubernetes-tags.yaml" ignore missing %}' in slx
+        assert '{% include "kubernetes-hierarchy.yaml" ignore missing %}' in slx
+        assert "value: runwhen" not in slx
+        assert "- name: platform" not in slx or "value: runwhen" not in slx
+
+    def test_slx_uses_kubernetes_icon_by_default(self) -> None:
+        files = self._render_k8s_namespace()
+        slx = files["codebundles/ex-kfk-dly/.runwhen/templates/ex-kfk-dly-slx.yaml"]
+        assert "icons/kubernetes.svg" in slx
+
+
+class TestAzureDiscoveryRender:
+    def test_slx_includes_azure_includes(self) -> None:
+        files = render_codecollection_files(
+            CodecollectionRenderInput(
+                bundle_name="az-check",
+                alias="Azure check",
+                statement="Should be healthy.",
+                task_title="Run azure check",
+                script=SAMPLE_SCRIPT,
+                platform="azure",
+                resource_types=["azure_appservice_web_apps"],
+                slx_qualifiers=["resource", "resource_group"],
+            )
+        )
+        slx = files["codebundles/az-check/.runwhen/templates/az-check-slx.yaml"]
+        assert '{% include "azure-tags.yaml" ignore missing %}' in slx
+        assert '{% include "azure-hierarchy.yaml" ignore missing %}' in slx
+
+
 class TestRenderCodecollectionSkillTool:
     """Server-level tests for the render_codecollection_skill MCP tool."""
 
     def _call(self, **kwargs) -> dict:
         import asyncio
         import json as _json
+        from unittest import mock
 
+        from runwhen_platform_mcp import server as _server
         from runwhen_platform_mcp.server import render_codecollection_skill
 
         defaults = dict(
@@ -335,9 +411,43 @@ class TestRenderCodecollectionSkillTool:
             script=SAMPLE_SCRIPT,
             task_title="Run my health check",
             interpreter="python",
+            access="read-write",
+            data="logs-bulk",
+            platform="runwhen",
+            generic_runtime_ref="main",
+            timeout_seconds=300,
+            include_sli=False,
+            sli_interval_seconds=300,
         )
         defaults.update(kwargs)
-        result = asyncio.run(render_codecollection_skill(**defaults))
+
+        async def _fake_resolve_workspace(_name):
+            return "dev-ws"
+
+        async def _fake_get_user_email():
+            return "reviewer@example.com"
+
+        async def _fake_prepare_secrets(_ws, secrets):
+            return secrets, []
+
+        async def _fake_resolve_url(*, explicit=None, bundle=None):
+            return "https://github.com/runwhen-contrib/rw-generic-codecollection.git", "default"
+
+        with (
+            mock.patch.object(_server, "_resolve_workspace", side_effect=_fake_resolve_workspace),
+            mock.patch.object(_server, "_get_user_email", side_effect=_fake_get_user_email),
+            mock.patch.object(
+                _server,
+                "_prepare_secret_vars_for_author",
+                side_effect=_fake_prepare_secrets,
+            ),
+            mock.patch.object(
+                _server,
+                "_resolve_generic_codecollection_url",
+                side_effect=_fake_resolve_url,
+            ),
+        ):
+            result = asyncio.run(render_codecollection_skill(**defaults))
         return _json.loads(result)
 
     def test_bundle_name_with_underscore_is_rejected(self) -> None:
@@ -537,3 +647,21 @@ class TestRenderCodecollectionSkillTool:
             "codebundles/my-health-check/.runwhen/templates/my-health-check-sli.yaml"
         ]
         assert "https://mirror.internal/override.git" in sli_yaml
+
+    def test_invalid_kubernetes_resource_type_is_rejected(self) -> None:
+        response = self._call(
+            platform="kubernetes",
+            resource_types=["not-a-real-kind"],
+            match_rules=[{"type": "pattern", "pattern": ".+", "properties": ["name"]}],
+        )
+        assert response.get("error") == "Invalid discovery platform configuration"
+        assert any("Unknown kubernetes resource type" in d for d in response["details"])
+
+    def test_hierarchy_rejected_for_kubernetes(self) -> None:
+        response = self._call(
+            platform="kubernetes",
+            resource_types=["namespace"],
+            hierarchy=["platform", "kubernetes"],
+        )
+        assert response.get("error") == "Invalid discovery platform configuration"
+        assert any("hierarchy is not used" in d for d in response["details"])
