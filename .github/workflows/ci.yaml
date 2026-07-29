@@ -132,49 +132,49 @@ jobs:
             -v --tb=short --junitxml=smoke-results.xml 2>&1 | tee smoke-output.txt
 
           cat > /tmp/report.py << 'PYEOF'
-          import os, re, xml.etree.ElementTree as ET
+          import os, re
 
+          p = f = e = s = t = 0
+          failures = {}
           try:
-            tree = ET.parse('smoke-results.xml')
-            suite = tree.getroot()
-            t = int(suite.get('tests','0'))
-            f = int(suite.get('failures','0'))
-            e = int(suite.get('errors','0'))
-            s = int(suite.get('skipped','0'))
-            p = t - f - e - s
+            with open("smoke-output.txt") as fh:
+              summary = fh.read()
+            m = re.search(r'(\d+) passed', summary)
+            if m: p = int(m.group(1))
+            m = re.search(r'(\d+) failed', summary)
+            if m: f = int(m.group(1))
+            m = re.search(r'(\d+) skipped', summary)
+            if m: s = int(m.group(1))
+            m = re.search(r'(\d+) error', summary)
+            if m: e = int(m.group(1))
+            t = p + f + e + s
+            for line in summary.split('\n'):
+              if line.startswith('FAILED '):
+                parts = line.strip().split(' - ', 1)
+                test = parts[0].replace('FAILED ', '').strip()
+                err = parts[1][:200] if len(parts) > 1 else '-'
+                failures[test] = err
           except Exception:
-            t = f = e = s = p = 0
+            pass
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
             print(f"detail=({p}P/{f}F/{e}E/{s}S)", file=out)
 
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as sm:
-            icon = "\u2705" if f == 0 and e == 0 else "\u274c"
-            sm.write(f"# {icon} MCP Smoke -- {p}/{t} passed\n\n")
+            icon = "\u2705" if f == 0 and e == 0 and t > 0 else "\u274c"
+            status = f"{p}/{t} passed" if t > 0 else "no results"
+            sm.write(f"# {icon} MCP Smoke -- {status}\n\n")
             sm.write(f"| | Count |\n|---|---|\n")
             sm.write(f"| Passed | {p} |\n")
             if f: sm.write(f"| Failed | {f} |\n")
             if e: sm.write(f"| Errors | {e} |\n")
             if s: sm.write(f"| Skipped | {s} |\n")
             sm.write(f"| **Total** | **{t}** |\n\n")
-
-            try:
-              with open("smoke-output.txt") as fh:
-                lines = fh.readlines()
-              failures = {}
-              for i, line in enumerate(lines):
-                if line.startswith("FAILED "):
-                  parts = line.strip().split(" - ", 1)
-                  test = parts[0].replace("FAILED ", "").strip()
-                  err = parts[1][:200] if len(parts) > 1 else "-"
-                  failures[test] = err
-              if failures:
-                sm.write("## Failures\n\n")
-                sm.write("| Test | Error |\n|---|---|\n")
-                for test, err in failures.items():
-                  sm.write(f"| `{test}` | {err} |\n")
-            except Exception:
-              pass
+            if failures:
+              sm.write("## Failures\n\n")
+              sm.write("| Test | Error |\n|---|---|\n")
+              for test, err in failures.items():
+                sm.write(f"| `{test}` | {err} |\n")
           PYEOF
           python3 /tmp/report.py
         continue-on-error: true
