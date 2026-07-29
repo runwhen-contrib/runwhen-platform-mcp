@@ -130,8 +130,9 @@ jobs:
         run: |
           pytest tests/test_mcp_http_remote_smoke.py tests/test_mcp_local_smoke_full.py \
             -v --tb=short --junitxml=smoke-results.xml 2>&1 | tee smoke-output.txt
-          python3 << 'PYEOF' >> "$GITHUB_OUTPUT"
-          import xml.etree.ElementTree as ET
+
+          cat > /tmp/report.py << 'PYEOF'
+          import os, xml.etree.ElementTree as ET
           tree = ET.parse('smoke-results.xml')
           suite = tree.getroot()
           t = int(suite.get('tests','0'))
@@ -139,19 +140,37 @@ jobs:
           e = int(suite.get('errors','0'))
           s = int(suite.get('skipped','0'))
           p = t - f - e - s
-          status = f"({p}P/{f}F/{e}E/{s}S)"
-          failed = []
-          for tc in suite:
+
+          # Slack detail
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+            print(f"detail=({p}P/{f}F/{e}E/{s}S)", file=out)
+
+          # Rich Actions UI summary
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as sm:
+            icon = "\u2705" if f == 0 and e == 0 else "\u274c"
+            sm.write(f"# {icon} MCP Smoke — {p}/{t} passed\n\n")
+            sm.write("| | Count |\n|---|---|\n")
+            sm.write(f"| Passed | {p} |\n")
+            if f: sm.write(f"| Failed | {f} |\n")
+            if e: sm.write(f"| Errors | {e} |\n")
+            if s: sm.write(f"| Skipped | {s} |\n")
+            sm.write(f"| **Total** | **{t}** |\n\n")
+
+            failures = []
+            for tc in suite:
               for child in tc:
-                  if child.tag in ('failure', 'error'):
-                      cls = tc.get('classname','').rsplit('.',1)[-1]
-                      failed.append(f"{cls}.{tc.get('name','?')}")
-          if failed:
-              status += " failures: " + ", ".join(failed[:8])
-              if len(failed) > 8:
-                  status += f" (+{len(failed)-8} more)"
-          print(f'detail={status}')
+                if child.tag in ('failure','error'):
+                  cls = tc.get('classname','').rsplit('.',1)[-1]
+                  name = tc.get('name','?')
+                  msg = (child.text or '').strip().split('\n')[0][:120]
+                  failures.append((f"{cls}.{name}", msg))
+            if failures:
+              sm.write("## Failed Tests\n\n")
+              sm.write("| Test | Error |\n|---|---|\n")
+              for test_name, err_msg in failures:
+                sm.write(f"| `{test_name}` | {err_msg} |\n")
           PYEOF
+          python3 /tmp/report.py
         continue-on-error: true
 
       - name: Upload smoke results
