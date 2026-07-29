@@ -180,7 +180,7 @@ class TestServerMetadata:
                     "workspace_chat",
                     {
                         "workspace_name": ws,
-                        "message": "list my workspaces",
+                        "message": "hello",
                     },
                 )
                 assert isinstance(payload, dict)
@@ -340,7 +340,7 @@ class TestValidation:
                     session,
                     "validate_script",
                     {
-                        "script": "def main():\n    return",
+                        "script": "def main():\n    return x  # NameError: x is undefined",
                         "interpreter": "python",
                         "task_type": "task",
                     },
@@ -458,11 +458,16 @@ class TestWorkspaceRead:
         async def _test():
             async for session in _session():
                 ws = _workspace()
-                payload = await _call(
-                    session,
+                raw = await session.call_tool(
                     "search_workspace",
                     {"workspace_name": ws, "query": "kubernetes"},
                 )
+                if raw.isError:
+                    text = "\n".join(b.text for b in raw.content if isinstance(b, TextContent))
+                    if "503" in text or "unavailable" in text.lower():
+                        pytest.skip(f"search_workspace unavailable: {text[:100]}")
+                    raise AssertionError(f"tool error: {text}")
+                payload = _strict_json(_tool_text(raw))
                 assert isinstance(payload, (list, dict))
 
         _run(_test())

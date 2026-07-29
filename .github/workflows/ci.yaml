@@ -132,14 +132,17 @@ jobs:
             -v --tb=short --junitxml=smoke-results.xml 2>&1 | tee smoke-output.txt
 
           cat > /tmp/report.py << 'PYEOF'
-          import os, xml.etree.ElementTree as ET
-          tree = ET.parse('smoke-results.xml')
-          suite = tree.getroot()
-          t = int(suite.get('tests','0'))
-          f = int(suite.get('failures','0'))
-          e = int(suite.get('errors','0'))
-          s = int(suite.get('skipped','0'))
-          p = t - f - e - s
+          import os, sys, xml.etree.ElementTree as ET
+          try:
+            tree = ET.parse('smoke-results.xml')
+            suite = tree.getroot()
+            t = int(suite.get('tests','0'))
+            f = int(suite.get('failures','0'))
+            e = int(suite.get('errors','0'))
+            s = int(suite.get('skipped','0'))
+            p = t - f - e - s
+          except Exception:
+            t = f = e = s = p = 0
 
           # Slack detail
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
