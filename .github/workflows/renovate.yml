@@ -2,7 +2,6 @@ name: Renovate
 
 on:
   schedule:
-    # Run daily at 6:00 AM UTC (1:00 AM EST)
     - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
@@ -26,6 +25,11 @@ env:
   RENOVATE_AUTODISCOVER: true
   RENOVATE_AUTODISCOVER_FILTER: ${{ github.repository }}
 
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
 jobs:
   renovate:
     name: Renovate
@@ -33,17 +37,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.RENOVATE_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Self-hosted Renovate
-        uses: renovatebot/github-action@v40.1.12
+        uses: renovatebot/github-action@v41.0.0
         with:
           configurationFile: renovate.json
-          token: ${{ secrets.RENOVATE_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
         env:
-          # Repository taken from variable to keep configuration file generic
           RENOVATE_REPOSITORIES: ${{ github.repository }}
-          # Override schedule if set
           RENOVATE_FORCE: ${{ github.event.inputs.overrideSchedule == 'true' && '{}'  || '' }}
           LOG_LEVEL: ${{ env.LOG_LEVEL }}

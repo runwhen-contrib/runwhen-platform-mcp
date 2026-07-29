@@ -85,7 +85,7 @@
     {
       "customType": "regex",
       "description": "Update Python version in Dockerfile FROM statement",
-      "managerFilePatterns": [
+      "fileMatch": [
         "/\\.dockerfile$/",
         "/Dockerfile$/"
       ],
@@ -98,10 +98,7 @@
     }
   ],
   "vulnerabilityAlerts": {
-    "enabled": true,
-    "schedule": [
-      "at any time"
-    ]
+    "enabled": false
   },
   "osvVulnerabilityAlerts": true,
   "dependencyDashboard": true,
