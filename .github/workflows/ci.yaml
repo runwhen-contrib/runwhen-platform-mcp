@@ -82,7 +82,6 @@ jobs:
   mcp-smoke:
     runs-on: ubuntu-latest
     needs: [lint-and-test]
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     env:
       MCP_TRANSPORT: http
       MCP_HOST: 127.0.0.1
@@ -145,7 +144,7 @@ jobs:
   mcp-smoke-notify:
     runs-on: ubuntu-latest
     needs: [mcp-smoke]
-    if: always() && needs.mcp-smoke.outputs.skipped != 'true'
+    if: always() && needs.mcp-smoke.outputs.skipped != 'true' && github.ref == 'refs/heads/main'
     steps:
       - name: Compose status
         id: status
@@ -157,9 +156,21 @@ jobs:
           fi
 
       - name: Post to Slack
-        uses: slackapi/slack-github-action@v1.19.0
+        uses: slackapi/slack-github-action@v2
         with:
-          channel-id: "#notifications"
-          slack-message: "${{ steps.status.outputs.text }} — MCP Smoke on `${{ github.ref_name }}`.\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: "#notifications"
+            text: "${{ steps.status.outputs.text }} — MCP Smoke on `${{ github.ref_name }}`"
+            blocks:
+              - type: section
+                text:
+                  type: mrkdwn
+                  text: "${{ steps.status.outputs.text == '✅ Passed' && ':white_check_mark:' || ':x:' }} *MCP Smoke* — ${{ steps.status.outputs.text }} on `${{ github.ref_name }}` — <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>"
+              - type: section
+                fields:
+                  - type: mrkdwn
+                    text: "*Repo:*\n${{ github.repository }}"
+                  - type: mrkdwn
+                    text: "*Commit:*\n`${{ github.sha }}`"
