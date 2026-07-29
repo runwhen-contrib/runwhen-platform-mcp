@@ -128,8 +128,39 @@ jobs:
           LOCAL_MCP_SMOKE: "true"
           RW_SMOKE_WORKSPACE: ${{ secrets.RW_SMOKE_WORKSPACE || 't-oncall' }}
         run: |
-          pytest tests/test_mcp_http_remote_smoke.py tests/test_mcp_local_smoke_disco.py -v --tb=short --junitxml=smoke-results.xml
+          pytest tests/test_mcp_http_remote_smoke.py tests/test_mcp_local_smoke_full.py \
+            -v --tb=short --junitxml=smoke-results.xml 2>&1 | tee smoke-output.txt
+          python3 << 'PYEOF' >> "$GITHUB_OUTPUT"
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('smoke-results.xml')
+          suite = tree.getroot()
+          t = int(suite.get('tests','0'))
+          f = int(suite.get('failures','0'))
+          e = int(suite.get('errors','0'))
+          s = int(suite.get('skipped','0'))
+          p = t - f - e - s
+          status = f"({p}P/{f}F/{e}E/{s}S)"
+          failed = []
+          for tc in suite:
+              for child in tc:
+                  if child.tag in ('failure', 'error'):
+                      cls = tc.get('classname','').rsplit('.',1)[-1]
+                      failed.append(f"{cls}.{tc.get('name','?')}")
+          if failed:
+              status += " failures: " + ", ".join(failed[:8])
+              if len(failed) > 8:
+                  status += f" (+{len(failed)-8} more)"
+          print(f'detail={status}')
+          PYEOF
         continue-on-error: true
+
+      - name: Upload smoke results
+        if: always() && steps.smoke.outcome != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-smoke-results
+          path: smoke-results.xml
+          retention-days: 7
 
       - name: Stop MCP server
         if: always()
@@ -140,6 +171,8 @@ jobs:
 
     outputs:
       skipped: ${{ steps.start-server.outputs.skipped }}
+      outcome: ${{ steps.smoke.outcome }}
+      detail: ${{ steps.smoke.outputs.detail || '' }}
 
   mcp-smoke-notify:
     runs-on: ubuntu-latest
@@ -162,7 +195,9 @@ jobs:
           token: ${{ secrets.SLACK_BOT_TOKEN }}
           payload: |
             channel: "#notifications"
-            text: "${{ steps.status.outputs.text }} — MCP Smoke on `${{ github.ref_name }}`"
+            text: |
+            ${{ steps.status.outputs.text }} — MCP Smoke on `${{ github.ref_name }}` ${{ needs.mcp-smoke.outputs.detail }}.
+            <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>
             blocks:
               - type: section
                 text:
