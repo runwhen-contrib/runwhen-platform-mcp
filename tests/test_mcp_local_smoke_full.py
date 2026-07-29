@@ -622,6 +622,14 @@ class TestRenderCodecollection:
                     },
                 )
                 assert isinstance(payload, dict)
+                import os as _os
+
+                if _os.path.isdir(out):
+                    files = []
+                    for root, _dirs, filenames in _os.walk(out):
+                        for f in filenames:
+                            files.append(_os.path.relpath(_os.path.join(root, f), out))
+                    assert files, "output_dir should contain rendered files"
 
         _run(_test())
 
