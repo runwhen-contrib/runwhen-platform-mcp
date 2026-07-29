@@ -576,7 +576,11 @@ class TestRenderCodecollection:
 
         _run(_test())
 
-    def test_kubernetes_render_returns_files_inline(self) -> None:
+    @pytest.mark.parametrize(
+        "platform",
+        ["kubernetes", "azure", "aws", "gcp"],
+    )
+    def test_discovery_platform_render(self, platform) -> None:
         async def _test():
             async for session in _session():
                 ws = _workspace()
@@ -584,15 +588,13 @@ class TestRenderCodecollection:
                     session,
                     "render_codecollection_skill",
                     {
-                        "bundle_name": "smoke-k8s-render",
-                        "alias": "Smoke K8s Render",
-                        "statement": "K8s smoke test should produce valid output.",
+                        "bundle_name": f"smoke-{platform}-render",
+                        "alias": f"Smoke {platform} Render",
+                        "statement": f"{platform} smoke test should produce valid output.",
                         "workspace_name": ws,
                         "script": SAMPLE_RENDER_SCRIPT,
                         "interpreter": "python",
-                        "platform": "kubernetes",
-                        "resource_types": ["namespace"],
-                        "slx_qualifiers": ["namespace", "cluster"],
+                        "platform": platform,
                     },
                 )
                 assert isinstance(payload, dict)
