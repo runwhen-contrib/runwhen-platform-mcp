@@ -23,6 +23,15 @@ from mcp.types import CallToolResult, TextContent
 
 pytestmark = [pytest.mark.integration, pytest.mark.local_mcp_smoke]
 
+# Skip the entire module during collection when not running in mcp-smoke job.
+# The _session() helper accesses RUNWHEN_MCP_URL at module level during test
+# execution, before individual test-level skip checks can run.
+if os.environ.get("LOCAL_MCP_SMOKE") != "true":
+    pytest.skip(
+        "LOCAL_MCP_SMOKE=true not set — skipping local MCP smoke",
+        allow_module_level=True,
+    )
+
 # -- helpers -------------------------------------------------------------
 
 

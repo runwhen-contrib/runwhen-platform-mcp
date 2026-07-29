@@ -59,6 +59,7 @@ testpaths = ["tests"]
 markers = [
     "integration: live PAPI calls; requires RUNWHEN_TOKEN and RW_API_URL (see tests/test_papi_live_smoke.py)",
     "remote_mcp: streamable HTTP MCP against RUNWHEN_MCP_URL + RUNWHEN_TOKEN (tests/test_mcp_http_remote_smoke.py)",
+    "local_mcp_smoke: MCP protocol against locally-started server with LOCAL_MCP_SMOKE=true (tests/test_mcp_local_smoke_full.py)",
 ]
 
 [tool.ruff]
