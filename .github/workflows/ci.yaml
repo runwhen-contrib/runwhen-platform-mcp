@@ -132,8 +132,8 @@ jobs:
             -v --tb=short --junitxml=smoke-results.xml 2>&1 | tee smoke-output.txt
 
           cat > /tmp/report.py << 'PYEOF'
-          import os, xml.etree.ElementTree as ET
-          # Read pass/fail counts from junit XML
+          import os, re, xml.etree.ElementTree as ET
+
           try:
             tree = ET.parse('smoke-results.xml')
             suite = tree.getroot()
@@ -148,22 +148,31 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as out:
             print(f"detail=({p}P/{f}F/{e}E/{s}S)", file=out)
 
-          # Rich summary from raw smoke output
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as sm:
-            if t > 0:
-              icon = "\u2705" if f == 0 and e == 0 else "\u274c"
-              sm.write(f"# {icon} MCP Smoke — {p}/{t} passed\n\n")
-            else:
-              sm.write("# MCP Smoke Results\n\n")
+            icon = "\u2705" if f == 0 and e == 0 else "\u274c"
+            sm.write(f"# {icon} MCP Smoke -- {p}/{t} passed\n\n")
+            sm.write(f"| | Count |\n|---|---|\n")
+            sm.write(f"| Passed | {p} |\n")
+            if f: sm.write(f"| Failed | {f} |\n")
+            if e: sm.write(f"| Errors | {e} |\n")
+            if s: sm.write(f"| Skipped | {s} |\n")
+            sm.write(f"| **Total** | **{t}** |\n\n")
 
-            # Show actual pytest output in a code block
             try:
               with open("smoke-output.txt") as fh:
                 lines = fh.readlines()
-              sm.write("<details open><summary>Full Output</summary>\n\n```\n")
-              for line in lines[-120:]:
-                sm.write(line)
-              sm.write("```\n</details>\n")
+              failures = {}
+              for i, line in enumerate(lines):
+                if line.startswith("FAILED "):
+                  parts = line.strip().split(" - ", 1)
+                  test = parts[0].replace("FAILED ", "").strip()
+                  err = parts[1][:200] if len(parts) > 1 else "-"
+                  failures[test] = err
+              if failures:
+                sm.write("## Failures\n\n")
+                sm.write("| Test | Error |\n|---|---|\n")
+                for test, err in failures.items():
+                  sm.write(f"| `{test}` | {err} |\n")
             except Exception:
               pass
           PYEOF
