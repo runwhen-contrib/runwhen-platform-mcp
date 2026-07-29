@@ -126,9 +126,10 @@ jobs:
         env:
           RUNWHEN_MCP_URL: http://127.0.0.1:8000/mcp
           RUNWHEN_TOKEN: ${{ secrets.RUNWHEN_TOKEN }}
+          LOCAL_MCP_SMOKE: "true"
           RW_SMOKE_WORKSPACE: ${{ secrets.RW_SMOKE_WORKSPACE || 't-oncall' }}
         run: |
-          pytest tests/test_mcp_http_remote_smoke.py -v --tb=short --junitxml=smoke-results.xml
+          pytest tests/test_mcp_http_remote_smoke.py tests/test_mcp_local_smoke_disco.py -v --tb=short --junitxml=smoke-results.xml
         continue-on-error: true
 
       - name: Stop MCP server
