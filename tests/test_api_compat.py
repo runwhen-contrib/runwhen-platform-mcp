@@ -171,6 +171,13 @@ class TestKnowledgeBaseSchema:
         assert "resource_paths" in props
         assert "abstract_entities" in props
 
+    def test_create_has_title_param(self, tools) -> None:
+        # RW-1435: title is title-weighted for KB search and the global-note
+        # catalog; the wrapper must expose it so notes aren't stored title-less.
+        tool = _find_tool(tools, "create_knowledge_base_article")
+        props = tool.parameters.get("properties", {})
+        assert "title" in props
+
     def test_update_has_partial_params(self, tools) -> None:
         tool = _find_tool(tools, "update_knowledge_base_article")
         props = tool.parameters.get("properties", {})
@@ -178,6 +185,11 @@ class TestKnowledgeBaseSchema:
         assert "content" in props
         assert "status" in props
         assert "verified" in props
+
+    def test_update_has_title_param(self, tools) -> None:
+        tool = _find_tool(tools, "update_knowledge_base_article")
+        props = tool.parameters.get("properties", {})
+        assert "title" in props
 
     def test_list_has_filter_params(self, tools) -> None:
         tool = _find_tool(tools, "list_knowledge_base_articles")
