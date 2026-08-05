@@ -1030,6 +1030,54 @@ async def _papi_get(path: str, params: dict[str, Any] | None = None) -> Any:
         return _safe_json_parse(resp, f"PAPI GET {path}")
 
 
+async def _papi_get_all_pages(path: str, page_size: int = 100) -> Any:
+    """GET a paginated PAPI list endpoint, following ``next`` until exhausted.
+
+    PAPI list endpoints return ``{count, next, previous, results}`` and cap
+    each page at ``page_size`` items. This walks every page (via
+    ``limit``/``offset``) and returns a single merged payload with all
+    ``results`` concatenated, ``count`` reflecting the true total, and
+    ``next``/``previous`` set to ``None`` (the merged list is complete, so
+    there is nothing more to page through).
+
+    Non-paginated responses — a bare list, or a dict without ``results`` —
+    are returned unchanged, so this is safe to use in place of ``_papi_get``
+    on any list-shaped endpoint.
+    """
+    first = await _papi_get(path, params={"limit": page_size, "offset": 0})
+    if not isinstance(first, dict) or "results" not in first:
+        return first
+
+    results: list[Any] = list(first.get("results") or [])
+    count = first.get("count")
+
+    # Safety cap so a malformed/looping ``next`` can never spin forever.
+    # Derive the expected page count from ``count`` when available.
+    max_pages = 10_000
+    if isinstance(count, int) and count > 0:
+        max_pages = (count // page_size) + 2
+
+    current = first
+    pages_fetched = 1
+    while current.get("next") and pages_fetched < max_pages:
+        page = await _papi_get(path, params={"limit": page_size, "offset": len(results)})
+        pages_fetched += 1
+        if not isinstance(page, dict):
+            break
+        page_results = page.get("results") or []
+        if not page_results:
+            break
+        results.extend(page_results)
+        current = page
+
+    return {
+        "count": count if count is not None else len(results),
+        "next": None,
+        "previous": None,
+        "results": results,
+    }
+
+
 async def _papi_post(path: str, body: dict[str, Any]) -> tuple[int, Any]:
     """Make an authenticated POST request to PAPI. Returns (status_code, json).
 
@@ -4199,10 +4247,15 @@ async def get_workspace_slxs(
     SLXs are the fundamental unit of work in RunWhen — each represents a
     health check, task, or automation runbook for a piece of infrastructure.
 
-    This tool returns the **full list** for the workspace and accepts only
-    ``workspace_name``. It does NOT accept ``slx_name``, ``filter``,
-    ``alias``, ``tag``, or any other filtering parameter — those would
-    fail with ``unexpected_keyword_argument``.
+    The underlying PAPI endpoint is paginated (100 SLXs per page); this tool
+    auto-paginates internally, following ``next`` until exhausted, so the
+    returned ``results`` are the **complete** list for the workspace — never
+    just the first page. ``count`` reflects the true total and ``next`` is
+    always ``null`` (there is nothing left to page).
+
+    It accepts only ``workspace_name``. It does NOT accept ``slx_name``,
+    ``filter``, ``alias``, ``tag``, or any other filtering parameter — those
+    would fail with ``unexpected_keyword_argument``.
 
     For other shapes:
     - **One specific SLX (runbook detail)**: ``get_slx_runbook(workspace_name=..., slx_name=...)``
@@ -4213,7 +4266,7 @@ async def get_workspace_slxs(
     programmatic processing (counting, batch operations, etc).
     """
     ws = await _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/slxs")
+    data = await _papi_get_all_pages(f"/api/v3/workspaces/{ws}/slxs")
     return _json_response(data)
 
 
@@ -4444,6 +4497,15 @@ async def create_knowledge_base_article(
         description="The article content (plain text or markdown, max 20000 chars)."
     ),
     workspace_name: str = Field(description="The workspace to create in (e.g. 't-oncall')."),
+    title: Annotated[
+        str | None,
+        Field(
+            description="Human-readable article title (max 255 chars). Strongly recommended: "
+            "title is the primary field for title-weighted KB search and the workspace "
+            "global-note catalog. If omitted the note is stored title-less and under-performs "
+            "on retrieval."
+        ),
+    ] = None,
     resource_paths: Annotated[
         list[str] | None,
         Field(description="Canonical resource paths (e.g. ['kubernetes/namespace/prod'])."),
@@ -4470,6 +4532,8 @@ async def create_knowledge_base_article(
         "abstractEntities": abstract_entities or [],
         "status": "active",
     }
+    if title is not None:
+        body["title"] = title
     status_code, data = await _papi_post(f"/api/v3/workspaces/{ws}/notes", body)
     result = {
         "status": "created" if status_code == 201 else "ok",
@@ -4483,6 +4547,13 @@ async def create_knowledge_base_article(
 async def update_knowledge_base_article(
     note_id: str = Field(description="The UUID of the KB article to update."),
     workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    title: Annotated[
+        str | None,
+        Field(
+            description="Updated human-readable article title (max 255 chars). Title is the "
+            "primary field for title-weighted KB search and the global-note catalog."
+        ),
+    ] = None,
     content: Annotated[
         str | None, Field(description="Updated article content (max 20000 chars).")
     ] = None,
@@ -4508,6 +4579,8 @@ async def update_knowledge_base_article(
 
     ws = await _resolve_workspace(workspace_name)
     body: dict[str, Any] = {}
+    if title is not None:
+        body["title"] = title
     if content is not None:
         body["content"] = content
     if resource_paths is not None:
