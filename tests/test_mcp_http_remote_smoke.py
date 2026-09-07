@@ -61,7 +61,7 @@ def _strict_json(text: str) -> Any:
 
 
 def _tool_text(result: CallToolResult) -> str:
-    if result.isError:
+    if result.is_error:
         parts: list[str] = []
         for block in result.content:
             if isinstance(block, TextContent):
@@ -93,7 +93,7 @@ async def _run_remote_smoke() -> None:
         ClientSession(read, write) as session,
     ):
         init = await session.initialize()
-        assert init.serverInfo is not None
+        assert init.server_info is not None
 
         tools = await session.list_tools()
         names = {t.name for t in tools.tools}
