@@ -15,6 +15,10 @@ Optional:
 - ``RW_SMOKE_WORKSPACE`` — short name (default ``t-oncall``).
 
 When URL or token is unset, tests skip so forks / repos without secrets stay green.
+
+Requires ``mcp>=2``: the streamable-HTTP transport yields ``(read, write)`` and
+takes an ``httpx2`` client. The server itself still uses ``httpx`` — the two
+packages coexist and share no exception hierarchy.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import json
 import os
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -80,10 +84,12 @@ async def _run_remote_smoke() -> None:
         "Authorization": f"Bearer {token}",
         "Accept": "application/json, text/event-stream",
     }
-    timeout = httpx.Timeout(120.0, connect=30.0)
+    timeout = httpx2.Timeout(120.0, connect=30.0)
     async with (
-        httpx.AsyncClient(headers=headers, timeout=timeout) as http,
-        streamable_http_client(url, http_client=http) as (read, write, _get_sid),
+        httpx2.AsyncClient(headers=headers, timeout=timeout) as http,
+        # mcp >=2 yields (read, write); the session-id getter it used to yield
+        # third is gone, and was never used here.
+        streamable_http_client(url, http_client=http) as (read, write),
         ClientSession(read, write) as session,
     ):
         init = await session.initialize()
@@ -112,9 +118,14 @@ async def _run_remote_smoke() -> None:
         _strict_json(text_issues)
 
 
-def _connect_error(exc: BaseException) -> httpx.ConnectError | None:
-    """Return a ConnectError from *exc* or its nested causes/groups."""
-    if isinstance(exc, httpx.ConnectError):
+def _connect_error(exc: BaseException) -> httpx2.ConnectError | None:
+    """Return a ConnectError from *exc* or its nested causes/groups.
+
+    Must match the transport's client library: ``httpx2.ConnectError`` is a
+    distinct class from ``httpx.ConnectError``, not a subclass, so checking the
+    wrong one turns "endpoint unreachable" from a skip into a hard failure.
+    """
+    if isinstance(exc, httpx2.ConnectError):
         return exc
     nested = getattr(exc, "exceptions", None)
     if nested is not None:
