@@ -15,7 +15,7 @@ import json
 import os
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -61,8 +61,8 @@ def _headers() -> dict[str, str]:
     }
 
 
-def _timeout() -> httpx.Timeout:
-    return httpx.Timeout(120.0, connect=30.0)
+def _timeout() -> httpx2.Timeout:
+    return httpx2.Timeout(120.0, connect=30.0)
 
 
 def _strict_json(text: str) -> Any:
@@ -73,7 +73,7 @@ def _strict_json(text: str) -> Any:
 
 
 def _tool_text(result: CallToolResult) -> str:
-    if result.isError:
+    if result.is_error:
         parts: list[str] = []
         for block in result.content:
             if isinstance(block, TextContent):
@@ -87,8 +87,10 @@ def _tool_text(result: CallToolResult) -> str:
     return "\n".join(texts)
 
 
-def _connect_error(exc: BaseException) -> httpx.ConnectError | None:
-    if isinstance(exc, httpx.ConnectError):
+def _connect_error(exc: BaseException) -> httpx2.ConnectError | None:
+    # httpx2.ConnectError is not a subclass of httpx.ConnectError; match the
+    # library the transport actually uses or unreachable-endpoint stops skipping.
+    if isinstance(exc, httpx2.ConnectError):
         return exc
     nested = getattr(exc, "exceptions", None)
     if nested is not None:
@@ -107,8 +109,9 @@ def _connect_error(exc: BaseException) -> httpx.ConnectError | None:
 async def _session():
     url = _mcp_url()
     async with (
-        httpx.AsyncClient(headers=_headers(), timeout=_timeout()) as http,
-        streamable_http_client(url, http_client=http) as (read, write, _get_sid),
+        httpx2.AsyncClient(headers=_headers(), timeout=_timeout()) as http,
+        # mcp >=2 yields (read, write); the session-id getter is gone.
+        streamable_http_client(url, http_client=http) as (read, write),
         ClientSession(read, write) as session,
     ):
         await session.initialize()
@@ -460,7 +463,7 @@ class TestWorkspaceRead:
                     "search_workspace",
                     {"workspace_name": ws, "query": "kubernetes"},
                 )
-                if raw.isError:
+                if raw.is_error:
                     text = "\n".join(b.text for b in raw.content if isinstance(b, TextContent))
                     if "503" in text or "unavailable" in text.lower():
                         pytest.skip(f"search_workspace unavailable: {text[:100]}")
