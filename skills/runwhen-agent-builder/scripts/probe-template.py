@@ -45,7 +45,7 @@ def sh(args, timeout=120):
 
 def section(title):
     print("\n" + "=" * 68)
-    print("##### %s" % title)
+    print(f"##### {title}")
     print("=" * 68)
 
 
@@ -74,13 +74,13 @@ def verify():
     ]:
         out, err, rc = sh(cmd)
         n = len([x for x in out.splitlines() if x.strip()])
-        print("  source.%-11s rc=%s count=%s %s" % (label, rc, n, err[:80]))
+        print(f"  source.{label:<11} rc={rc} count={n} {err[:80]}")
 
     # The retention edge: the oldest window that still returns data. If this
     # moved, every trend claim in the design needs rechecking.
     for days in (90, 365):
         points, note = _probe_history(days)
-        print("  retention.%-3sd    points=%s %s" % (days, points, note))
+        print(f"  retention.{days:<3}d    points={points} {note}")
 
     print("\n##### VERIFY COMPLETE — diff against findings.md; any difference"
           " means re-probe in full")
@@ -101,7 +101,8 @@ def main():
         ("kubectl whoami", ["kubectl", "auth", "whoami"]),
     ]:
         out, err, rc = sh(cmd)
-        print("  %-16s rc=%s %s" % (label, rc, (out or err)[:300].replace("\n", " ")))
+        detail = (out or err)[:300].replace("\n", " ")
+        print(f"  {label:<16} rc={rc} {detail}")
     print("  serviceaccount ns:", _read("/var/run/secrets/kubernetes.io/"
                                         "serviceaccount/namespace"))
 
@@ -121,14 +122,15 @@ def main():
             continue
         out, err, rc = sh(["kubectl", "get", "svc", "-n", ns, "--no-headers"])
         n = len((out or "").strip().splitlines()) if rc == 0 else -1
-        print("  [%s] services=%s %s" % (ns, n, "" if rc == 0 else err[:120]))
+        err_note = "" if rc == 0 else err[:120]
+        print(f"  [{ns}] services={n} {err_note}")
 
     # ---- 3. PERMISSIONS THAT COMMONLY BITE ---------------------------------
     section("PERMISSION SPOT-CHECKS")
     for verb, res in [("get", "nodes"), ("get", "nodes/proxy"),
                       ("list", "secrets"), ("get", "pods")]:
         out, _, _ = sh(["kubectl", "auth", "can-i", verb, res])
-        print("  can-i %-6s %-14s -> %s" % (verb, res, (out or "?").strip()))
+        print(f"  can-i {verb:<6} {res:<14} -> {(out or '?').strip()}")
 
     # ---- 4. RETENTION LADDER ----------------------------------------------
     # THE decisive question for anything trend-shaped. Test progressively
@@ -137,7 +139,7 @@ def main():
     section("RETENTION LADDER")
     for days in [1, 7, 30, 90, 180, 365]:
         n, note = _probe_history(days)
-        print("   -%4dd  datapoints=%-8s %s" % (days, n, note))
+        print(f"   -{days:>4}d  datapoints={n:<8} {note}")
 
     # ---- 5. CEILINGS -------------------------------------------------------
     # Whatever the requirement is about running out of, find where the limit
@@ -179,15 +181,15 @@ def _probe_history(days_ago):
     end = datetime.now(timezone.utc) - timedelta(days=days_ago)
     start = end - timedelta(hours=6)
     params = {
-        "filter": 'metric.type="%s"' % metric,
+        "filter": f'metric.type="{metric}"',
         "interval.startTime": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "interval.endTime": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "aggregation.alignmentPeriod": "3600s",
         # gauges need ALIGN_MEAN; cumulative metrics need ALIGN_RATE
         "aggregation.perSeriesAligner": "ALIGN_MEAN",
     }
-    url = ("https://monitoring.googleapis.com/v3/projects/%s/timeSeries?"
-           % project) + urllib.parse.urlencode(params)
+    url = ("https://monitoring.googleapis.com/v3/projects/"
+           f"{project}/timeSeries?") + urllib.parse.urlencode(params)
     headers = {"Authorization": "Bearer " + token.strip()}
     if quota_project:
         headers["x-goog-user-project"] = quota_project
@@ -196,9 +198,9 @@ def _probe_history(days_ago):
                 urllib.request.Request(url, headers=headers), timeout=60) as r:
             d = json.loads(r.read().decode("utf-8", "replace"))
         ts = d.get("timeSeries", [])
-        return sum(len(s.get("points", [])) for s in ts), "series=%d" % len(ts)
+        return sum(len(s.get("points", [])) for s in ts), f"series={len(ts)}"
     except urllib.error.HTTPError as exc:
         body = exc.read(200).decode("utf-8", "replace").replace("\n", " ")
-        return "0", "HTTP %s %s" % (exc.code, body[:150])
+        return "0", f"HTTP {exc.code} {body[:150]}"
     except Exception as exc:  # noqa: BLE001
         return "0", str(exc)[:150]
