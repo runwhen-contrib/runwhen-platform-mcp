@@ -48,6 +48,9 @@ dev = [
     "mypy>=1.15",
     "pre-commit>=4.0",
     "types-PyYAML>=6.0",
+    # mcp>=2 transports take an httpx2 client; the remote smoke imports it
+    # directly. Distinct package from httpx, which the server still uses.
+    "httpx2>=2.12",
 ]
 
 [tool.setuptools.dynamic]
