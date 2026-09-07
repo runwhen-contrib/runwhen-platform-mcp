@@ -1,0 +1,155 @@
+<!doctype html>
+<!--
+  HANDOVER ONE-PAGER — runwhen-agent-builder, Phase 7.
+
+  Fill every {{TOKEN}} from the ledger and write to
+  <project>/.claude/agent-builds/<use-case>/handover.html
+
+  RULES
+  1. ONE SCREEN of substance. If it does not fit, you are copying the ledger.
+     state.md and gaps.md hold the detail; this page is the way in.
+  2. Written for a HUMAN WHO WAS NOT THERE — a colleague inheriting the agent, or
+     the customer. No phase numbers, no retrieval-check columns, no run IDs.
+  3. "How to use it" is the most valuable section. Give VERBATIM questions a
+     person can paste into chat, not descriptions of what the agent can do.
+  4. Delete any section with nothing in it. An empty <section> is removed, not
+     filled with "N/A".
+  5. Write it for a FAILED build too. Then the status is blocked, "What works"
+     is short and honest, and the page is mostly gaps. That is a useful page.
+  6. Duplicate the marked rows/blocks as needed; delete the unused ones.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{AGENT_DISPLAY_NAME}} — handover</title>
+<style>
+  :root{
+    --bg:#faf9f7; --card:#fff; --ink:#1b1a18; --mute:#6b6862; --line:#e4e1db;
+    --accent:#2f6f5e; --warn:#8a5a1a; --warn-bg:#fdf6e8; --stop:#9b2c2c;
+    --ok:#2f6f5e; --ok-bg:#eef5f2; --stop-bg:#fbeeee;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#16181a; --card:#1e2124; --ink:#e8e6e3; --mute:#9a968f; --line:#31353a;
+      --accent:#6fbfa5; --warn:#d9a441; --warn-bg:#2a2318; --stop:#e07a7a;
+      --ok:#6fbfa5; --ok-bg:#18241f; --stop-bg:#2a1a1a;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+       padding:32px 20px 64px}
+  .wrap{max-width:860px;margin:0 auto}
+  header{border-bottom:2px solid var(--ink);padding-bottom:14px;margin-bottom:26px}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:-.015em}
+  .sub{color:var(--mute);font-size:13px}
+  .sub b{color:var(--ink);font-weight:600}
+  .badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11px;
+         font-weight:700;letter-spacing:.06em;text-transform:uppercase;vertical-align:2px}
+  .b-ok{background:var(--ok-bg);color:var(--ok)}
+  .b-warn{background:var(--warn-bg);color:var(--warn)}
+  .b-stop{background:var(--stop-bg);color:var(--stop)}
+  section{margin:0 0 28px}
+  h2{font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--mute);
+     margin:0 0 12px;font-weight:700}
+  .lede{font-size:17px;line-height:1.5;margin:0;max-width:62ch}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 18px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th{text-align:left;font-weight:600;color:var(--mute);font-size:11px;
+     letter-spacing:.07em;text-transform:uppercase;padding:0 10px 7px 0;
+     border-bottom:1px solid var(--line)}
+  td{padding:9px 10px 9px 0;border-bottom:1px solid var(--line);vertical-align:top}
+  tr:last-child td{border-bottom:0}
+  code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace;
+       background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+  .ask{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--accent);
+       border-radius:0 8px 8px 0;padding:11px 15px;margin:0 0 9px;
+       font:14px ui-monospace,SFMono-Regular,Menlo,monospace}
+  .ask small{display:block;font-family:inherit;font-size:12px;color:var(--mute);
+             margin-top:5px;font-style:italic}
+  .gap{border-left:3px solid var(--warn);background:var(--warn-bg);
+       border-radius:0 8px 8px 0;padding:12px 15px;margin:0 0 10px}
+  .gap b{display:block;margin-bottom:3px}
+  .gap span{font-size:13px;color:var(--mute)}
+  .note{font-size:13px;color:var(--mute);margin-top:10px}
+  footer{border-top:1px solid var(--line);margin-top:36px;padding-top:14px;
+         font-size:12px;color:var(--mute)}
+  @media print{body{padding:0}.card,.ask,.gap{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>{{AGENT_DISPLAY_NAME}} <span class="badge b-ok">{{STATUS}}</span></h1>
+  <!-- STATUS: b-ok "working" · b-warn "partial" · b-stop "blocked" -->
+  <div class="sub">
+    workspace <b>{{WORKSPACE}}</b> &nbsp;·&nbsp; persona <b>{{PERSONA}}</b>
+    &nbsp;·&nbsp; built {{BUILT_DATE}} by {{BUILT_BY}}
+  </div>
+</header>
+
+<section>
+  <h2>What it does</h2>
+  <p class="lede">{{TWO_SENTENCES: what question it answers and for whom. No
+  RunWhen vocabulary — a reader who has never used the platform must understand
+  this line.}}</p>
+</section>
+
+<section>
+  <h2>How to use it</h2>
+  <!-- The highest-value section. Verbatim, pasteable. Report first, then the
+       follow-ups it is designed to answer. One REPEAT block per question. -->
+  <div class="ask">/{{REPORT_COMMAND}}
+    <small>{{When it runs, where it goes, and what the first thing to read is.}}</small></div>
+  <div class="ask">{{FOLLOW_UP_QUESTION_VERBATIM}}
+    <small>{{Which drill-down this reaches and what it comes back with.}}</small></div>
+  <p class="note">{{One line on where follow-ups happen — same session as the
+  report, with it as context — and anything the agent will refuse to do without.}}</p>
+</section>
+
+<section>
+  <h2>What was built</h2>
+  <div class="card">
+  <table>
+    <tr><th>Object</th><th>Kind</th><th>Answers</th></tr>
+    <!-- REPEAT per SLX. Kind: collector (scheduled) / drill-down / break-glass.
+         Use the human-facing task title, never the SLX slug. -->
+    <tr><td><b>{{TASK_TITLE}}</b></td><td>{{KIND}}</td><td>{{QUESTION_IT_ANSWERS}}</td></tr>
+  </table>
+  </div>
+  <p class="note">Also: {{N}} chat rules, {{N}} knowledge-base articles,
+  {{N}} command. Schedule <b>{{CRON_HUMAN}}</b> to {{SINK}} —
+  <b>{{PAUSED_OR_LIVE}}</b>. {{Runs remaining, if the cap is close.}}</p>
+</section>
+
+<section>
+  <h2>What it cannot do</h2>
+  <!-- From gaps.md, ranked by what most limits the agent. Each: the limit, then
+       the specific thing that would lift it. A gap without a named fix is a
+       complaint. Delete this section only if there are genuinely none. -->
+  <div class="gap">
+    <b>{{THE_LIMIT}}</b>
+    <span>{{The exact grant, path, credential or decision that lifts it, and who
+    can give it.}}</span>
+  </div>
+</section>
+
+<section>
+  <h2>Before you trust it</h2>
+  <p class="note">{{Anything a reader must know to read the output correctly —
+  what is estimated, what is advisory, what the agent cannot see. Two lines.
+  Delete the section if the answer is genuinely nothing.}}</p>
+</section>
+
+<footer>
+  Detail in <code>state.md</code> (what was built and verified) and
+  <code>gaps.md</code> (what is missing and why).
+  Teardown order in <code>manifest.json</code> — commands, rules, assistant,
+  SLXs, in that order.
+</footer>
+
+</div>
+</body>
+</html>
