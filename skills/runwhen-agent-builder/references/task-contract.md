@@ -116,12 +116,14 @@ bound. A production SLX on stg-shared does exactly this:
 
 ```python
 summary = f"New: {len(new_issues)} · active: {len(active)} · blocking: {len(blocking)}\n\n{body}"
-return [{
-    "issue title": f"{UPDATE_TITLE} — {now.strftime('%Y-%m-%d')}",
-    "issue description": summary[:15000],
-    "issue severity": 4,
-    "issue next steps": f"Review open issues: https://github.com/{OWNER}/{REPO}/issues",
-}]
+return [
+    {
+        "issue title": f"{UPDATE_TITLE} — {now.strftime('%Y-%m-%d')}",
+        "issue description": summary[:15000],
+        "issue severity": 4,
+        "issue next steps": f"Review open issues: https://github.com/{OWNER}/{REPO}/issues",
+    }
+]
 ```
 
 Keep stdout for debugging. Put the report — including the task names from the

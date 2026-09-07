@@ -26,6 +26,7 @@ Two modes, selected by the PROBE_MODE env var:
 The RunWhen contract requires main() to return a list of issues; returning []
 is fine for a probe since everything useful goes to stdout.
 """
+
 import json
 import os
 import subprocess
@@ -82,8 +83,9 @@ def verify():
         points, note = _probe_history(days)
         print(f"  retention.{days:<3}d    points={points} {note}")
 
-    print("\n##### VERIFY COMPLETE — diff against findings.md; any difference"
-          " means re-probe in full")
+    print(
+        "\n##### VERIFY COMPLETE — diff against findings.md; any difference means re-probe in full"
+    )
     return []
 
 
@@ -103,16 +105,17 @@ def main():
         out, err, rc = sh(cmd)
         detail = (out or err)[:300].replace("\n", " ")
         print(f"  {label:<16} rc={rc} {detail}")
-    print("  serviceaccount ns:", _read("/var/run/secrets/kubernetes.io/"
-                                        "serviceaccount/namespace"))
+    print("  serviceaccount ns:", _read("/var/run/secrets/kubernetes.io/serviceaccount/namespace"))
 
     # ---- 2. WHAT EXISTS ----------------------------------------------------
     # List before you filter. A namespace you assumed exists may not, and a
     # documented component may have been removed without the docs changing.
     section("WHAT ACTUALLY EXISTS")
     out, err, rc = sh(["kubectl", "get", "ns", "-o", "name"])
-    print("  namespaces:", ", ".join(sorted(
-        x.split("/")[-1] for x in (out or "").split())) if rc == 0 else err[:200])
+    print(
+        "  namespaces:",
+        ", ".join(sorted(x.split("/")[-1] for x in (out or "").split())) if rc == 0 else err[:200],
+    )
 
     # Probe each candidate source for BOTH reachability and emptiness.
     # A source that answers with zero rows is not a source.
@@ -127,8 +130,12 @@ def main():
 
     # ---- 3. PERMISSIONS THAT COMMONLY BITE ---------------------------------
     section("PERMISSION SPOT-CHECKS")
-    for verb, res in [("get", "nodes"), ("get", "nodes/proxy"),
-                      ("list", "secrets"), ("get", "pods")]:
+    for verb, res in [
+        ("get", "nodes"),
+        ("get", "nodes/proxy"),
+        ("list", "secrets"),
+        ("get", "pods"),
+    ]:
         out, _, _ = sh(["kubectl", "auth", "can-i", verb, res])
         print(f"  can-i {verb:<6} {res:<14} -> {(out or '?').strip()}")
 
@@ -188,14 +195,14 @@ def _probe_history(days_ago):
         # gauges need ALIGN_MEAN; cumulative metrics need ALIGN_RATE
         "aggregation.perSeriesAligner": "ALIGN_MEAN",
     }
-    url = ("https://monitoring.googleapis.com/v3/projects/"
-           f"{project}/timeSeries?") + urllib.parse.urlencode(params)
+    url = (
+        f"https://monitoring.googleapis.com/v3/projects/{project}/timeSeries?"
+    ) + urllib.parse.urlencode(params)
     headers = {"Authorization": "Bearer " + token.strip()}
     if quota_project:
         headers["x-goog-user-project"] = quota_project
     try:
-        with urllib.request.urlopen(
-                urllib.request.Request(url, headers=headers), timeout=60) as r:
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as r:
             d = json.loads(r.read().decode("utf-8", "replace"))
         ts = d.get("timeSeries", [])
         return sum(len(s.get("points", [])) for s in ts), f"series={len(ts)}"
