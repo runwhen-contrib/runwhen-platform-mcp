@@ -1,0 +1,19 @@
+version: 1
+placeholders:
+  - name: WORKSPACE_ENV
+    description: "The workspace environment label this pack is scoped to."
+    example: "staging"
+items:
+  - kind: rule
+    name: demo-rule
+    file: rules/demo-rule.md
+  - kind: knowledge
+    name: "Demo Knowledge Article"
+    file: knowledge/demo-knowledge.md
+    scope: global
+  - kind: command
+    name: demo-command
+    file: commands/demo-command.md
+    description: "Run the demo digest command."
+    schedule:
+      cron: "0 8 * * 1-5"

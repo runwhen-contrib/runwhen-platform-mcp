@@ -1,0 +1,109 @@
+# Datadog workspace pack: chat rules, knowledge notes and chat commands
+# for a RunWhen workspace with the Datadog MCP server registered.
+#
+# Every {{NAME}} token in the item files is substituted before the item is
+# created in the workspace. tests/test_skill_packs.py validates this file
+# against the item files (sizes, declared/used placeholders, orphans).
+version: 1
+
+placeholders:
+  - name: WORKSPACE_ENV
+    description: Environment of the resources discovered into this workspace.
+    example: "staging"
+  - name: DD_ENV_LABEL
+    description: Human name of the environment the Datadog account covers.
+    example: "production"
+  - name: DD_SCOPE_FILTER
+    description: >-
+      Datadog tag filter that selects that environment. Prefer cluster,
+      project or host scopes over `env:`, which is agent-assigned and can
+      span environments.
+    example: "`kube_cluster_name:(gke-prod-use1 OR gke-prod-euw1)` for Kubernetes data, `project:acme-prod` for VMs"
+  - name: DATADOG_BLIND_SPOTS
+    description: One or two sentences on what is NOT in Datadog and what to do instead.
+    example: "Logs are not indexed in Datadog (cost), so never call log tools; say production logs are unavailable. APM covers only the services listed in the estate profile."
+  - name: DD_TOOLSETS
+    description: Toolsets in the registered MCP endpoint URL.
+    example: "core, alerting, synthetics"
+  - name: DD_PRODUCTS_TABLE
+    description: Markdown table (product | in use | scope | notes) produced by /datadog-calibrate.
+    example: "| Monitors | yes | 312 monitors, P1-P3 routed to PagerDuty | ... |"
+  - name: DD_APM_SERVICES
+    description: Instrumented services and the trace metric names they emit.
+    example: "- checkout-api, payments-api: `trace.http.request.hits/errors/duration`"
+  - name: DD_SYNTHETICS_SUMMARY
+    description: Test counts by type, key domains, and the synthetics.test_runs tag keys for pass/fail and test name.
+    example: "48 API + 6 browser tests on *.acme.com; pass/fail tag `status`, name tag `test_name`"
+  - name: DD_VM_FLEET
+    description: How to scope the VM fleet and which process metrics and tag keys exist.
+    example: "212 GCE VMs (`project:acme-prod`, no kube_cluster_name); process metrics tagged by `command`, not `host`"
+  - name: DD_MONITOR_CONVENTIONS
+    description: How monitors are tagged, prioritised and routed.
+    example: "Tagged `team:` and `service:`, not `env:`; P1/P2 route to @pagerduty-oncall"
+  - name: DD_CALIBRATED_AT
+    description: Date the estate profile values were last produced by /datadog-calibrate.
+    example: "2026-09-16"
+  - name: ENV_MAP_SCOPE
+    description: The workspace cluster or project this environment-map note is attached to.
+    example: "cluster `gke-staging-use1` (project `acme-staging`)"
+  - name: ENV_MAP_COUNTERPART
+    description: Datadog filter for the production counterpart of that scope.
+    example: "`kube_cluster_name:gke-prod-use1`"
+  - name: ENV_MAP_SUBSTITUTIONS
+    description: Markdown list of name rewrites from this estate to the Datadog estate.
+    example: "- namespace `stg-payments` → `payments`\n- deployment prefix `stg-` → none"
+  - name: ENV_MAP_NOT_IN_DATADOG
+    description: Workloads or resources in this scope with no production counterpart.
+    example: "`loadtest-*` namespaces, `feature-*` preview deployments"
+
+items:
+  - kind: rule
+    name: datadog-environment-boundary
+    file: rules/datadog-environment-boundary.md
+  - kind: rule
+    name: datadog-query-discipline
+    file: rules/datadog-query-discipline.md
+
+  - kind: knowledge
+    name: "Datadog MCP operating guide"
+    file: knowledge/datadog-operating-guide.md
+    scope: global
+  - kind: knowledge
+    name: "Datadog and RunWhen naming"
+    file: knowledge/datadog-naming-translation.md
+    scope: global
+  - kind: knowledge
+    name: "Datadog estate profile"
+    file: knowledge/datadog-estate-profile.md
+    scope: global
+  - kind: knowledge
+    name: "Datadog environment map"
+    file: knowledge/datadog-environment-map.md
+    scope: resource
+
+  - kind: command
+    name: datadog-calibrate
+    file: commands/datadog-calibrate.md
+    description: Discover what the Datadog account contains and produce estate profile values
+  - kind: command
+    name: datadog-resolve
+    file: commands/datadog-resolve.md
+    description: Resolve a workspace resource or name to its Datadog identity and coverage
+  - kind: command
+    name: datadog-morning-brief
+    file: commands/datadog-morning-brief.md
+    description: Overnight Datadog digest — what needs a person this morning
+    schedule:
+      cron: "0 13 * * 1-5"
+  - kind: command
+    name: datadog-evening-wrap
+    file: commands/datadog-evening-wrap.md
+    description: End-of-day Datadog digest — what changed and what is open for on-call
+    schedule:
+      cron: "0 23 * * 1-5"
+  - kind: command
+    name: datadog-monitor-hygiene
+    file: commands/datadog-monitor-hygiene.md
+    description: Weekly report on noisy, silent and unrouted Datadog monitors
+    schedule:
+      cron: "0 14 * * 1"
