@@ -1,0 +1,56 @@
+# Datadog pack: chat rules, knowledge notes and chat commands for a RunWhen
+# workspace with the Datadog MCP server registered.
+#
+# Packs need no user input: every item is installed verbatim. `match` tells an
+# installer which registered MCP servers this pack applies to.
+# tests/test_skill_packs.py validates this file against the item files.
+version: 1
+id: datadog
+title: Datadog MCP
+description: >-
+  Teaches workspace chat Datadog's vocabulary, tool routing, tag names and
+  query shapes, and adds on-demand Datadog digests.
+
+match:
+  mcp_catalog_ids:
+    - datadog
+  mcp_endpoint_hosts:
+    - mcp.datadoghq.com
+    - mcp.datadoghq.eu
+    - mcp.us3.datadoghq.com
+    - mcp.us5.datadoghq.com
+    - mcp.ap1.datadoghq.com
+    - mcp.ddog-gov.com
+
+items:
+  - kind: rule
+    name: datadog-mcp
+    file: rules/datadog-mcp.md
+
+  - kind: knowledge
+    name: datadog-mcp-operating-guide
+    file: knowledge/datadog-operating-guide.md
+  - kind: knowledge
+    name: datadog-runwhen-naming
+    file: knowledge/datadog-naming-translation.md
+
+  - kind: command
+    name: datadog-coverage
+    file: commands/datadog-coverage.md
+    description: Report what the connected Datadog account actually contains
+  - kind: command
+    name: datadog-resolve
+    file: commands/datadog-resolve.md
+    description: Resolve a workspace resource or name to its Datadog identity and coverage
+  - kind: command
+    name: datadog-morning-brief
+    file: commands/datadog-morning-brief.md
+    description: Overnight Datadog digest — what needs a person this morning
+  - kind: command
+    name: datadog-evening-wrap
+    file: commands/datadog-evening-wrap.md
+    description: End-of-day Datadog digest — what changed and what is open for on-call
+  - kind: command
+    name: datadog-monitor-hygiene
+    file: commands/datadog-monitor-hygiene.md
+    description: Weekly report on noisy, silent and unrouted Datadog monitors

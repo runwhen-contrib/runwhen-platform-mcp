@@ -1,0 +1,20 @@
+version: 1
+id: demo-skill
+title: Demo Skill
+description: "Fixture skill pack used to exercise validate_pack() in tests/test_skill_packs.py."
+match:
+  mcp_catalog_ids:
+    - demo
+  mcp_endpoint_hosts:
+    - mcp.demo.example.com
+items:
+  - kind: rule
+    name: demo-rule
+    file: rules/demo-rule.md
+  - kind: knowledge
+    name: demo-knowledge-article
+    file: knowledge/demo-knowledge.md
+  - kind: command
+    name: demo-command
+    file: commands/demo-command.md
+    description: "Run the demo digest command."

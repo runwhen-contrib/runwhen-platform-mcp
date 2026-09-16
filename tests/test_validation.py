@@ -2306,6 +2306,7 @@ class TestSkillLoader:
             "manage-rules",
             "manage-commands",
             "manage-knowledge",
+            "configure-datadog-workspace",
         }
         assert expected_subset.issubset(names), names
 
@@ -2404,6 +2405,66 @@ class TestListSkillsAndGetSkillTools:
         assert "error" in out
         assert "available" in out
         assert "discover-secrets" in out["available"]
+
+
+class TestGetSkillReferences:
+    """``get_skill(..., reference=...)`` — bundled ``references/**`` files.
+
+    MCP-only (remote HTTP) clients can't read packaged files off disk, so
+    ``get_skill`` doubles as the read path for a skill's reference material.
+    """
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_lists_references_for_skill_with_references_dir(self) -> None:
+        # ``author-generation-rules`` ships a non-trivial references/ tree.
+        out = json.loads(self._run(get_skill(name="author-generation-rules")))
+        assert "references" in out
+        assert "references/concepts.md" in out["references"]
+        assert "references/catalogs/kubernetes-resource-catalog.md" in out["references"]
+        assert out["references"] == sorted(out["references"])
+
+    def test_no_references_dir_returns_empty_list(self) -> None:
+        # ``discover-secrets`` ships no references/ directory at all.
+        out = json.loads(self._run(get_skill(name="discover-secrets")))
+        assert out["references"] == []
+
+    def test_fetches_reference_content(self) -> None:
+        out = json.loads(
+            self._run(get_skill(name="author-generation-rules", reference="references/concepts.md"))
+        )
+        assert out["name"] == "author-generation-rules"
+        assert out["uri"] == f"{SKILL_URI_SCHEME}author-generation-rules"
+        assert out["reference"] == "references/concepts.md"
+        assert out["content"]
+        assert "body" not in out
+
+    def test_rejects_parent_traversal(self) -> None:
+        out = json.loads(
+            self._run(get_skill(name="author-generation-rules", reference="../SKILL.md"))
+        )
+        assert "error" in out
+        assert "available_references" in out
+
+    def test_rejects_absolute_path(self) -> None:
+        out = json.loads(
+            self._run(get_skill(name="author-generation-rules", reference="/etc/passwd"))
+        )
+        assert "error" in out
+        assert "available_references" in out
+
+    def test_rejects_missing_file(self) -> None:
+        out = json.loads(
+            self._run(
+                get_skill(
+                    name="author-generation-rules",
+                    reference="references/does-not-exist.md",
+                )
+            )
+        )
+        assert "error" in out
+        assert "available_references" in out
 
 
 # ---------------------------------------------------------------------------

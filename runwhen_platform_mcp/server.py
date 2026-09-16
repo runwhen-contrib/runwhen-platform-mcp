@@ -467,6 +467,21 @@ def _get_skill_index(*, reload: bool = False) -> dict[str, dict[str, Any]]:
     return _skill_cache
 
 
+def _list_skill_references(skill_dir: Path) -> list[str]:
+    """Return sorted POSIX-relative paths of files under ``skill_dir/references/``.
+
+    Paths are relative to ``skill_dir`` (e.g. ``references/rules/x.md``) so
+    they can be passed straight back into ``get_skill(..., reference=...)``.
+    Returns an empty list when the skill ships no ``references/`` directory.
+    """
+    references_dir = skill_dir / "references"
+    if not references_dir.is_dir():
+        return []
+    return sorted(
+        p.relative_to(skill_dir).as_posix() for p in references_dir.rglob("*") if p.is_file()
+    )
+
+
 def _register_skill_resources(server: FastMCP) -> int:
     """Register every discovered skill as an MCP resource on ``server``.
 
@@ -5127,12 +5142,28 @@ async def get_skill(
         default=False,
         description="Force re-read from disk (default: use cached version).",
     ),
+    reference: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Optional path of a bundled reference file relative to the skill "
+                "directory, e.g. 'references/commands/datadog-morning-brief.md'. "
+                "When set, returns that file's content instead of the SKILL.md "
+                "body. Omit to get the SKILL.md body plus the list of available "
+                "references."
+            )
+        ),
+    ] = None,
 ) -> str:
-    """Return the full body of a skill by name.
+    """Return the full body of a skill by name, or one of its bundled reference files.
 
-    Returns ``{name, description, uri, body, path}`` on success or
-    ``{error, available}`` when the name is unknown so the agent can self-
-    correct without a second round-trip.
+    Returns ``{name, description, uri, body, path, references}`` on success
+    (``references`` lists bundled ``references/**`` files), or ``{error,
+    available}`` when the name is unknown so the agent can self-correct
+    without a second round-trip. Pass ``reference=<path>`` (one of the
+    ``references`` entries) to fetch that file's content instead —
+    MCP-only clients cannot read packaged files directly, so this is the
+    only way for them to see ``references/**`` assets.
     """
     index = _get_skill_index(reload=reload)
     skill = index.get(name)
@@ -5147,6 +5178,35 @@ async def get_skill(
                 "available": sorted(index.keys()),
             }
         )
+    skill_dir = Path(skill["path"]).resolve().parent
+    if reference is not None:
+        references_dir = (skill_dir / "references").resolve()
+        resolved = (skill_dir / reference).resolve()
+        invalid = (
+            Path(reference).is_absolute()
+            or ".." in Path(reference).parts
+            or not resolved.is_relative_to(references_dir)
+            or not resolved.is_file()
+        )
+        if invalid:
+            return _json_response(
+                {
+                    "error": f"Invalid reference {reference!r} for skill {name!r}.",
+                    "hint": (
+                        "``reference`` must be a relative path under the skill's "
+                        "``references/`` directory — see ``available_references``."
+                    ),
+                    "available_references": _list_skill_references(skill_dir),
+                }
+            )
+        return _json_response(
+            {
+                "name": skill["name"],
+                "uri": skill["uri"],
+                "reference": reference,
+                "content": resolved.read_text(encoding="utf-8"),
+            }
+        )
     return _json_response(
         {
             "name": skill["name"],
@@ -5154,6 +5214,7 @@ async def get_skill(
             "uri": skill["uri"],
             "body": skill["body"],
             "path": skill["path"],
+            "references": _list_skill_references(skill_dir),
         }
     )
 
