@@ -40,7 +40,7 @@ templates, and examples.
 | `discover-locations` | Finding available runner locations |
 | `configure-resource-path` | Setting resource paths for SLX indexing |
 | `configure-hierarchy` | Organizing SLXs with hierarchy tags |
-| `configure-datadog-workspace` | Tuning a workspace that has the Datadog MCP server connected — rules, KB, and scheduled Datadog digests |
+| `configure-datadog-workspace` | Installing the zero-input Datadog pack (rule, knowledge notes, digest commands) on a workspace with the Datadog MCP server |
 | `build-operational-context` | Building a RUNWHEN.md file for a project |
 
 ## Script Contract (quick reference)

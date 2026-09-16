@@ -1,6 +1,6 @@
 # Datadog MCP operating guide
 
-How to use the Datadog MCP server from this workspace. It is registered here as `{{MCP_SERVER_NAME}}`, so its tools are at `/mcp/{{MCP_SERVER_NAME}}/tools/`; if that path is absent the server was renamed, so run `ws_ls /mcp/` and use whichever server has a Datadog endpoint (`mcp.datadoghq.com`, `mcp.datadoghq.eu`, `mcp.us3.datadoghq.com`, `mcp.ddog-gov.com`). Environment scope is in the rule "datadog-environment-boundary". Name translation is in the note "Datadog and RunWhen naming". What this particular Datadog account does and does not contain is in "Datadog estate profile". Read the estate profile before assuming a product has data.
+How to use the Datadog MCP server from this workspace. Find it with `ws_ls /mcp/`: it is the server whose tools include `search_datadog_monitors`, or whose `endpoint_url` (`ws_cat /mcp/<name>`) is a Datadog host (`mcp.datadoghq.com`, `mcp.datadoghq.eu`, `mcp.us3.datadoghq.com`, `mcp.us5.datadoghq.com`, `mcp.ap1.datadoghq.com`, `mcp.ddog-gov.com`). Below, `<server>` means that name. Name translation lives in the note "Datadog and RunWhen naming". Accounts differ widely in what they collect, so check that a product holds data (section 2, first row) before relying on it.
 
 ## 1. Datadog vocabulary
 
@@ -25,6 +25,7 @@ How to use the Datadog MCP server from this workspace. It is registered here as 
 
 | Question | Tool and first call | Notes |
 |---|---|---|
+| Does this account have logs / APM / synthetics / process data at all? | `search_datadog_metrics` `name_filter: "trace synthetics datadog.process"` (OR-matched, one call), plus `search_datadog_logs` `query: "*"`, `from: now-24h`, `limit: 1` | Zero logs means logs are not indexed: stop querying logs and say so. No `trace.*` metrics means no APM. `/datadog-coverage` runs the full survey. |
 | How much is unhealthy right now? | `monitor_groups_search` `query: "-group_status:ok"`, `per_page: 30` | The response's `counts` block totals every group by status (`Alert`, `Warn`, `No Data`), type and tag in one cheap call. |
 | What is alerting right now? | `search_datadog_monitors` `query: "-status:ok muted:false"` | Catches Alert, Warn and No Data. Each monitor carries its full message (~500-800 tokens); set `max_tokens` and request only the tags you need via `include_tags`. |
 | Which hosts/namespaces inside a monitor are alerting? | `monitor_groups_search` with `monitor_id` and `query: "group_status:(alert OR warn)"` | Pass `monitor_id` as its own parameter, never inside `query`. |
@@ -33,12 +34,12 @@ How to use the Datadog MCP server from this workspace. It is registered here as 
 | Details of one alert transition | `search_datadog_events` `query: "source:alert @monitor_id:<id>"` | Each event is ~1.5k tokens. Only after aggregating. |
 | Are synthetic tests failing? | `get_synthetics_tests` `mode: configs`, `test_status: Alert` | Returns currently failing tests with `public_id`. |
 | Synthetic failures over the last N hours | `get_synthetics_tests` `mode: results`, `public_ids: [...]`, `result_status: failed`, `lookback_window: <minutes>` | Results mode needs `public_ids`. `lookback_window` is in **minutes** (default 15). |
-| Synthetic pass rate / latency trend | `get_datadog_metric` on `synthetics.test_runs` (count), `synthetics.http.response.time` (gauge) | Check tag keys first with `get_datadog_metric_context`; the estate profile records them. |
+| Synthetic pass rate / latency trend | `get_datadog_metric` on `synthetics.test_runs` (count), `synthetics.http.response.time` (gauge) | Check which tag keys hold pass/fail and the test name with `get_datadog_metric_context` first. |
 | Host inventory, agent versions, which VMs exist | `search_datadog_hosts` SQL, e.g. `SELECT hostname, tags->'project' AS project, tags->'zone' AS zone, agent_version FROM hosts WHERE hostname LIKE 'name%'` | DDSQL: repeat expressions in `GROUP BY`; no `->>`, `ANY()`, `current_timestamp`. |
 | Is a host's agent still reporting? | `get_datadog_metric` scalar `avg:datadog.agent.running{<scope>} by {host}` over a short window, compared with a longer window | A host that stopped reporting is **missing** from the result, not `0`. |
 | Host CPU / memory / disk | `get_datadog_metric` `system.cpu.user`, `system.mem.pct_usable`, `system.disk.in_use` `by {host}` | Use `top(query, N, 'max', 'desc')` in `formulas`. |
 | Top processes on VMs | `get_datadog_metric` `datadog.process.per_command.cpu.total_pct`, `datadog.process.per_command.memory.rss` `by {command}` | Distribution metrics. Indexed tag keys are limited (e.g. `command`, `env`, `kube_cluster_name`; often **not** `host`). Check with `get_datadog_metric_context`. |
-| APM golden signals for instrumented services | `get_datadog_metric` on the `trace.*` metrics listed in the estate profile, `by {service}` | Prefer trace metrics over `aggregate_spans` for rates and error counts; spans are sampled. |
+| APM golden signals for instrumented services | `get_datadog_metric` on the `trace.*.hits` / `.errors` / `.duration` metrics that exist (find them with the coverage row above), `by {service}` | Prefer trace metrics over `aggregate_spans` for rates and error counts; spans are sampled. |
 | Latency percentiles or breakdown by endpoint | `aggregate_spans` `computes: [{field:"@duration", aggregation:"p95"}]`, `group_by.fields: ["resource_name"]` | `@duration` is nanoseconds. Sampled data; say so. |
 | Kubernetes workload health in Datadog | `get_datadog_metric` `kubernetes_state.deployment.replicas_available`, `kubernetes.containers.restarts`, `kubernetes.containers.state.terminated{reason:oomkilled}` | Group by `kube_cluster_name,kube_namespace,kube_deployment`. |
 | What changed? | `search_datadog_events` `query: "source:change_tracking"`; `get_change_stories` for an APM service | Kubernetes events are `source:kubernetes` and do not include deploys. |
@@ -46,7 +47,7 @@ How to use the Datadog MCP server from this workspace. It is registered here as 
 | Which service owns / depends on X | `search_datadog_entities` `entity_type: service`, `query: "name:*stem*"` | Catalog data; may be sparse. |
 | Dashboards someone already built | `search_datadog_dashboards`, `get_datadog_dashboard` | Reuse their queries: they encode the account's real tag names. |
 
-Tools that require approval (for example `execute_code`) must never be used in scheduled runs: nobody is there to approve, and the run stalls until it times out. Available tools depend on the toolsets the server was registered with. If a tool in this table is missing from `ws_ls /mcp/{{MCP_SERVER_NAME}}/tools/`, say so and use the next-best tool.
+Tools that require approval (for example `execute_code`) must never be used in scheduled runs: nobody is there to approve, and the run stalls until it times out. Available tools depend on the toolsets the server was registered with. If a tool in this table is missing from `ws_ls /mcp/<server>/tools/`, say so and use the next-best tool.
 
 ## 3. Datadog's own skill guides
 
@@ -67,7 +68,7 @@ Some registrations expose `list_datadog_skills` and `load_datadog_skill`. They a
 - Same-field alternatives are grouped: `status:(alert OR warn)`, not `status:alert OR status:warn`.
 - `search_datadog_logs` is for raw lines and patterns only; counts go through `analyze_datadog_logs` (DDSQL).
 - Wildcards do not work inside quotes.
-- Tag terms in `search_datadog_monitors` and `monitor_groups_search` match the **monitor's own tags**, not the group values it alerts on. A multi-alert monitor tagged only `integration:kubernetes` will not match `kube_cluster_name:prod`. If monitors are not tagged by environment (see the estate profile), search without the scope term and keep only groups whose group string contains the scope.
+- Tag terms in `search_datadog_monitors` and `monitor_groups_search` match the **monitor's own tags**, not the group values it alerts on. A multi-alert monitor tagged only `integration:kubernetes` will not match `kube_cluster_name:prod`. If monitors are not tagged by environment (check a few with `include_tags`), search without the scope term and keep only groups whose group string contains the scope.
 
 ## 5. Keeping responses small
 

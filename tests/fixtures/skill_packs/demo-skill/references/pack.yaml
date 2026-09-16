@@ -1,8 +1,12 @@
 version: 1
-placeholders:
-  - name: WORKSPACE_ENV
-    description: "The workspace environment label this pack is scoped to."
-    example: "staging"
+id: demo-skill
+title: Demo Skill
+description: "Fixture skill pack used to exercise validate_pack() in tests/test_skill_packs.py."
+match:
+  mcp_catalog_ids:
+    - demo
+  mcp_endpoint_hosts:
+    - mcp.demo.example.com
 items:
   - kind: rule
     name: demo-rule
@@ -10,10 +14,7 @@ items:
   - kind: knowledge
     name: "Demo Knowledge Article"
     file: knowledge/demo-knowledge.md
-    scope: global
   - kind: command
     name: demo-command
     file: commands/demo-command.md
     description: "Run the demo digest command."
-    schedule:
-      cron: "0 8 * * 1-5"

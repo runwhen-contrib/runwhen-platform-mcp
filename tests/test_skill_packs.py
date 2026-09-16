@@ -8,33 +8,38 @@ file is deliberately generic: it discovers every
 must SKIP cleanly — not fail — when no pack.yaml exists yet, since real
 packs are authored concurrently with this test.
 
+Packs must need zero user input: there are no placeholders, and every pack
+declares which MCP servers it applies to (by catalog id and/or endpoint
+host) so an installer can decide whether to install it without asking the
+user anything.
+
 Manifest schema (see ``tests/fixtures/skill_packs/demo-skill`` for a worked
 example)::
 
     version: 1
-    placeholders:                # every {{NAME}} token used by any item file
-      - name: WORKSPACE_ENV      # must be declared here. ^[A-Z][A-Z0-9_]*$
-        description: "..."       # required, non-empty
-        example: "staging"       # required, non-empty string
+    id: datadog                      # ^[a-z0-9][a-z0-9-]*$
+    title: Datadog MCP               # non-empty string
+    description: "..."               # non-empty string
+    match:                           # at least one list present and non-empty
+      mcp_catalog_ids: [datadog]     # each ^[a-z0-9][a-z0-9-]*$
+      mcp_endpoint_hosts:            # bare hostnames: has a dot, no "://",
+        - mcp.datadoghq.com          # no "/", no spaces, lowercase
     items:
       - kind: rule                        # rule | knowledge | command
-        name: datadog-environment-boundary # ^[A-Za-z0-9_-]+$
-        file: rules/datadog-environment-boundary.md   # relative to references/
+        name: datadog-mcp                 # ^[A-Za-z0-9_-]+$
+        file: rules/datadog-mcp.md         # relative to references/
       - kind: knowledge
         name: "Datadog MCP operating guide"  # KB title, <= 255 chars
         file: knowledge/datadog-operating-guide.md
-        scope: global                        # global | resource (required)
       - kind: command
         name: datadog-morning-brief           # ^[A-Za-z0-9_-]+$
         file: commands/datadog-morning-brief.md
         description: "..."                    # required for command
-        schedule:                             # optional
-          cron: "0 8 * * 1-5"                # exactly 5 whitespace-separated fields
 
-Size limits on raw file text: rule <= 1500 chars (rules are injected into
-every model call), knowledge <= 20000 chars (papi NoteCreateV4 limit),
-knowledge with ``scope: resource`` <= 3200 chars (agentfarm auto-inject
-truncation), command <= 12000 chars.
+No other top-level or item keys are allowed. Size limits on raw file text:
+rule <= 1500 chars (rules are injected into every model call), knowledge <=
+20000 chars (papi NoteCreateV4 limit), command <= 12000 chars. No item file
+may contain a ``{{...}}`` template token — packs must need no user input.
 """
 
 from __future__ import annotations
@@ -52,15 +57,35 @@ from runwhen_platform_mcp.server import _skills_root
 # Schema constants
 # ---------------------------------------------------------------------------
 
-PLACEHOLDER_TOKEN_RE = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ITEM_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+TEMPLATE_TOKEN_RE = re.compile(r"\{\{[^}]*\}\}")
 VALID_KINDS = {"rule", "knowledge", "command"}
 # Subdirectories scanned for orphaned (unreferenced) .md files, independent
 # of what any individual item's ``file`` actually points at.
 ORPHAN_SCAN_SUBDIRS = ("rules", "knowledge", "commands")
 KIND_CHAR_LIMITS = {"rule": 1500, "knowledge": 20000, "command": 12000}
-KNOWLEDGE_RESOURCE_SCOPE_LIMIT = 3200
 KNOWLEDGE_NAME_MAX_LEN = 255
+ALLOWED_TOP_LEVEL_KEYS = {"version", "id", "title", "description", "match", "items"}
+ALLOWED_MATCH_KEYS = {"mcp_catalog_ids", "mcp_endpoint_hosts"}
+BASE_ITEM_KEYS = {"kind", "name", "file"}
+ITEM_KEYS_BY_KIND = {
+    "rule": BASE_ITEM_KEYS,
+    "knowledge": BASE_ITEM_KEYS,
+    "command": BASE_ITEM_KEYS | {"description"},
+}
+
+
+def _is_bare_hostname(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and "." in value
+        and "://" not in value
+        and "/" not in value
+        and " " not in value
+        and value == value.lower()
+    )
 
 
 def validate_pack(pack_yaml_path: Path) -> list[str]:
@@ -88,46 +113,77 @@ def validate_pack(pack_yaml_path: Path) -> list[str]:
     if not isinstance(manifest, dict):
         return [f"{label}: manifest must be a YAML mapping"]
 
+    unknown_top_level_keys = set(manifest) - ALLOWED_TOP_LEVEL_KEYS
+    if "placeholders" in unknown_top_level_keys:
+        errors.append(f"{label}: packs must not declare placeholders")
+        unknown_top_level_keys.discard("placeholders")
+    for key in sorted(unknown_top_level_keys):
+        errors.append(f"{label}: unknown top-level key {key!r}")
+
     if manifest.get("version") != 1:
         errors.append(f"{label}: 'version' must be 1, got {manifest.get('version')!r}")
+
+    pack_id = manifest.get("id")
+    if not isinstance(pack_id, str) or not ID_RE.match(pack_id):
+        errors.append(f"{label}: 'id' must match ^[a-z0-9][a-z0-9-]*$, got {pack_id!r}")
+
+    title = manifest.get("title")
+    if not isinstance(title, str) or not title.strip():
+        errors.append(f"{label}: 'title' is required and must be a non-empty string")
+
+    description = manifest.get("description")
+    if not isinstance(description, str) or not description.strip():
+        errors.append(f"{label}: 'description' is required and must be a non-empty string")
+
+    match = manifest.get("match")
+    if not isinstance(match, dict):
+        errors.append(f"{label}: 'match' is required and must be a mapping")
+        match = {}
+    else:
+        for key in sorted(set(match) - ALLOWED_MATCH_KEYS):
+            errors.append(f"{label}: unknown key {key!r} in 'match'")
+
+    catalog_ids = match.get("mcp_catalog_ids")
+    if catalog_ids is None:
+        catalog_ids = []
+    elif not isinstance(catalog_ids, list):
+        errors.append(f"{label}: 'match.mcp_catalog_ids' must be a list")
+        catalog_ids = []
+    else:
+        for i, catalog_id in enumerate(catalog_ids):
+            if not isinstance(catalog_id, str) or not ID_RE.match(catalog_id):
+                errors.append(
+                    f"{label}: match.mcp_catalog_ids[{i}] must match "
+                    f"^[a-z0-9][a-z0-9-]*$, got {catalog_id!r}"
+                )
+
+    endpoint_hosts = match.get("mcp_endpoint_hosts")
+    if endpoint_hosts is None:
+        endpoint_hosts = []
+    elif not isinstance(endpoint_hosts, list):
+        errors.append(f"{label}: 'match.mcp_endpoint_hosts' must be a list")
+        endpoint_hosts = []
+    else:
+        for i, host in enumerate(endpoint_hosts):
+            if not _is_bare_hostname(host):
+                errors.append(
+                    f"{label}: match.mcp_endpoint_hosts[{i}] must be a bare lowercase "
+                    f"hostname (no scheme, path, or spaces), got {host!r}"
+                )
+
+    if not catalog_ids and not endpoint_hosts:
+        errors.append(
+            f"{label}: 'match' must declare at least one non-empty 'mcp_catalog_ids' "
+            "or 'mcp_endpoint_hosts' list"
+        )
 
     items = manifest.get("items")
     if not isinstance(items, list) or not items:
         errors.append(f"{label}: 'items' must be a non-empty list")
         items = []
 
-    placeholders = manifest.get("placeholders")
-    if placeholders is None:
-        placeholders = []
-    if not isinstance(placeholders, list):
-        errors.append(f"{label}: 'placeholders' must be a list")
-        placeholders = []
-
-    declared_placeholders: dict[str, int] = {}
-    for i, ph in enumerate(placeholders):
-        ph_label = f"{label}: placeholders[{i}]"
-        if not isinstance(ph, dict):
-            errors.append(f"{ph_label}: must be a mapping")
-            continue
-        name = ph.get("name")
-        if not isinstance(name, str) or not name:
-            errors.append(f"{ph_label}: 'name' is required")
-            continue
-        declared_placeholders[name] = declared_placeholders.get(name, 0) + 1
-        description = ph.get("description")
-        if not isinstance(description, str) or not description.strip():
-            errors.append(f"{label}: placeholder {name!r} requires a non-empty 'description'")
-        example = ph.get("example")
-        if not isinstance(example, str) or not example.strip():
-            errors.append(f"{label}: placeholder {name!r} requires a non-empty 'example'")
-
-    for name, count in declared_placeholders.items():
-        if count > 1:
-            errors.append(f"{label}: placeholder {name!r} declared {count} times")
-
     seen_names: set[tuple[str, str]] = set()
     referenced_files: set[Path] = set()
-    used_tokens: set[str] = set()
 
     for i, item in enumerate(items):
         item_label = f"{label}: items[{i}]"
@@ -151,6 +207,10 @@ def validate_pack(pack_yaml_path: Path) -> list[str]:
         # From here on, name a specific item in every message.
         item_label = f"{label}: item {name!r} ({kind})"
 
+        allowed_keys = ITEM_KEYS_BY_KIND[kind]
+        for key in sorted(set(item) - allowed_keys):
+            errors.append(f"{item_label}: unknown key {key!r}")
+
         key = (kind, name)
         if key in seen_names:
             errors.append(f"{label}: duplicate {kind} name {name!r}")
@@ -164,28 +224,10 @@ def validate_pack(pack_yaml_path: Path) -> list[str]:
                 f"exceeds the {KNOWLEDGE_NAME_MAX_LEN}-char limit"
             )
 
-        if kind == "knowledge":
-            scope = item.get("scope")
-            if scope not in ("global", "resource"):
-                errors.append(
-                    f"{item_label}: 'scope' must be 'global' or 'resource', got {scope!r}"
-                )
-
         if kind == "command":
-            description = item.get("description")
-            if not isinstance(description, str) or not description.strip():
+            command_description = item.get("description")
+            if not isinstance(command_description, str) or not command_description.strip():
                 errors.append(f"{item_label}: command requires a non-empty 'description'")
-            schedule = item.get("schedule")
-            if schedule is not None:
-                if not isinstance(schedule, dict):
-                    errors.append(f"{item_label}: 'schedule' must be a mapping")
-                else:
-                    cron = schedule.get("cron")
-                    if not isinstance(cron, str) or len(cron.split()) != 5:
-                        errors.append(
-                            f"{item_label}: schedule.cron must have exactly 5 "
-                            f"whitespace-separated fields, got {cron!r}"
-                        )
 
         file_rel = item.get("file")
         if not isinstance(file_rel, str) or not file_rel:
@@ -204,23 +246,17 @@ def validate_pack(pack_yaml_path: Path) -> list[str]:
             errors.append(f"{item_label}: file {file_rel!r} is empty")
 
         limit = KIND_CHAR_LIMITS[kind]
-        if kind == "knowledge" and item.get("scope") == "resource":
-            limit = KNOWLEDGE_RESOURCE_SCOPE_LIMIT
         if len(text) > limit:
             errors.append(
                 f"{item_label}: file {file_rel!r} is {len(text)} chars, "
                 f"exceeds the {limit}-char limit for kind {kind!r}"
             )
 
-        used_tokens |= set(PLACEHOLDER_TOKEN_RE.findall(text))
-
-    declared_names = set(declared_placeholders)
-    for token in sorted(used_tokens - declared_names):
-        errors.append(
-            f"{label}: placeholder {{{{{token}}}}} used but not declared in 'placeholders'"
-        )
-    for name in sorted(declared_names - used_tokens):
-        errors.append(f"{label}: placeholder {name!r} declared but never used by any item file")
+        if TEMPLATE_TOKEN_RE.search(text):
+            errors.append(
+                f"{item_label}: file {file_rel!r} contains a {{{{...}}}} template token; "
+                "packs must need no user input"
+            )
 
     for subdir in ORPHAN_SCAN_SUBDIRS:
         subdir_path = references_dir / subdir
@@ -279,12 +315,57 @@ class TestValidatePackFixture:
         manifest = FIXTURES_ROOT / "demo-skill" / "references" / "pack.yaml"
         assert validate_pack(manifest) == []
 
-    def test_undeclared_placeholder_is_an_error(self, tmp_path: Path) -> None:
+    def test_template_token_in_file_is_an_error(self, tmp_path: Path) -> None:
         pack_dir = _copy_demo_pack(tmp_path)
         knowledge_file = pack_dir / "references" / "knowledge" / "demo-knowledge.md"
-        knowledge_file.write_text(knowledge_file.read_text() + "\n{{UNDECLARED_TOKEN}}\n")
+        knowledge_file.write_text(knowledge_file.read_text() + "\n{{SOME_TOKEN}}\n")
         errors = validate_pack(pack_dir / "references" / "pack.yaml")
-        assert any("UNDECLARED_TOKEN" in e for e in errors), errors
+        assert any("template token" in e for e in errors), errors
+
+    def test_placeholders_key_is_an_error(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["placeholders"] = []
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("packs must not declare placeholders" in e for e in errors), errors
+
+    def test_missing_match_is_an_error(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        del manifest["match"]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("match" in e for e in errors), errors
+
+    def test_match_with_both_lists_empty_is_an_error(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["match"] = {"mcp_catalog_ids": [], "mcp_endpoint_hosts": []}
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("match" in e for e in errors), errors
+
+    def test_bad_hostname_is_an_error(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["match"]["mcp_endpoint_hosts"] = ["https://mcp.x.com"]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("hostname" in e for e in errors), errors
+
+    def test_unknown_item_key_is_an_error(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["items"][0]["schedule"] = {"cron": "0 8 * * 1-5"}
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("schedule" in e for e in errors), errors
 
     def test_oversize_rule_is_an_error(self, tmp_path: Path) -> None:
         pack_dir = _copy_demo_pack(tmp_path)
@@ -293,26 +374,11 @@ class TestValidatePackFixture:
         errors = validate_pack(pack_dir / "references" / "pack.yaml")
         assert any("1500" in e for e in errors), errors
 
-    def test_missing_referenced_file_is_an_error(self, tmp_path: Path) -> None:
-        pack_dir = _copy_demo_pack(tmp_path)
-        (pack_dir / "references" / "commands" / "demo-command.md").unlink()
-        errors = validate_pack(pack_dir / "references" / "pack.yaml")
-        assert any("does not exist" in e for e in errors), errors
-
     def test_orphan_file_is_an_error(self, tmp_path: Path) -> None:
         pack_dir = _copy_demo_pack(tmp_path)
         (pack_dir / "references" / "rules" / "orphan-rule.md").write_text("An orphan rule.\n")
         errors = validate_pack(pack_dir / "references" / "pack.yaml")
         assert any("orphan" in e.lower() for e in errors), errors
-
-    def test_bad_cron_is_an_error(self, tmp_path: Path) -> None:
-        pack_dir = _copy_demo_pack(tmp_path)
-        manifest_path = pack_dir / "references" / "pack.yaml"
-        manifest = yaml.safe_load(manifest_path.read_text())
-        manifest["items"][2]["schedule"]["cron"] = "0 8 * *"  # only 4 fields
-        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
-        errors = validate_pack(manifest_path)
-        assert any("cron" in e for e in errors), errors
 
     def test_duplicate_name_within_kind_is_an_error(self, tmp_path: Path) -> None:
         pack_dir = _copy_demo_pack(tmp_path)
@@ -322,3 +388,12 @@ class TestValidatePackFixture:
         manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
         errors = validate_pack(manifest_path)
         assert any("duplicate" in e.lower() for e in errors), errors
+
+    def test_command_missing_description_is_an_error(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        del manifest["items"][2]["description"]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("description" in e for e in errors), errors

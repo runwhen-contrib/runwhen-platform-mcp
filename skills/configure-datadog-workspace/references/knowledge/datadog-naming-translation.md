@@ -51,9 +51,9 @@ Worked example: one platform component, three names. The workspace indexes `kube
 
 `get_datadog_metric`, `response_format: scalar`, `from: now-1h`, query object `{name:"avail", query:"avg:kubernetes_state.deployment.replicas_available{kube_deployment:*<stem>*} by {kube_cluster_name,kube_namespace,kube_deployment,env}", aggregator:"last"}`. Every copy of the workload comes back with its real cluster, namespace and `env`. Use `kubernetes_state.statefulset.replicas_ready` with `kube_stateful_set` for StatefulSets.
 
-**B. {{WORKSPACE_ENV}} resource → its Datadog counterpart**
+**B. Workspace resource → its Datadog counterpart**
 
-Read the "Datadog environment map" note for the resource's cluster or project. Apply its substitution (for example cluster and namespace swap, name prefix change), then confirm with recipe A. If the map has no entry, run recipe A on the name stem and present the candidates. Do not pick one silently.
+Datadog may watch a different environment from this workspace (for example, production while the workspace discovered staging), so the same service often has a differently named twin. Run recipe A on the name stem with no cluster filter and present every candidate with its `kube_cluster_name`, `kube_namespace` and `env`. Say which one you use and why (matching namespace pattern, the only production cluster). If the candidates are ambiguous, list them and ask; never pick one silently, and never describe the Datadog twin as the workspace resource itself.
 
 **C. VM or instance name → Datadog host**
 
