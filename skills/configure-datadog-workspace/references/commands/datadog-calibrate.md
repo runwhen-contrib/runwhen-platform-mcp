@@ -2,14 +2,14 @@ Calibrate this workspace's knowledge of its Datadog account. Discover what the D
 
 ## Rules for this run
 
-- Read-only Datadog tools through `mcp_call` on server `datadog` only. No tool that requires approval.
+- Read-only Datadog tools through `mcp_call` on server `{{MCP_SERVER_NAME}}` only. No tool that requires approval.
 - Do not guess. Every value you report must come from a tool response in this run; otherwise write `unknown`.
 - Set `max_tokens` ≤ 6000 on every call. At most 18 Datadog calls.
 - Current assumptions: Datadog covers {{DD_ENV_LABEL}}, scoped by {{DD_SCOPE_FILTER}}; workspace resources are {{WORKSPACE_ENV}}. Report evidence that contradicts these.
 
 ## Steps
 
-1. **Tools.** `ws_ls /mcp/datadog/tools/`. Record whether these exist: `search_datadog_monitors`, `monitor_groups_search`, `search_datadog_slos`, `get_synthetics_tests`, `search_datadog_hosts`, `aggregate_events`, `search_datadog_incidents`, `get_change_stories`, `list_datadog_skills`, `load_datadog_skill`. Record every tool marked as requiring approval.
+1. **Tools.** `ws_ls /mcp/{{MCP_SERVER_NAME}}/tools/`. Record whether these exist: `search_datadog_monitors`, `monitor_groups_search`, `search_datadog_slos`, `get_synthetics_tests`, `search_datadog_hosts`, `aggregate_events`, `search_datadog_incidents`, `get_change_stories`, `list_datadog_skills`, `load_datadog_skill`. Record every tool marked as requiring approval.
 2. **Environments and clusters.** `get_datadog_metric`, `response_format: "scalar"`, `from: now-1h`, query object `{query:"sum:datadog.agent.running{*} by {env,kube_cluster_name}", aggregator:"last"}`. Lists the `env` values and clusters that have agents. Note clusters whose `env` does not match their real purpose.
 3. **Hosts.** `search_datadog_hosts`: `SELECT cloud_provider, os, tags->'project' AS project, tags->'env' AS env, COUNT(*) AS hosts FROM hosts GROUP BY cloud_provider, os, tags->'project', tags->'env' ORDER BY hosts DESC LIMIT 50`. Then `SELECT COUNT(*) AS vms FROM hosts WHERE tags->'kube_cluster_name' IS NULL` for non-Kubernetes hosts.
 4. **Processes.** `search_datadog_metrics`, `name_filter: "datadog.process"`. If `datadog.process.per_command.cpu.total_pct` exists, `get_datadog_metric_context` on it for its indexed tag keys (note whether `host` is one).

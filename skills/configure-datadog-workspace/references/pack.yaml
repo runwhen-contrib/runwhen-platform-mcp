@@ -7,6 +7,12 @@
 version: 1
 
 placeholders:
+  - name: MCP_SERVER_NAME
+    description: >-
+      The name this workspace registered the Datadog MCP server under. It is
+      the customer's own label, so it is NOT always "datadog" — take it from
+      the registration, and select the pack by the endpoint URL host instead.
+    example: "dd-prod"
   - name: WORKSPACE_ENV
     description: Environment of the resources discovered into this workspace.
     example: "staging"

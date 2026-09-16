@@ -5,7 +5,7 @@ description: "Tune a RunWhen workspace that has the Datadog MCP server connected
 
 # Configure a Datadog workspace
 
-Workspace chat talks to Datadog through a generic MCP bridge (`ws_ls /mcp/datadog/tools/`, `mcp_call`). It knows nothing about Datadog's vocabulary, its tag names, or which environment Datadog covers. Without guidance it guesses argument names, uses Loki-style keys (`namespace:`, `container:`) that do not exist in Datadog, and concludes "no data" from its own wrong filters. This skill installs a tested pack that fixes those failure modes and turns Datadog into scheduled digests the team reads every day.
+Workspace chat talks to Datadog through a generic MCP bridge (`ws_ls /mcp/<server-name>/tools/`, `mcp_call`). It knows nothing about Datadog's vocabulary, its tag names, or which environment Datadog covers. Without guidance it guesses argument names, uses Loki-style keys (`namespace:`, `container:`) that do not exist in Datadog, and concludes "no data" from its own wrong filters. This skill installs a tested pack that fixes those failure modes and turns Datadog into scheduled digests the team reads every day.
 
 All pack content lives in `references/` and is listed in `references/pack.yaml`. Read files with `get_skill(name="configure-datadog-workspace", reference="references/<path>")`, or from disk if your client loads skills from the filesystem.
 
@@ -26,10 +26,14 @@ All pack content lives in `references/` and is listed in `references/pack.yaml`.
 
 ### 1. Preflight: the MCP registration
 
+**Identify the server by its endpoint URL, not its name.** A workspace can register Datadog under any label (`dd-prod`, `observability`, ...), and may register more than one — a production org and a staging org are separate servers. The Datadog hosts are `mcp.datadoghq.com`, `mcp.datadoghq.eu`, `mcp.us3.datadoghq.com`, `mcp.us5.datadoghq.com`, `mcp.ap1.datadoghq.com` and `mcp.ddog-gov.com`. The registered name becomes `{{MCP_SERVER_NAME}}` in every pack item; the site in the URL tells you which Datadog UI the explorer links point at, and a `?toolsets=` parameter tells you what will be missing before you ask.
+
+**If two Datadog servers are registered**, install one set of parameterized items per server (distinct rule and note names, each with its own `{{MCP_SERVER_NAME}}`, `{{DD_ENV_LABEL}}` and `{{DD_SCOPE_FILTER}}`), and keep one shared copy of the generic notes. Say plainly in the boundary rule which server covers which estate.
+
 Ask workspace chat to list the server's tools. There is no direct tool for this.
 
 ```
-workspace_chat(workspace_name="<ws>", message="Run ws_ls /mcp/datadog/tools/ and report: total tool count, whether monitor_groups_search, search_datadog_slos, get_synthetics_tests, search_datadog_hosts, aggregate_events, list_datadog_skills exist, and every tool that requires approval.")
+workspace_chat(workspace_name="<ws>", message="Run ws_ls /mcp/ to find the Datadog server's registered name, then ws_ls /mcp/<that name>/tools/ and report: total tool count, whether monitor_groups_search, search_datadog_slos, get_synthetics_tests, search_datadog_hosts, aggregate_events, list_datadog_skills exist, and every tool that requires approval.")
 ```
 
 Check against these recommendations. Fix the registration before installing anything:

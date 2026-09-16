@@ -2,7 +2,7 @@ Produce the weekly **Datadog monitor hygiene report** for {{DD_ENV_LABEL}}: whic
 
 ## Ground rules for this run
 
-- Read-only Datadog tools through `mcp_call` on server `datadog` are allowed and **required**, including when scheduled. No tool that requires approval.
+- Read-only Datadog tools through `mcp_call` on server `{{MCP_SERVER_NAME}}` are allowed and **required**, including when scheduled. No tool that requires approval.
 - Read "Datadog estate profile" and "Datadog MCP operating guide" first. Scope with {{DD_SCOPE_FILTER}}. Window: `from: now-7d`, `to: now`.
 - Budget: at most 10 Datadog calls, `max_tokens` ≤ 6000 each.
 

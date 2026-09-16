@@ -2,11 +2,11 @@ Produce the **{{DD_ENV_LABEL}} evening wrap** from Datadog: how the day went, wh
 
 ## Ground rules for this run
 
-- Read-only Datadog tools through `mcp_call` on server `datadog` are allowed and **required** in this run, including when it is scheduled. Never call a tool that requires approval (e.g. `execute_code`).
+- Read-only Datadog tools through `mcp_call` on server `{{MCP_SERVER_NAME}}` are allowed and **required** in this run, including when it is scheduled. Never call a tool that requires approval (e.g. `execute_code`).
 - Read the knowledge notes "Datadog estate profile" and "Datadog MCP operating guide" first. Skip products the profile lists under blind spots. Do not load Datadog skill guides.
 - Scope every query with {{DD_SCOPE_FILTER}}. Window: `from: now-10h`, `to: now` (the working day). Baseline: the same window one week earlier.
 - Budget: at most 12 Datadog calls, each with `max_tokens` ≤ 6000. Aggregate first; drill into the top 3 only.
-- If a tool is missing from `/mcp/datadog/tools/`, skip that section and list it under Coverage.
+- If a tool is missing from `/mcp/{{MCP_SERVER_NAME}}/tools/`, skip that section and list it under Coverage.
 
 ## Call plan
 

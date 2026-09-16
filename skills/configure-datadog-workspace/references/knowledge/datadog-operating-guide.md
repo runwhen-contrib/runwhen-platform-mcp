@@ -1,6 +1,6 @@
 # Datadog MCP operating guide
 
-How to use the Datadog MCP server (`/mcp/datadog/`) from this workspace. Environment scope is in the rule "datadog-environment-boundary". Name translation is in the note "Datadog and RunWhen naming". What this particular Datadog account does and does not contain is in "Datadog estate profile". Read the estate profile before assuming a product has data.
+How to use the Datadog MCP server from this workspace. It is registered here as `{{MCP_SERVER_NAME}}`, so its tools are at `/mcp/{{MCP_SERVER_NAME}}/tools/`; if that path is absent the server was renamed, so run `ws_ls /mcp/` and use whichever server has a Datadog endpoint (`mcp.datadoghq.com`, `mcp.datadoghq.eu`, `mcp.us3.datadoghq.com`, `mcp.ddog-gov.com`). Environment scope is in the rule "datadog-environment-boundary". Name translation is in the note "Datadog and RunWhen naming". What this particular Datadog account does and does not contain is in "Datadog estate profile". Read the estate profile before assuming a product has data.
 
 ## 1. Datadog vocabulary
 
@@ -46,7 +46,7 @@ How to use the Datadog MCP server (`/mcp/datadog/`) from this workspace. Environ
 | Which service owns / depends on X | `search_datadog_entities` `entity_type: service`, `query: "name:*stem*"` | Catalog data; may be sparse. |
 | Dashboards someone already built | `search_datadog_dashboards`, `get_datadog_dashboard` | Reuse their queries: they encode the account's real tag names. |
 
-Tools that require approval (for example `execute_code`) must never be used in scheduled runs: nobody is there to approve, and the run stalls until it times out. Available tools depend on the toolsets the server was registered with. If a tool in this table is missing from `ws_ls /mcp/datadog/tools/`, say so and use the next-best tool.
+Tools that require approval (for example `execute_code`) must never be used in scheduled runs: nobody is there to approve, and the run stalls until it times out. Available tools depend on the toolsets the server was registered with. If a tool in this table is missing from `ws_ls /mcp/{{MCP_SERVER_NAME}}/tools/`, say so and use the next-best tool.
 
 ## 3. Datadog's own skill guides
 
