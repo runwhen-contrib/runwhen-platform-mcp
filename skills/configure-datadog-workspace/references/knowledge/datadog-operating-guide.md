@@ -1,6 +1,6 @@
 # Datadog MCP operating guide
 
-How to use the Datadog MCP server from this workspace. Find it with `ws_ls /mcp/`: it is the server whose tools include `search_datadog_monitors`, or whose `endpoint_url` (`ws_cat /mcp/<name>`) is a Datadog host (`mcp.datadoghq.com`, `mcp.datadoghq.eu`, `mcp.us3.datadoghq.com`, `mcp.us5.datadoghq.com`, `mcp.ap1.datadoghq.com`, `mcp.ddog-gov.com`). Below, `<server>` means that name. Name translation lives in the note "Datadog and RunWhen naming". Accounts differ widely in what they collect, so check that a product holds data (section 2, first row) before relying on it.
+How to use the Datadog MCP server from this workspace. Find it with `ws_ls /mcp/`: it is the server whose tools include `search_datadog_monitors`, or whose `endpoint_url` (`ws_cat /mcp/<name>`) is a Datadog host (`mcp.datadoghq.com`, `mcp.datadoghq.eu`, `mcp.us3.datadoghq.com`, `mcp.us5.datadoghq.com`, `mcp.ap1.datadoghq.com`, `mcp.ddog-gov.com`). Below, `<server>` means that name. Name translation lives in the note `datadog-runwhen-naming` (`ws_cat /.runwhen/knowledge/datadog-runwhen-naming`). Accounts differ widely in what they collect, so check that a product holds data (section 2, first row) before relying on it.
 
 ## 1. Datadog vocabulary
 

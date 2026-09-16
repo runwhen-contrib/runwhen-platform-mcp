@@ -19,8 +19,8 @@ Read item files with `get_skill(name="configure-datadog-workspace", reference="r
 | Kind | Item | Why |
 |---|---|---|
 | Rule | `datadog-mcp` | Injected on every model call, so it stays under 1,500 characters: find the server, read the guide, schema first, resolve names, treat zero results as a wrong filter, never mistake Datadog data for a workspace resource. Ignores itself when no Datadog server is registered. |
-| Knowledge | Datadog MCP operating guide | Vocabulary, which tool for which question, argument traps, response-size discipline. |
-| Knowledge | Datadog and RunWhen naming | Kubernetes/GKE/GCE/GCP tag translation and resolution recipes that work without logs. |
+| Knowledge | `datadog-mcp-operating-guide` | Vocabulary, which tool for which question, argument traps, response-size discipline. |
+| Knowledge | `datadog-runwhen-naming` | Kubernetes/GKE/GCE/GCP tag translation and resolution recipes that work without logs. |
 | Command | `datadog-coverage` | Surveys what the account actually contains (logs, APM, synthetics, processes, hosts, monitors). |
 | Command | `datadog-resolve` | Maps a workspace resource or name to its Datadog identity, including counterparts in another environment. |
 | Command | `datadog-morning-brief`, `datadog-evening-wrap`, `datadog-monitor-hygiene` | Digests with a fixed call plan, fixed sections and a call budget. Run on demand, or schedule them. |
@@ -57,7 +57,7 @@ For each item in `pack.yaml`, read its file and create it exactly as written:
 
 ```
 create_chat_rule(name="datadog-mcp", rule_content=<file>, scope_type="workspace", scope_id="<ws>", workspace_name="<ws>")
-create_knowledge_base_article(workspace_name="<ws>", title="Datadog MCP operating guide", content=<file>, resource_paths=[])
+create_knowledge_base_article(workspace_name="<ws>", title="datadog-mcp-operating-guide", content=<file>, resource_paths=[])
 create_chat_command(name="datadog-morning-brief", command_content=<file>, description=<from pack.yaml>, scope_type="workspace", scope_id="<ws>")
 ```
 

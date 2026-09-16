@@ -3,7 +3,7 @@ Produce the weekly **Datadog monitor hygiene report**: which monitors wake peopl
 ## Ground rules for this run
 
 - Read-only tools on the Datadog MCP server, called through `mcp_call`, are allowed and **required**, including when scheduled. Find the server with `ws_ls /mcp/` (its tools include `search_datadog_monitors`). No tool that requires approval.
-- Read the knowledge note "Datadog MCP operating guide" first. Window: `from: now-7d`, `to: now`. Covers the whole connected account.
+- Read the knowledge note first: `ws_cat /.runwhen/knowledge/datadog-mcp-operating-guide`. Window: `from: now-7d`, `to: now`. Covers the whole connected account.
 - Budget: at most 10 Datadog calls, `max_tokens` ≤ 6000 each.
 
 ## Call plan

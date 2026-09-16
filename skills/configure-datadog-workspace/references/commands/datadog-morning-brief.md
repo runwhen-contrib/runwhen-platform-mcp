@@ -3,7 +3,7 @@ Produce the **Datadog morning brief**: what happened overnight in the connected 
 ## Ground rules for this run
 
 - Read-only tools on the Datadog MCP server, called through `mcp_call`, are allowed and **required** in this run, including when it is scheduled. Find the server with `ws_ls /mcp/` (its tools include `search_datadog_monitors`). Never call a tool that requires approval (e.g. `execute_code`).
-- Read the knowledge note "Datadog MCP operating guide" first. Do not load Datadog skill guides; the query shapes below are enough.
+- Read the knowledge note first: `ws_cat /.runwhen/knowledge/datadog-mcp-operating-guide`. Do not load Datadog skill guides; the query shapes below are enough.
 - The report covers the whole connected Datadog account. Datadog may watch a different environment from this workspace's resources, so group findings by `kube_cluster_name`, `project` or `env` and never present them as the state of a workspace resource.
 - Window: `from: now-14h`, `to: now` (since the evening wrap). Baseline: the same window one week earlier.
 - Budget: at most 16 Datadog calls. Always set `max_tokens` (≤ 6000). Aggregate first; open raw events or test results only for the top 3 items.

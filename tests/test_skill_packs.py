@@ -29,7 +29,7 @@ example)::
         name: datadog-mcp                 # ^[A-Za-z0-9_-]+$
         file: rules/datadog-mcp.md         # relative to references/
       - kind: knowledge
-        name: "Datadog MCP operating guide"  # KB title, <= 255 chars
+        name: datadog-mcp-operating-guide   # KB title: hyphen-separated slug, <= 255 chars
         file: knowledge/datadog-operating-guide.md
       - kind: command
         name: datadog-morning-brief           # ^[A-Za-z0-9_-]+$
@@ -66,6 +66,9 @@ VALID_KINDS = {"rule", "knowledge", "command"}
 ORPHAN_SCAN_SUBDIRS = ("rules", "knowledge", "commands")
 KIND_CHAR_LIMITS = {"rule": 1500, "knowledge": 20000, "command": 12000}
 KNOWLEDGE_NAME_MAX_LEN = 255
+# PAPI note titles must be hyphen-separated slugs (shared/services/sync/note_sync.py
+# TITLE_RE in 468-platform); the title is also the /.runwhen/knowledge/<title> path.
+KNOWLEDGE_TITLE_RE = re.compile(r"^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$")
 ALLOWED_TOP_LEVEL_KEYS = {"version", "id", "title", "description", "match", "items"}
 ALLOWED_MATCH_KEYS = {"mcp_catalog_ids", "mcp_endpoint_hosts"}
 BASE_ITEM_KEYS = {"kind", "name", "file"}
@@ -218,6 +221,11 @@ def validate_pack(pack_yaml_path: Path) -> list[str]:
 
         if kind in ("rule", "command") and not ITEM_NAME_RE.match(name):
             errors.append(f"{item_label}: name must match ^[A-Za-z0-9_-]+$, got {name!r}")
+        if kind == "knowledge" and not KNOWLEDGE_TITLE_RE.match(name):
+            errors.append(
+                f"{item_label}: knowledge name must be a hyphen-separated slug "
+                f"(e.g. 'datadog-mcp-operating-guide'), got {name!r}"
+            )
         if kind == "knowledge" and len(name) > KNOWLEDGE_NAME_MAX_LEN:
             errors.append(
                 f"{item_label}: knowledge name is {len(name)} chars, "
@@ -388,6 +396,15 @@ class TestValidatePackFixture:
         manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
         errors = validate_pack(manifest_path)
         assert any("duplicate" in e.lower() for e in errors), errors
+
+    def test_knowledge_name_must_be_a_slug(self, tmp_path: Path) -> None:
+        pack_dir = _copy_demo_pack(tmp_path)
+        manifest_path = pack_dir / "references" / "pack.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["items"][1]["name"] = "Demo Knowledge Article"
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        errors = validate_pack(manifest_path)
+        assert any("slug" in e for e in errors), errors
 
     def test_command_missing_description_is_an_error(self, tmp_path: Path) -> None:
         pack_dir = _copy_demo_pack(tmp_path)

@@ -4,7 +4,7 @@ Resolve the thing the user named (a RunWhen resource path, SLX, workload, VM, se
 
 1. **Pin the RunWhen side.** If the input is a resource path, SLX or name from this workspace, look it up with `ws_search` / `ws_cat` and read its tags: `platform`, `cluster`, `namespace`, `resource_type`, `resource_name`, `child_resource`, `project_id`, `gcp_zone`, and any `[k8s]tags.datadoghq.com/*` or `[k8s]app.kubernetes.io/*` labels.
 2. **Find the Datadog server** with `ws_ls /mcp/` (its tools include `search_datadog_monitors`). Remember that Datadog may watch a different environment from this workspace: what you find may be a counterpart, not the same object.
-3. **Resolve in Datadog** with the recipes in "Datadog and RunWhen naming", at most 5 calls, `max_tokens` ≤ 4000:
+3. **Resolve in Datadog** with the recipes in the knowledge note `datadog-runwhen-naming` (`ws_cat /.runwhen/knowledge/datadog-runwhen-naming`), at most 5 calls, `max_tokens` ≤ 4000:
    - Kubernetes workload → recipe A (scalar `kubernetes_state.*` grouped by `kube_cluster_name,kube_namespace,<workload tag>,env`), run on the name stem across all clusters.
    - VM / compute instance → recipe C (host SQL on `hostname LIKE '<name>%'`).
    - Application / service name → recipe D (`search_datadog_entities`), plus a scalar check of `trace.*` metrics grouped `by {service}`.

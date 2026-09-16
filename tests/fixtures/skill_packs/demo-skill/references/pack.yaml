@@ -12,7 +12,7 @@ items:
     name: demo-rule
     file: rules/demo-rule.md
   - kind: knowledge
-    name: "Demo Knowledge Article"
+    name: demo-knowledge-article
     file: knowledge/demo-knowledge.md
   - kind: command
     name: demo-command

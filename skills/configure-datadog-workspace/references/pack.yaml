@@ -28,10 +28,10 @@ items:
     file: rules/datadog-mcp.md
 
   - kind: knowledge
-    name: "Datadog MCP operating guide"
+    name: datadog-mcp-operating-guide
     file: knowledge/datadog-operating-guide.md
   - kind: knowledge
-    name: "Datadog and RunWhen naming"
+    name: datadog-runwhen-naming
     file: knowledge/datadog-naming-translation.md
 
   - kind: command
