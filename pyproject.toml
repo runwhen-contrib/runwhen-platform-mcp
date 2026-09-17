@@ -38,7 +38,16 @@ runwhen_platform_mcp = ["docs/*.md", "docs/*.template", "docs/*.example"]
 # guides) and their reference assets are present in wheels and Docker
 # images, not just in editable installs. See ``_skills_root`` in
 # ``server.py`` for the runtime lookup.
-skills = ["**/SKILL.md", "**/references/**"]
+skills = [
+    "**/SKILL.md",
+    "**/references/**",
+    # runwhen-agent-builder ships an executable probe template, its own
+    # acceptance checks and an HTML handover template. Without these two
+    # globs they are dropped from the wheel silently and the skill
+    # references files that are not there.
+    "**/scripts/**",
+    "**/templates/**",
+]
 
 [project.optional-dependencies]
 dev = [
