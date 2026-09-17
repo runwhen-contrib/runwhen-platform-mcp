@@ -92,6 +92,39 @@ this state and its per-slot assumptions, because the skill defined the gate but
 not what to produce when approval can never arrive. Leaving that to improvisation
 invites the two bad outcomes — stalling, or quietly self-approving.
 
+## Sources you did not build
+
+A build's `reused_not_built` list is not a footnote — it is half the report's
+input. Record every adopted or cited source with **what you do not control**,
+because that is the part that will change without anyone touching your build.
+
+```json
+"sources": [
+  {"name": "Collect Persistent Volume Growth Trends", "provenance": "built",
+   "slx": "stg-shared--capacity-volume-growth"},
+
+  {"name": "Fetch the Storage Utilization for PVC Mounts", "provenance": "adopted",
+   "slx": "beta--seaweedfs-storage-health", "owner": "unknown",
+   "method": "df inside the pod - NOT the GCP volume metric",
+   "verified": "ran 2026-09-17, emits no run_metadata",
+   "not_controlled": ["its 90% threshold", "its schedule", "its issue severity"]},
+
+  {"name": "GCP Project Cost Health", "provenance": "cited",
+   "why_not_adopted": "cannot run it from this runner; quote its findings only"}
+]
+```
+
+- **`method` matters more than it looks.** Two sources measuring "the same"
+  thing by different means will disagree, and the report has to say which is
+  better evidence. Recording *how* each one measures is what makes that possible
+  six weeks later.
+- **`verified` records the date and what was learned**, including
+  `emits no run_metadata` — that is the difference between a source whose
+  thresholds you can quote and one whose you cannot.
+- **`not_controlled` is the handover's whole point.** An adopted source can
+  change its threshold, its schedule or its severity without anything in your
+  manifest changing. Say so in the gap report too.
+
 ## A capability can be unverifiable rather than unavailable
 
 `untested` implies you could have tested it. `VERIFIED NO` implies you did.
@@ -210,6 +243,7 @@ partway, where it matters more.
   "kb_articles": [{"note_id": 88, "title": "Certificate ownership model"}],
 
   "gaps_report":    "gaps.md",
+  "sources":        "see the sources[] block above - built / adopted / cited",
   "handover":       "handover.html",
   "command_prompt": "command-prompt.md"
 }

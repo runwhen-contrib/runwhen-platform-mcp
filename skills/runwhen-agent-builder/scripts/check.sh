@@ -22,11 +22,14 @@ if [ ! -f "$F" ]; then bad "SKILL.md missing"; else
   head -1 "$F" | grep -qx -- '---' || bad "SKILL.md has no frontmatter"
   grep -qx 'name: runwhen-agent-builder' "$F" || bad "frontmatter name must match the directory"
   grep -q '^description: "' "$F" || bad 'description must be double-quoted (it contains "Use when: ")'
-  # Budget raised from 200 to 300 when this skill merged with the probe-first
-  # / report-contract / ledger material. Deliberate, not drift: the phases are
-  # the substance and cramming them into references is how they get skipped.
+  # Budget history, each raise deliberate and paid for by real scope, not drift:
+  #   200 -> 300  merge of the probe-first / report-contract / ledger material
+  #   300 -> 320  the choice gate (Phase 2 asks before it proposes) and source
+  #               provenance (built / adopted / cited / stream)
+  # Two rounds of compression came first both times; the phases are the
+  # substance, and cramming them into references is how they get skipped.
   L=$(wc -l < "$F" | tr -d ' ')
-  [ "$L" -le 300 ] && ok "SKILL.md $L lines (<=300)" || bad "SKILL.md $L lines exceeds the 300-line budget"
+  [ "$L" -le 320 ] && ok "SKILL.md $L lines (<=320)" || bad "SKILL.md $L lines exceeds the 320-line budget"
   for phase in 0 1 2 3 4 5 6 7; do
     has "$F" "Phase $phase" || bad "SKILL.md missing Phase $phase"
   done
@@ -87,6 +90,15 @@ else bad "templates/handover.html missing"; fi
 has "$D/references/report-contract.md" "## Writing the command prompt" || bad "report-contract.md must carry the command-prompt recipe"
 has "$D/references/report-contract.md" "banded by urgency" || bad "report-contract.md must band the body by urgency"
 has "$D/references/decomposition.md" "## Offer the choices before you draft the plan" || bad "decomposition.md must require the choice gate"
+# Reuse must ADOPT, not just skip. A capacity report was once assembled from four
+# clean collectors while a severity-2 fired on a pre-existing SLX one hop away.
+has "$D/references/decomposition.md" "becomes a source, not a hole" || bad "decomposition.md must make reuse yield sources"
+for p in built adopted cited stream; do
+  has "$D/references/decomposition.md" "\`$p\`" || bad "decomposition.md lost source provenance: $p"
+done
+has "$D/references/report-contract.md" "A negative claim inherits the scope of its evidence" || bad "report-contract.md must scope negative claims to their source"
+has "$D/references/report-contract.md" "every source with its provenance" || bad "report-contract.md must require all sources in Pass 1"
+has "$D/references/build-ledger.md" "## Sources you did not build" || bad "build-ledger.md must record adopted/cited sources"
 
 # --- no stubs anywhere ---
 # Strip backticked spans first: these files legitimately *document* the tokens

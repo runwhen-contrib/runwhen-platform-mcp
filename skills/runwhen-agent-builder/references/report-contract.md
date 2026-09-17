@@ -233,6 +233,33 @@ The rule is the same: the tense follows the evidence.
   row, say **n/a**, and give a one-word reason. A dropped row reads as "fine",
   which is the one thing it is not known to be.
 
+### A negative claim inherits the scope of its evidence
+
+**"My sources do not measure X" is a fact. "X does not exist here" is a claim
+about the environment, and no collector is entitled to make it.**
+
+The difference is invisible until it is expensive. Observed: a task reported,
+correctly and precisely, that `kubernetes.io/pod/volume/utilization` on its
+cluster carried no `persistentvolumeclaim_name` label and covered 7 of 152
+volumes. By the time that reached the command prompt it had become *"Never state
+how full a volume is. That data does not exist on this cluster."* A different
+SLX was reading fill levels by running `df` inside the pod, and had been firing a
+severity-2 issue about a 95%-full volume for weeks.
+
+Nothing crashed and nobody lied. A limitation of **one metric** was promoted into
+a property of **the cluster**, and the agent then defended it against a workspace
+that disagreed.
+
+So when writing a prohibition into a command prompt:
+
+- Name the source, never the world: *"the volume collector does not measure fill
+  level — do not infer it"*.
+- Say where it does live, if it lives anywhere: *"the storage-utilisation check
+  has it; cite that."*
+- If you genuinely do not know whether anything else has it, **say that** rather
+  than closing the question. "Not measured by any source in this report" is
+  honest; "does not exist" is a guess with a confident face.
+
 ---
 
 ## Never put internal mechanics in the report
@@ -297,13 +324,34 @@ report answers. Then the split: *the collectors gather and reduce; you do the
 forecasting, correlation and judgement — they cannot see each other's output, so
 anything spanning two of them is yours alone.*
 
-**2. Pass 1 — collect.** Name the breadth tasks exactly as they are titled, and
-say *read-only, nothing else is needed*. Name the two blocks every task emits and
-require reading them **before** the data: `run_metadata` (the window and
-thresholds that run used — the agent's only view of config, per the visibility
-boundary in `object-model.md`) and the data-quality block. Then: **do not run the
-drill-down tasks while building the report** — they answer questions about one
-subject and nobody has asked one yet.
+**2. Pass 1 — collect.** List **every source with its provenance**, from the
+plan's SOURCES block (`decomposition.md` → filter 0c) — not only the tasks you
+authored. A report wired to your own build alone is blind to everything the
+workspace already knows, by construction:
+
+```
+built     Collect Cluster Compute Headroom and Utilization Trends
+built     Collect Persistent Volume Growth Trends
+adopted   Fetch the Storage Utilization for PVC Mounts   (not ours; reads df in-pod)
+cited     GCP Project Cost Health                        (cite, never recompute)
+stream    open severity 1-2 issues on <your resource paths>
+```
+
+Say what each provenance licenses: `built` and `adopted` are data the agent may
+compute with, `cited` is quoted and attributed but never folded into its own
+arithmetic, and `stream` is checked every run. **An open issue that outranks
+anything the agent found leads the report**, whichever SLX raised it — a report
+that omits a firing severity-2 on its own subject is wrong however good its own
+numbers are. Name adopted sources in full, with what they do and do not cover,
+and say that where an adopted source and a built one disagree the agent states
+which method each used and which is better evidence — never averaging them,
+never silently preferring its own.
+
+Then name the two blocks every task emits and require reading them **before**
+the data: `run_metadata` (the window and thresholds that run used — the agent's
+only view of config, per the visibility boundary in `object-model.md`) and the
+data-quality block. Then: **do not run the drill-down tasks while building the
+report** — they answer questions about one subject and nobody has asked one yet.
 
 **3. Pass 2 — correlate.** Two or three concrete cross-task questions for *this*
 environment, not generic advice. *Is the pool near its ceiling because demand is

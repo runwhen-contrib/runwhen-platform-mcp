@@ -80,6 +80,54 @@ Certificates, as a worked case, already have `k8s-certmanager-healthcheck`
 `azure-kv-health`, and SSL expiry checks inside `gcp-cloud-loadbalancer-health`.
 Building a cert inventory task from scratch without checking would be waste.
 
+**c) What you reuse becomes a source, not a hole.**
+
+Reuse has **two** outcomes and the second one is the one that gets forgotten:
+*do not build it*, and *wire it in anyway*. A capability you dropped from the
+build is still a capability the agent needs — dropping it from the **plan** is
+correct, dropping it from the **report's source list** is a blind spot you
+created on purpose and then forgot about.
+
+Observed, and it is the reason this section exists: a capacity agent's four
+collectors could not read PVC fill levels, because that cluster's metrics carry
+no `persistentvolumeclaim_name` label. All four said so honestly. A **different,
+pre-existing** SLX read fill levels a different way — `df` inside the pod — and
+had been firing a severity-2 issue about a 95%-full volume for weeks, 2,423
+occurrences. The report was assembled from four clean sources while the crisis
+fired one SLX away. Nobody had lied and nothing had crashed; the existing task
+was simply never adopted.
+
+So every reuse decision produces a row in the plan's **source list**, not just an
+absence:
+
+| Provenance | Meaning | Obligation |
+|---|---|---|
+| `built` | you authored and verified it | the normal Phase 3/4 gates |
+| `adopted` | exists already, you run or read it | verify it once (below) |
+| `cited` | exists already, you cannot verify it | quote it, never fold it into your own arithmetic |
+| `stream` | the workspace issue feed on your resource paths | check it every run |
+
+### Verifying something you did not write
+
+The skill's spine is that an unexecuted task is a liability. A **borrowed**
+unexecuted task is the same liability wearing someone else's name, so it gets the
+same treatment, plus one extra step for the parts you do not control.
+
+1. **Run it once and read its output.** Shape, size, whether it emits
+   `run_metadata`. If it does not, you cannot see its thresholds — say so.
+2. **Record what you do not control** in the ledger: its thresholds, its
+   schedule, its owner, and the fact that any of them can change under you
+   without touching your build.
+3. **Prefer its issues over its stdout.** Issues are durable and searchable;
+   stdout is per-run and may be gone by the time your report runs.
+4. **If you cannot run it, it is `cited`, not `adopted`.** The report says *"the
+   storage check reports 95% full"* and attributes it. It never merges that
+   number into a total, a projection or a percentage of your own — you cannot
+   restate a figure whose method you have not seen.
+
+A `cited` source is still worth far more than silence. The failure above would
+have been avoided by a single cited line.
+
 ### 1. Reachability
 
 Drop every candidate Phase 1 proved unreachable. Not "we lack a documented
@@ -301,6 +349,12 @@ RULES (persona-scoped, 5 max)          COMMANDS (persona-scoped)
   2 of 5 used                            /cert-report   scheduled 0 13 * * 1-5 -> email
                                          /cert-inspect  manual
 
+SOURCES FOR THE REPORT   (provenance, not just what we built)
+  built     cert-expiry-inventory
+  adopted   k8s-certmanager-healthcheck  existing, 2 ns -> extended to 16
+  cited     ssl-expiry inside gcp-cloud-loadbalancer-health  (cannot run it)
+  stream    open sev-1/2 issues under custom/certificates + certificates.cert-manager.io
+
 ASSISTANT   cert-warden      searchFilters pinned to slxGroup=custom/certificates
 KB          2 articles       scoped to custom/certificates/*
 
@@ -312,3 +366,9 @@ Approve, edit, or reject.
 Four columns matter and no more: kind, name, the question it answers, the
 credential it needs. If a reader cannot tell from the name and question why an
 object exists, rename it before asking for approval.
+
+**The SOURCES block is not a restatement of TASKS.** Tasks are what you build;
+sources are what the report reads, and the two differ by exactly the objects you
+reused, cited or inherited. A plan whose sources are identical to its tasks has
+either genuinely found nothing to reuse — rare, say so explicitly — or has
+skipped filter 0c and built a blind spot.

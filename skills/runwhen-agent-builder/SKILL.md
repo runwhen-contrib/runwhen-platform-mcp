@@ -67,7 +67,7 @@ cheapest quality win available.
 scripts; without one you would be committing untested code.
 
 Then ask what only the human can answer — environment and scope, where history
-lives if the requirement implies a trend, delivery target and cadence.
+lives if the requirement implies a trend, delivery target, cadence.
 
 **Ask for context sources in your first reply.** Do not wait on the answer to
 start probing; do not start designing until it arrives. Work all four and name
@@ -109,10 +109,10 @@ usually is not. Procedure in `references/object-model.md`.
 **1c. Probe reach** with verified credentials, recording **every permission denial
 verbatim** — the difference between "needs more access" and an actionable grant
 request. **Never conclude a platform is unreachable from a probe that did not
-carry its credential**, nor from a query you have not validated returns what you
-think (*Queries that lie*, `references/object-model.md`). Print the identity
-before blaming permissions — a valid credential in the wrong project returns 403
-and reads exactly like a missing grant.
+carry its credential**, nor from a query you have not validated (*Queries that
+lie*, `references/object-model.md`). Print the identity before blaming
+permissions — a valid credential in the wrong project returns 403 and reads
+exactly like a missing grant.
 
 **Test the retention ladder** at −7d, −30d, −90d, −365d for anything
 trend-shaped. It decides whether a trend claim is possible at all, and no amount
@@ -123,14 +123,20 @@ syntax — that is the probe working.
 
 **Build the investigation surface first.** Research each reachable platform's own
 troubleshooting docs and derive what *complete* looks like — existing coverage
-tells you what you have, never what is missing, and your own recall is the weakest
-source available. Coverage matrix, one row per investigation step, marked
-deployed / registry / **GAP**. Method and the **layer trap** in
-`references/investigation-surface.md`.
+tells you what you have, never what is missing, and your recall is the weakest
+source available. Coverage matrix, one row per step, marked deployed / registry /
+**GAP**. Method and the **layer trap** in `references/investigation-surface.md`.
 
 **Then existing coverage, then the registry.** Coverage is usually partial, which
 means the job is `deploy_registry_codebundle` to the uncovered scope, not
 authoring. Mark in the plan which objects are which.
+
+**Reuse produces sources, not holes.** A capability you decide not to build is
+still one the agent needs: drop it from the build, never from the report's
+**SOURCES** list. Every source carries a provenance — `built`, `adopted`
+(exists, you verified it), `cited` (exists, you could not) or `stream` (the
+workspace issue feed on your resource paths). A plan whose sources equal its
+tasks has skipped this and built a blind spot on purpose.
 
 Apply the five filters to the **GAP rows** (`references/decomposition.md`):
 Reuse → Reachability → Environment-specificity → Consolidation → Disjointness.
@@ -139,12 +145,11 @@ systems — before the customer anchors on getting them.
 
 **Two beats, not one.** First put the material forks to the human as concrete
 options — coverage, breadth-vs-depth, reuse-vs-extend, detail, issue policy,
-confidence floor. Two to four questions, each option carrying what it costs, one
+confidence floor. Two to four questions, each carrying what it costs, one
 recommended. **A plan is one option wearing the clothes of an answer**: by the
-time it is written every fork is silently taken, and their only lever is to
-reject a finished thing. Then build the plan from the answers in that file's
-format — kind, name, the question it answers, the credential it needs — recording
-what was offered and who decided each fork.
+time it is written every fork is silently taken. Then build the plan from the
+answers in that file's format — kind, name, the question it answers, the
+credential it needs — recording what was offered and who decided each fork.
 
 **STOP. Write nothing until the plan is approved.** After approval the build runs
 to completion unattended, so this is the user's chance to redirect.
@@ -185,10 +190,10 @@ the script pattern Phase 4 will copy.
 ## Phase 4 — Depth tasks, in parallel
 
 Now fan out — one subagent per depth task. Give each the working breadth task as a
-template, the confirmed `secret_vars` mapping, and its pivot. Every depth task
-takes its pivot as a validated runtime variable, plus `DETAIL_LEVEL` as an enum
+template, the confirmed `secret_vars` mapping, and its pivot. Each takes its pivot
+as a validated runtime variable plus `DETAIL_LEVEL` as an enum
 (`concise`/`detailed`, default `concise`), and gets its own retrieval check after
-commit. **None of them go on the schedule.**
+commit. **None go on the schedule.**
 
 **Break-glass tasks are built here, not in recon** — a deliverable for the
 runtime agent, not a build instrument. One per verified credential platform, CLI
@@ -203,16 +208,18 @@ tree under `/resources/_unscoped/`.
 - **KB articles** — durable facts, scoped by `resource_paths` to your `custom/`
   paths. Unlimited, retrieved on relevance. Never current readings.
 - **Rules** — **≤5, `scope_type=persona`, no exceptions.** Every active in-scope
-  rule is concatenated into the prompt every turn with no cap, ranking or
-  truncation, so rules crowd each other and every other assistant. **Never name
-  an `env_var` in one** — the agent cannot see config.
+  rule is concatenated into the prompt every turn with no cap or truncation, so
+  rules crowd each other and every other assistant. **Never name an `env_var` in
+  one** — the agent cannot see config.
 - **Commands** — persona-scoped, **one per job, not one per task.** The report
   command carries the drill-down guidance too: the follow-up happens in the
   session the report started, and a second command splits one workflow in two.
 
 **Write the command prompt from the six-part recipe in
 `references/report-contract.md`.** The report contract is enforced only there —
-the runtime agent cannot read this skill. Named `Summary` and `What to do`
+the runtime agent cannot read this skill. Pass 1 names **every source with its
+provenance**, not just the tasks you authored, and an open issue outranking
+anything the agent found leads the report whichever SLX raised it. Named `Summary` and `What to do`
 sections, word caps as numbers not adjectives, body banded by urgency rather than
 by resource type, and a flag table saying what each flag licenses a claim to be.
 Save the finished prompt into the ledger. Say nothing about delivery.
@@ -263,6 +270,7 @@ resuming agent; the one-pager is the only artifact written for a human.
 | Break-glass: narrow `statement`, tag excluded from the persona filter, manifest entry, gap-report note | It can do anything its credential permits |
 | Re-gate when findings change the portfolio | A stale approval looks like consent |
 | Forks offered as options before the plan is drafted | A plan presented first has already taken every fork |
+| The report reads adopted sources and the issue stream, not only what you built | A clean report beside a firing severity-2 is wrong |
 | Ledger written per phase; manifest and gap report always | A dozen objects across four APIs is not reversible from memory |
 | `max_runs` ≤ 30 stated in the handover | Every schedule expires; nobody remembers this |
 
@@ -274,11 +282,12 @@ resuming agent; the one-pager is the only artifact written for a human.
 - Calling a 403 a permissions problem before printing which identity you are
 - Taking the vault listing as the set of credentials that exist
 - Reasoning from the `head` of a filtered list
-- Committing a task you have not run, or trusting unverified auth
+- Committing a task you have not run — yours or adopted — or trusting unverified auth
 - A rule that names an `env_var`
 - Any mention of sinks, Slack, email or recipients in agent-facing instructions
 - A report whose most useful sentence is in its closing paragraph
 - An unheaded opening paragraph, or six same-weight headers ordered by topic
+- Writing "that data does not exist here" when you mean "my sources lack it"
 - Reading an empty `issues` array from `run_slx` as "the task emitted nothing"
 - A quality floor that suppresses detection rather than only the projection
 - Two tasks where one needs the other's output
@@ -297,4 +306,5 @@ resuming agent; the one-pager is the only artifact written for a human.
 | "A report satisfies the automation ask" | It does not. Say which half you built and let the human decide. |
 | "Leading with a summary is leading with the verdict" | A summary says how many. A verdict says what happens and what to do. |
 | "They can just redirect me if the plan is wrong" | Almost nobody rejects a finished plan. Offer the forks while they are still forks. |
+| "We didn't build it, so it isn't our source" | The workspace does not care who authored the task that is right. |
 | "I'll write the manifest at the end" | The build that dies in Phase 4 is the one that needed it. |
