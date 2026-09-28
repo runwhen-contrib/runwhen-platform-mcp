@@ -407,6 +407,13 @@ The server exposes these tools, grouped by use case.
   - `cap_list` — List the capability tasks that apply to a resource (by path or URN). Each comes back shaped like a tool: `name` (`capability/task`), `description`, `inputSchema`, one-line output summaries, `readOnly`, and its `path`/`file` in the capability file tree.
   - `cap_run` — `operation="describe"`: a task's full input and output JSON Schemas (each with `$id` and `version`), its latest real output, and optionally the output schema as a TypedDict stub or jq paths. `operation="run"`: run a read-only task against a resource; inputs are checked before anything runs, and the result is `{status, outputs}` with each output tagged by its schema `$id` and `version`. Returns `structuredContent` matching its `outputSchema`; a long run returns a `runId` to resume with `run_id`.
 
+- **Capability build tools** (9 tools) — filesystem-shaped access to a workspace's `/capabilities` tree (custom capabilities, drafts and packaged capabilities), every call carrying a required `reason`.
+  - `cap_ls`, `cap_read`, `cap_glob`, `cap_grep` — list a folder, read a file (optionally by line range), find files by pattern, and search file contents for a plain substring.
+  - `cap_write`, `cap_edit` — create, replace or delete a whole file in a capability's draft (a draft opens automatically); apply an exact-string edit to one.
+  - `cap_test` — run one task of a draft against a real resource; a passing run is the test evidence publishing needs.
+  - `cap_diff` — show pending drafts as unified diffs, validation state and evidence per task.
+  - `cap_submit` — propose a draft for publishing; it shows a workspace admin an approval card rather than publishing directly.
+
 - **Task authoring — Tool Builder** (9 tools)
   - `get_workspace_context` — Load `RUNWHEN.md` from the project. **Call before writing scripts** so the agent follows your conventions.
   - `validate_script` — Validate a script against the RunWhen contract (main, issue format, FD 3 for bash).

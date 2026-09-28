@@ -61,6 +61,15 @@ EXPECTED_TOOLS = {
     "delete_slx",
     "cap_list",
     "cap_run",
+    "cap_ls",
+    "cap_read",
+    "cap_glob",
+    "cap_grep",
+    "cap_write",
+    "cap_edit",
+    "cap_test",
+    "cap_diff",
+    "cap_submit",
 }
 
 

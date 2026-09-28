@@ -34,6 +34,10 @@ WRITE_TOOLS = frozenset(
         "create_knowledge_base_article",
         "update_knowledge_base_article",
         "delete_knowledge_base_article",
+        "cap_write",
+        "cap_edit",
+        "cap_test",
+        "cap_submit",
     }
 )
 

@@ -1,0 +1,145 @@
+{
+  "version": 1,
+  "tools": [
+    {
+      "name": "cap_ls",
+      "description": "List a folder in the workspace's capability tree. /capabilities holds README.md (the authoring guide), schema.json (the capability.yaml schema) and one folder per capability, custom or packaged. A custom capability's folder shows its open draft if there is one, else its published version. Packaged capabilities are read-only.",
+      "method": "GET",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/ls",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Folder to list, e.g. /capabilities or /capabilities/pgbouncer-health/tasks. Defaults to /capabilities."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["reason"]
+      }
+    },
+    {
+      "name": "cap_read",
+      "description": "Read a file from the capability tree, whole or by line range. Read /capabilities/README.md before writing your first capability. Always read a file before editing it.",
+      "method": "GET",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/read",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "File path, e.g. /capabilities/pgbouncer-health/capability.yaml"},
+          "start_line": {"type": "integer", "minimum": 1, "description": "First line to return (1-based)."},
+          "end_line": {"type": "integer", "minimum": 1, "description": "Last line to return, inclusive."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["path", "reason"]
+      }
+    },
+    {
+      "name": "cap_glob",
+      "description": "Find files in the capability tree by pattern, e.g. /capabilities/*/tasks/*.py or /capabilities/**/capability.yaml.",
+      "method": "GET",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/glob",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {"type": "string", "description": "Glob over full paths; ** matches across folders."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["pattern", "reason"]
+      }
+    },
+    {
+      "name": "cap_grep",
+      "description": "Search file contents in the capability tree for a plain substring (not a regex). Use it to find existing capabilities that already check something before writing a new one.",
+      "method": "GET",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/grep",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "pattern": {"type": "string", "description": "Substring to find."},
+          "path": {"type": "string", "description": "Only search under this path prefix."},
+          "ignore_case": {"type": "boolean", "description": "Case-insensitive match. Default false."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["pattern", "reason"]
+      }
+    },
+    {
+      "name": "cap_write",
+      "description": "Create or replace a whole file in a capability's draft (a draft opens automatically). Writing /capabilities/<new-name>/capability.yaml creates a new capability. Prefer cap_edit for changes to an existing file. Returns validation findings with file and line; fix them before testing. Set delete=true to remove a file.",
+      "method": "POST",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/write",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "File path under /capabilities/<name>/: capability.yaml, tasks/**, lib/**, schemas/**, tests/** or README.md."},
+          "content": {"type": "string", "description": "The full file content (UTF-8 text)."},
+          "delete": {"type": "boolean", "description": "Delete the file instead of writing it."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["path", "reason"]
+      }
+    },
+    {
+      "name": "cap_edit",
+      "description": "Replace an exact string in a capability draft file. old_string must occur exactly once unless replace_all is true; include enough surrounding lines to make it unique. Returns validation findings.",
+      "method": "POST",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/edit",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "File path under /capabilities/<name>/."},
+          "old_string": {"type": "string", "description": "Exact text to replace, copied from cap_read output."},
+          "new_string": {"type": "string", "description": "Replacement text."},
+          "replace_all": {"type": "boolean", "description": "Replace every occurrence. Default false."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["path", "old_string", "new_string", "reason"]
+      }
+    },
+    {
+      "name": "cap_test",
+      "description": "Run one task of a capability's draft against a real resource and return its outputs, errors and log tail. A passing run is the test evidence publishing needs, for that exact task code. If the run is still going after wait_seconds, call again with run_id to keep waiting.",
+      "method": "POST",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/test",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "The capability folder, e.g. /capabilities/pgbouncer-health"},
+          "task": {"type": "string", "description": "Task name from capability.yaml."},
+          "target": {"type": "string", "description": "The resource to run against: its name or URN. It must match the capability's appliesTo."},
+          "inputs": {"type": "object", "description": "Values for the task's runtime inputs.", "additionalProperties": true},
+          "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60, "description": "How long to wait for the result. Default 30."},
+          "run_id": {"type": "string", "description": "Poll an earlier test run instead of starting a new one."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["path", "reason"]
+      }
+    },
+    {
+      "name": "cap_diff",
+      "description": "Show pending capability drafts: changed files as unified diffs, validation state, which tasks still need a passing test, and how the resources the capability applies to would change.",
+      "method": "GET",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/diff",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "Limit to one capability, e.g. /capabilities/pgbouncer-health. Default: every open draft."},
+          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+        },
+        "required": ["reason"]
+      }
+    },
+    {
+      "name": "cap_submit",
+      "description": "Propose a capability draft for publishing. Needs a clean validation and a passing cap_test for every changed task. It does not publish: it shows the person an approval card, and a workspace admin approves it there. After submitting, tell the person to review and approve the card.",
+      "method": "POST",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/submit",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {"type": "string", "description": "The capability folder, e.g. /capabilities/pgbouncer-health"},
+          "reason": {"type": "string", "description": "What this version does and why, in one or two sentences, shown on the approval card."}
+        },
+        "required": ["path", "reason"]
+      }
+    }
+  ]
+}
