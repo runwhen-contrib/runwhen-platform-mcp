@@ -59,6 +59,8 @@ EXPECTED_TOOLS = {
     "list_indexed_resource_types",
     "render_codecollection_skill",
     "delete_slx",
+    "cap_list",
+    "cap_run",
 }
 
 

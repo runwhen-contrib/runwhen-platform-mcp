@@ -403,6 +403,10 @@ The server exposes these tools, grouped by use case.
   - `get_registry_codebundle` — Get full details of a specific codebundle (tasks, SLIs, env vars, source URL).
   - `deploy_registry_codebundle` — Deploy a registry codebundle as an SLX. Generates native codebundle YAML (different from `commit_slx` which embeds inline scripts).
 
+- **Capability tasks** (2 tools)
+  - `cap_list` — List the capability tasks that apply to a resource (by path or URN). Each comes back shaped like a tool: `name` (`capability/task`), `description`, `inputSchema`, one-line output summaries, `readOnly`, and its `path`/`file` in the capability file tree.
+  - `cap_run` — `operation="describe"`: a task's full input and output JSON Schemas (each with `$id` and `version`), its latest real output, and optionally the output schema as a TypedDict stub or jq paths. `operation="run"`: run a read-only task against a resource; inputs are checked before anything runs, and the result is `{status, outputs}` with each output tagged by its schema `$id` and `version`. Returns `structuredContent` matching its `outputSchema`; a long run returns a `runId` to resume with `run_id`.
+
 - **Task authoring — Tool Builder** (9 tools)
   - `get_workspace_context` — Load `RUNWHEN.md` from the project. **Call before writing scripts** so the agent follows your conventions.
   - `validate_script` — Validate a script against the RunWhen contract (main, issue format, FD 3 for bash).

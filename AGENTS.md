@@ -42,6 +42,7 @@ RunWhen UI (e.g. to run tasks from the chat).
 | Need | Tool(s) |
 |------|---------|
 | **Execute** a task | `run_slx` (workspace_chat CANNOT run tasks). Always use `task_titles="*"` — never pass display titles from `get_slx_runbook` |
+| Capability tasks on a resource | `cap_list`, then `cap_run` (`describe` or `run`) |
 | Task authoring | `validate_script`, `run_script_and_wait`, `commit_slx`, `render_codecollection_skill`, `delete_slx` |
 | Discovery GitOps | `list_discovery_platforms`, `list_indexed_resource_types`, `render_codecollection_skill` |
 | Registry | `search_registry`, `get_registry_codebundle`, `deploy_registry_codebundle` |
@@ -85,6 +86,13 @@ to interact with the platform — do not attempt to call APIs directly.
 | `get_issue_details` | Raw JSON: issue by ID (prefer `workspace_chat` for investigation) |
 | `get_slx_runbook` | Raw JSON: SLX runbook (prefer `workspace_chat` for "what does this do?") |
 | `search_workspace` | Autocomplete search (prefer `workspace_chat` for richer results) |
+
+### Capability Tasks
+
+| Tool | Description |
+|------|-------------|
+| `cap_list` | List the capability tasks that apply to a resource, each shaped like a tool (`name`, `description`, `inputSchema`, output summaries, `readOnly`, `path`, `file`) |
+| `cap_run` | `describe` a task (full input/output JSON Schemas with `$id` and `version`, latest output, optional TypedDict / jq rendering) or `run` a read-only one against a resource; returns `structuredContent` `{status, outputs}` |
 
 ### Task Authoring (Tool Builder)
 
