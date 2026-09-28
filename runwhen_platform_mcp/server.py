@@ -50,15 +50,39 @@ import re
 import time
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote, urlencode
 
 import httpx
 import yaml
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from pydantic import Field
+from mcp.types import TextContent
+from pydantic import BaseModel, Field
 
+try:
+    from fastmcp.tools import ToolResult
+except ImportError:  # FastMCP releases that keep it in fastmcp.tools.tool
+    from fastmcp.tools.tool import ToolResult  # type: ignore[no-redef]
+
+from runwhen_platform_mcp.capability_fs_tools import (
+    CAPABILITY_FS_READ_ONLY_TOOLS,
+    CAPABILITY_FS_TOOLS,
+    param_description,
+    tool_description,
+)
+from runwhen_platform_mcp.capability_tasks import (
+    CAP_LIST_OUTPUT_SCHEMA,
+    CAP_RUN_OUTPUT_SCHEMA,
+    OPEN_STATUSES,
+    cli_input_errors,
+    cli_run_result,
+    describe_result,
+    list_result,
+    run_result,
+    split_task,
+    task_endpoint,
+)
 from runwhen_platform_mcp.codecollection_platform_profiles import (
     get_platform_profile,
     list_platform_profiles,
@@ -815,6 +839,10 @@ def _headers() -> dict[str, str]:
         "Authorization": f"Bearer {_get_token()}",
         "Content-Type": "application/json",
         "Accept": "application/json",
+        # Marks every request this server makes as agent-originated, so
+        # human-approval-only routes (e.g. publishing a capability) can
+        # refuse it outright. The model has no way to set this itself.
+        "X-RunWhen-Agent": "mcp",
     }
     headers.update(trace_headers())
     return headers
@@ -7937,6 +7965,349 @@ async def render_codecollection_skill(
     return _json_response(result)
 
 
+# ---------------------------------------------------------------------------
+# Capability tasks
+# ---------------------------------------------------------------------------
+
+#: Longest one status request waits on the platform before answering.
+_CAP_POLL_SECONDS = 20
+_CAP_MAX_WAIT_SECONDS = 120
+
+
+def _structured_result(result: BaseModel) -> ToolResult:
+    """Wrap ``result`` as ``structuredContent`` (unset fields dropped) plus the JSON as text."""
+    data = result.model_dump(exclude_none=True)
+    return ToolResult(
+        content=[TextContent(type="text", text=_json_response(data))],
+        structured_content=data,
+    )
+
+
+def _task_ref(task: str) -> tuple[str, str]:
+    parts = split_task(task)
+    if parts is None:
+        raise ValueError(
+            f'task must be "capability/task", e.g. "k8s-discovery/inspect"; got {task!r}. '
+            "cap_list shows the tasks that apply to a resource."
+        )
+    return parts
+
+
+async def _wait_for_task_run(
+    ws: str, capability: str, task: str, run_id: str, wait_seconds: int
+) -> dict[str, Any]:
+    """Poll one run until it finishes or ``wait_seconds`` pass; return its last status view."""
+    url = f"{task_endpoint(ws, capability, task)}/runs/{quote(run_id, safe='')}"
+    deadline = time.monotonic() + max(0, min(wait_seconds, _CAP_MAX_WAIT_SECONDS))
+    while True:
+        remaining = max(0, round(deadline - time.monotonic()))
+        view = await _papi_get(
+            url, params={"wait": min(_CAP_POLL_SECONDS, remaining), "includeSchemas": "true"}
+        )
+        # A poll that could wait out the rest of the budget is the last one.
+        if view.get("status") not in OPEN_STATUSES or remaining <= _CAP_POLL_SECONDS:
+            return view
+
+
+@mcp.tool(output_schema=CAP_LIST_OUTPUT_SCHEMA)
+async def cap_list(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    resource: str = Field(
+        description="Path or URN of the resource, e.g. 'kubernetes/clusters/prod'."
+    ),
+) -> ToolResult:
+    """List the capability tasks that apply to a resource.
+
+    Each task comes back shaped like a tool: `name` ("capability/task"),
+    `description`, `inputSchema` and a one-line summary of each output, plus
+    `readOnly` and where the task lives in the capability file tree
+    (`path`, `file`). Describe or run one with `cap_run`.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    listing = await _papi_get(f"/api/v4/workspaces/{ws}/capabilities", params={"subject": resource})
+    return _structured_result(list_result(resource, listing if isinstance(listing, dict) else {}))
+
+
+@mcp.tool(output_schema=CAP_RUN_OUTPUT_SCHEMA)
+async def cap_run(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    operation: Literal["describe", "run"] = Field(description='"describe" or "run".'),
+    task: str = Field(description='"capability/task", as listed by cap_list.'),
+    resource: str = Field(
+        default="",
+        description="Path or URN of the resource to run against (run); picks describe's example.",
+    ),
+    inputs: Annotated[
+        dict[str, Any] | None, Field(description="The task's inputs by name (run).")
+    ] = None,
+    run_id: str = Field(default="", description="Keep waiting on an earlier run (run)."),
+    render: str = Field(
+        default="", description='"typeddict" or "jq": add the output schema as code (describe).'
+    ),
+    wait_seconds: int = Field(
+        default=60, description="How long to wait for a run to finish (run, at most 120)."
+    ),
+) -> ToolResult:
+    """Describe or run one capability task against a resource.
+
+    operation="describe" returns the task's full input and output JSON Schemas
+    (each output schema with `$id` and `version`), its latest real output as an
+    example, and optionally the output schema as a TypedDict stub or jq paths.
+
+    operation="run" runs a read-only task against `resource`. Inputs are checked
+    against the task's input schema before anything runs; a rejection names each
+    bad input and how to fix it. The result is `{status, outputs}` where each
+    output carries the `$id` and `version` of its schema (full schemas under
+    `schemas`). A run still going after `wait_seconds` returns its `runId`: call
+    again with `run_id` to keep waiting instead of starting another run.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    capability, name = _task_ref(task)
+    endpoint = task_endpoint(ws, capability, name)
+
+    if operation == "describe":
+        params: dict[str, Any] = {"example": "true"}
+        if resource:
+            params["subject"] = resource
+        if render:
+            params["render"] = render
+        return _structured_result(describe_result(task, await _papi_get(endpoint, params=params)))
+
+    if run_id:
+        view = await _wait_for_task_run(ws, capability, name, run_id, wait_seconds)
+        return _structured_result(run_result(task, view))
+    if not resource:
+        raise ValueError("resource is required to run a task: pass the path or URN to run it on.")
+
+    described = await _papi_get(endpoint, params={"example": "false"})
+    if not described.get("readOnly"):
+        raise ValueError(f"{task} is not read-only; only read-only tasks can be run.")
+    given = inputs or {}
+    if "sync" in (described.get("invocation") or []):
+        cli_name = (described.get("cli") or {}).get("name")
+        if not cli_name:
+            raise ValueError(f"{task} runs synchronously, but no platform CLI is named for it.")
+        errors = cli_input_errors(given)
+        if errors:
+            raise ValueError("; ".join(errors))
+        body: dict[str, Any] = {"command": given["command"], "targetPath": resource}
+        for key in ("maxBytes", "timeoutSeconds"):
+            if given.get(key) is not None:
+                body[key] = given[key]
+        _, response = await _papi_post(
+            f"/api/v4/workspaces/{ws}/platform-cli/{quote(cli_name, safe='')}:run", body
+        )
+        return _structured_result(cli_run_result(task, described, response))
+
+    _, started = await _papi_post(
+        f"/api/v4/workspaces/{ws}/capability-runs",
+        {"capability": capability, "task": name, "inputs": given, "target": {"path": resource}},
+    )
+    view = await _wait_for_task_run(ws, capability, name, str(started.get("runUuid")), wait_seconds)
+    return _structured_result(run_result(task, view))
+
+
+# ---------------------------------------------------------------------------
+# Capability build tools
+# ---------------------------------------------------------------------------
+
+
+def _capfs_annotations(name: str) -> dict[str, bool]:
+    return {"readOnlyHint": name in CAPABILITY_FS_READ_ONLY_TOOLS}
+
+
+async def _capfs_call(name: str, workspace_name: str, **params: Any) -> str:
+    """Call one capability-fs tool's PAPI route with its manifest parameters.
+
+    GET tools send every given parameter as a query param; POST tools send them
+    as the JSON body. Unset optional parameters (``None``) are dropped so PAPI
+    applies its own defaults.
+    """
+    tool = CAPABILITY_FS_TOOLS[name]
+    ws = await _resolve_workspace(workspace_name)
+    path = tool["path"].format(workspace=ws)
+    payload = {k: v for k, v in params.items() if v is not None}
+    try:
+        if tool["method"] == "GET":
+            data = await _papi_get(path, params=payload or None)
+        else:
+            _, data = await _papi_post(path, payload)
+    except (ValueError, httpx.HTTPStatusError) as e:
+        return _json_response({"error": str(e)})
+    return _json_response(data)
+
+
+@mcp.tool(description=tool_description("cap_ls"), annotations=_capfs_annotations("cap_ls"))
+async def cap_ls(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    reason: str = Field(description=param_description("cap_ls", "reason")),
+    path: Annotated[str | None, Field(description=param_description("cap_ls", "path"))] = None,
+) -> str:
+    """List a folder in the workspace's capability tree."""
+    return await _capfs_call("cap_ls", workspace_name, path=path, reason=reason)
+
+
+@mcp.tool(description=tool_description("cap_read"), annotations=_capfs_annotations("cap_read"))
+async def cap_read(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_read", "path")),
+    reason: str = Field(description=param_description("cap_read", "reason")),
+    start_line: Annotated[
+        int | None, Field(ge=1, description=param_description("cap_read", "start_line"))
+    ] = None,
+    end_line: Annotated[
+        int | None, Field(ge=1, description=param_description("cap_read", "end_line"))
+    ] = None,
+) -> str:
+    """Read a file from the capability tree, whole or by line range."""
+    return await _capfs_call(
+        "cap_read",
+        workspace_name,
+        path=path,
+        start_line=start_line,
+        end_line=end_line,
+        reason=reason,
+    )
+
+
+@mcp.tool(description=tool_description("cap_glob"), annotations=_capfs_annotations("cap_glob"))
+async def cap_glob(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    pattern: str = Field(description=param_description("cap_glob", "pattern")),
+    reason: str = Field(description=param_description("cap_glob", "reason")),
+) -> str:
+    """Find files in the capability tree by pattern."""
+    return await _capfs_call("cap_glob", workspace_name, pattern=pattern, reason=reason)
+
+
+@mcp.tool(description=tool_description("cap_grep"), annotations=_capfs_annotations("cap_grep"))
+async def cap_grep(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    pattern: str = Field(description=param_description("cap_grep", "pattern")),
+    reason: str = Field(description=param_description("cap_grep", "reason")),
+    path: Annotated[str | None, Field(description=param_description("cap_grep", "path"))] = None,
+    ignore_case: Annotated[
+        bool | None, Field(description=param_description("cap_grep", "ignore_case"))
+    ] = None,
+) -> str:
+    """Search file contents in the capability tree for a plain substring."""
+    return await _capfs_call(
+        "cap_grep",
+        workspace_name,
+        pattern=pattern,
+        path=path,
+        ignore_case=ignore_case,
+        reason=reason,
+    )
+
+
+@mcp.tool(description=tool_description("cap_write"), annotations=_capfs_annotations("cap_write"))
+async def cap_write(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_write", "path")),
+    reason: str = Field(description=param_description("cap_write", "reason")),
+    content: Annotated[
+        str | None, Field(description=param_description("cap_write", "content"))
+    ] = None,
+    delete: Annotated[
+        bool | None, Field(description=param_description("cap_write", "delete"))
+    ] = None,
+) -> str:
+    """Create, replace or delete a whole file in a capability's draft."""
+    return await _capfs_call(
+        "cap_write", workspace_name, path=path, content=content, delete=delete, reason=reason
+    )
+
+
+@mcp.tool(description=tool_description("cap_edit"), annotations=_capfs_annotations("cap_edit"))
+async def cap_edit(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_edit", "path")),
+    old_string: str = Field(description=param_description("cap_edit", "old_string")),
+    new_string: str = Field(description=param_description("cap_edit", "new_string")),
+    reason: str = Field(description=param_description("cap_edit", "reason")),
+    replace_all: Annotated[
+        bool | None, Field(description=param_description("cap_edit", "replace_all"))
+    ] = None,
+) -> str:
+    """Replace an exact string in a capability draft file."""
+    return await _capfs_call(
+        "cap_edit",
+        workspace_name,
+        path=path,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+        reason=reason,
+    )
+
+
+@mcp.tool(description=tool_description("cap_test"), annotations=_capfs_annotations("cap_test"))
+async def cap_test(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_test", "path")),
+    reason: str = Field(description=param_description("cap_test", "reason")),
+    task: Annotated[str | None, Field(description=param_description("cap_test", "task"))] = None,
+    target: Annotated[
+        str | None, Field(description=param_description("cap_test", "target"))
+    ] = None,
+    inputs: Annotated[
+        dict[str, Any] | None, Field(description=param_description("cap_test", "inputs"))
+    ] = None,
+    wait_seconds: Annotated[
+        int | None,
+        Field(ge=0, le=60, description=param_description("cap_test", "wait_seconds")),
+    ] = None,
+    run_id: Annotated[
+        str | None, Field(description=param_description("cap_test", "run_id"))
+    ] = None,
+) -> str:
+    """Run one task of a capability's draft against a real resource."""
+    return await _capfs_call(
+        "cap_test",
+        workspace_name,
+        path=path,
+        task=task,
+        target=target,
+        inputs=inputs,
+        wait_seconds=wait_seconds,
+        run_id=run_id,
+        reason=reason,
+    )
+
+
+@mcp.tool(description=tool_description("cap_diff"), annotations=_capfs_annotations("cap_diff"))
+async def cap_diff(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    reason: str = Field(description=param_description("cap_diff", "reason")),
+    path: Annotated[str | None, Field(description=param_description("cap_diff", "path"))] = None,
+) -> str:
+    """Show pending capability drafts as diffs against their parent version."""
+    return await _capfs_call("cap_diff", workspace_name, path=path, reason=reason)
+
+
+@mcp.tool(description=tool_description("cap_submit"), annotations=_capfs_annotations("cap_submit"))
+async def cap_submit(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_submit", "path")),
+    reason: str = Field(description=param_description("cap_submit", "reason")),
+) -> str:
+    """Propose a capability draft for a workspace admin to publish."""
+    return await _capfs_call("cap_submit", workspace_name, path=path, reason=reason)
+
+
+@mcp.tool(
+    description=tool_description("cap_discard"), annotations=_capfs_annotations("cap_discard")
+)
+async def cap_discard(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_discard", "path")),
+    reason: str = Field(description=param_description("cap_discard", "reason")),
+) -> str:
+    """Discard a capability's open draft."""
+    return await _capfs_call("cap_discard", workspace_name, path=path, reason=reason)
+
+
 _TOOL_FUNCTIONS = [
     workspace_chat,
     list_workspaces,
@@ -7985,7 +8356,33 @@ _TOOL_FUNCTIONS = [
     list_indexed_resource_types,
     render_codecollection_skill,
     delete_slx,
+    cap_list,
+    cap_run,
+    cap_ls,
+    cap_read,
+    cap_glob,
+    cap_grep,
+    cap_write,
+    cap_edit,
+    cap_test,
+    cap_diff,
+    cap_submit,
+    cap_discard,
 ]
+
+#: Tools that declare an ``outputSchema``; HTTP mode registers them with it too.
+_TOOL_OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
+    "cap_list": CAP_LIST_OUTPUT_SCHEMA,
+    "cap_run": CAP_RUN_OUTPUT_SCHEMA,
+}
+
+#: The capability-fs tools' ``description`` and ``annotations`` come from the
+#: vendored manifest rather than their docstring; HTTP mode registers them
+#: with the same values so both transports serve identical tool metadata.
+_TOOL_DESCRIPTIONS: dict[str, str] = {name: tool_description(name) for name in CAPABILITY_FS_TOOLS}
+_TOOL_ANNOTATIONS: dict[str, dict[str, bool]] = {
+    name: _capfs_annotations(name) for name in CAPABILITY_FS_TOOLS
+}
 
 
 def _make_workspace_auth_check(tool_name: str) -> Any:
@@ -8089,7 +8486,14 @@ def _build_http_server() -> FastMCP:
 
     for fn in _TOOL_FUNCTIONS:
         auth_check = _make_workspace_auth_check(fn.__name__)
-        tool = FunctionTool.from_function(fn, auth=auth_check)  # type: ignore[arg-type]
+        schema_kwargs: dict[str, Any] = {}
+        if fn.__name__ in _TOOL_OUTPUT_SCHEMAS:
+            schema_kwargs["output_schema"] = _TOOL_OUTPUT_SCHEMAS[fn.__name__]
+        if fn.__name__ in _TOOL_DESCRIPTIONS:
+            schema_kwargs["description"] = _TOOL_DESCRIPTIONS[fn.__name__]
+        if fn.__name__ in _TOOL_ANNOTATIONS:
+            schema_kwargs["annotations"] = _TOOL_ANNOTATIONS[fn.__name__]
+        tool = FunctionTool.from_function(fn, auth=auth_check, **schema_kwargs)  # type: ignore[arg-type]
         http_mcp.add_tool(tool)
 
     # Register skill resources on the HTTP server too. Without this,

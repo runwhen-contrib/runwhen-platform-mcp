@@ -33,7 +33,7 @@ where = ["."]
 include = ["runwhen_platform_mcp*", "skills*"]
 
 [tool.setuptools.package-data]
-runwhen_platform_mcp = ["docs/*.md", "docs/*.template", "docs/*.example"]
+runwhen_platform_mcp = ["docs/*.md", "docs/*.template", "docs/*.example", "*.json"]
 # ``skills`` ships as a data-package so SKILL.md (progressive-disclosure
 # guides) and their reference assets are present in wheels and Docker
 # images, not just in editable installs. See ``_skills_root`` in
