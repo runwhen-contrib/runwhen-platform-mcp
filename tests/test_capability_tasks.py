@@ -127,6 +127,25 @@ class TestCapList:
         assert structured["notApplicableCount"] == 2
 
 
+class TestCapListSync:
+    def test_a_sync_task_lists_the_command_request_it_takes(self) -> None:
+        listing = {
+            "applicable": [
+                {
+                    "capability": "k8s-discovery",
+                    "task": "cli",
+                    "readOnly": True,
+                    "invocation": ["sync"],
+                    "inputSchema": {"type": "object", "properties": {"argv": {}}},
+                    "outputs": [],
+                }
+            ]
+        }
+        with mock.patch.object(server, "_papi_get", mock.AsyncMock(return_value=listing)):
+            result = _run(server.cap_list(workspace_name="ws", resource=_CLUSTER))
+        assert result.structured_content["tasks"][0]["inputSchema"]["required"] == ["command"]
+
+
 class TestCapRunDescribe:
     def test_returns_the_task_schemas_and_passes_render(self) -> None:
         get = mock.AsyncMock(return_value=_described(rendering="# jq"))

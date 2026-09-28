@@ -135,7 +135,10 @@ def _capability_path(capability: str) -> str:
 
 
 def list_result(resource: str, listing: dict[str, Any]) -> CapListResult:
-    """Build ``cap_list``'s result from the capabilities listing for ``resource``."""
+    """Build ``cap_list``'s result from the capabilities listing for ``resource``.
+
+    A synchronous task's ``inputSchema`` is the platform CLI request it takes.
+    """
     tasks = []
     for item in listing.get("applicable") or []:
         if not isinstance(item, dict) or not item.get("capability") or not item.get("task"):
@@ -148,7 +151,9 @@ def list_result(resource: str, listing: dict[str, Any]) -> CapListResult:
                 readOnly=bool(item.get("readOnly")),
                 path=path,
                 file=item.get("file") or f"{path}/capability.yaml",
-                inputSchema=item.get("inputSchema") or {"type": "object"},
+                inputSchema=CLI_INPUT_SCHEMA
+                if "sync" in (item.get("invocation") or [])
+                else item.get("inputSchema") or {"type": "object"},
                 outputs={
                     o["name"]: o.get("summary") or ""
                     for o in item.get("outputs") or []
