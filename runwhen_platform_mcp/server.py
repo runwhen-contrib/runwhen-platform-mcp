@@ -8089,7 +8089,10 @@ async def cap_run(
         )
         return _structured_result(cli_run_result(task, described, response))
 
-    _, started = await _papi_post(f"{endpoint}/runs", {"subject": resource, "inputs": given})
+    _, started = await _papi_post(
+        f"/api/v4/workspaces/{ws}/capability-runs",
+        {"capability": capability, "task": name, "inputs": given, "target": {"path": resource}},
+    )
     view = await _wait_for_task_run(ws, capability, name, str(started.get("runUuid")), wait_seconds)
     return _structured_result(run_result(task, view))
 

@@ -179,8 +179,13 @@ class TestCapRunQueued:
         ):
             result = _cap_run(inputs={"kind": "Deployment"})
         post.assert_awaited_once_with(
-            f"{_TASK_URL}/inspect/runs",
-            {"subject": _CLUSTER, "inputs": {"kind": "Deployment"}},
+            "/api/v4/workspaces/ws/capability-runs",
+            {
+                "capability": "k8s-discovery",
+                "task": "inspect",
+                "inputs": {"kind": "Deployment"},
+                "target": {"path": _CLUSTER},
+            },
         )
         assert get.await_args_list[1].kwargs["params"] == {"wait": 20, "includeSchemas": "true"}
         structured = result.structured_content
