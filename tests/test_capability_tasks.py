@@ -299,10 +299,22 @@ class TestDeclaredSchemas:
             assert set(schema["properties"]) == set(declared["properties"])
 
     def test_http_mode_declares_the_same_output_schemas(self) -> None:
-        assert server._TOOL_OUTPUT_SCHEMAS == {
-            "cap_list": CAP_LIST_OUTPUT_SCHEMA,
-            "cap_run": CAP_RUN_OUTPUT_SCHEMA,
-        }
+        # HTTP mode re-registers every tool with an auth check; the output
+        # schemas must survive that re-registration. The server's own listing
+        # filters on that check, so read what was registered.
+        with (
+            mock.patch("runwhen_platform_mcp.consent_ui.patch_fastmcp_consent_ui", lambda: None),
+            mock.patch("runwhen_platform_mcp.auth.build_auth_provider", return_value=None),
+        ):
+            http_mcp = server._build_http_server()
+        tools = {t.name: t for t in asyncio.run(http_mcp._local_provider.list_tools())}
+        for name, declared in (
+            ("cap_list", CAP_LIST_OUTPUT_SCHEMA),
+            ("cap_run", CAP_RUN_OUTPUT_SCHEMA),
+        ):
+            schema = tools[name].output_schema
+            assert schema is not None
+            assert set(schema["properties"]) == set(declared["properties"])
 
     def test_the_description_spells_out_capability(self) -> None:
         tools = {t.name: t for t in asyncio.run(server.mcp.list_tools())}
