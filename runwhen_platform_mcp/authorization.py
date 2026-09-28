@@ -38,6 +38,7 @@ WRITE_TOOLS = frozenset(
         "cap_edit",
         "cap_test",
         "cap_submit",
+        "cap_discard",
     }
 )
 

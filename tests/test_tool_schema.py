@@ -70,6 +70,7 @@ EXPECTED_TOOLS = {
     "cap_test",
     "cap_diff",
     "cap_submit",
+    "cap_discard",
 }
 
 

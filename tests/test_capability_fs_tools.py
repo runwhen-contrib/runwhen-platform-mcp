@@ -1,5 +1,5 @@
 """Tests for the capability build tools: cap_ls, cap_read, cap_glob, cap_grep,
-cap_write, cap_edit, cap_test, cap_diff and cap_submit.
+cap_write, cap_edit, cap_test, cap_diff, cap_submit and cap_discard.
 
 The platform API is mocked at the module's HTTP helpers, as in
 ``test_capability_tasks.py``. Handlers are called directly with every argument
@@ -30,6 +30,7 @@ _TOOL_NAMES = (
     "cap_test",
     "cap_diff",
     "cap_submit",
+    "cap_discard",
 )
 
 
@@ -44,9 +45,9 @@ def _workspace():
 
 
 class TestManifest:
-    def test_loads_exactly_nine_tools(self) -> None:
+    def test_loads_exactly_ten_tools(self) -> None:
         assert set(CAPABILITY_FS_TOOLS) == set(_TOOL_NAMES)
-        assert len(CAPABILITY_FS_TOOLS) == 9
+        assert len(CAPABILITY_FS_TOOLS) == 10
 
     def test_every_tool_maps_to_a_capability_fs_route(self) -> None:
         for tool in CAPABILITY_FS_TOOLS.values():
@@ -64,7 +65,7 @@ class TestManifest:
 
 
 class TestRegistration:
-    def test_exactly_nine_tools_registered_with_matching_names_and_descriptions(self) -> None:
+    def test_exactly_ten_tools_registered_with_matching_names_and_descriptions(self) -> None:
         tools = {t.name: t for t in _run(server.mcp.list_tools())}
         for name in _TOOL_NAMES:
             assert tools[name].description == CAPABILITY_FS_TOOLS[name]["description"]
@@ -93,7 +94,7 @@ class TestRegistration:
     def test_write_tools_require_read_write_role(self) -> None:
         from runwhen_platform_mcp.authorization import WorkspaceRole, minimum_role_for_tool
 
-        for name in ("cap_write", "cap_edit", "cap_test", "cap_submit"):
+        for name in ("cap_write", "cap_edit", "cap_test", "cap_submit", "cap_discard"):
             assert minimum_role_for_tool(name) == WorkspaceRole.READ_WRITE
         for name in CAPABILITY_FS_READ_ONLY_TOOLS:
             assert minimum_role_for_tool(name) == WorkspaceRole.READ_ONLY
@@ -315,6 +316,22 @@ class TestPostTools:
             {"path": "/capabilities/pgbouncer-health", "reason": "pool errors are now counted"},
         )
         assert json.loads(result) == {"kind": "custom-capability-proposal"}
+
+    def test_cap_discard_sends_path_and_reason(self) -> None:
+        post = mock.AsyncMock(return_value=(200, {"status": "discarded"}))
+        with mock.patch.object(server, "_papi_post", post):
+            result = _run(
+                server.cap_discard(
+                    workspace_name="ws",
+                    path="/capabilities/pgbouncer-health",
+                    reason="start over",
+                )
+            )
+        post.assert_awaited_once_with(
+            "/api/v4/workspaces/ws/capability-fs/discard",
+            {"path": "/capabilities/pgbouncer-health", "reason": "start over"},
+        )
+        assert json.loads(result) == {"status": "discarded"}
 
 
 class TestErrors:

@@ -8296,6 +8296,18 @@ async def cap_submit(
     return await _capfs_call("cap_submit", workspace_name, path=path, reason=reason)
 
 
+@mcp.tool(
+    description=tool_description("cap_discard"), annotations=_capfs_annotations("cap_discard")
+)
+async def cap_discard(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    path: str = Field(description=param_description("cap_discard", "path")),
+    reason: str = Field(description=param_description("cap_discard", "reason")),
+) -> str:
+    """Discard a capability's open draft."""
+    return await _capfs_call("cap_discard", workspace_name, path=path, reason=reason)
+
+
 _TOOL_FUNCTIONS = [
     workspace_chat,
     list_workspaces,
@@ -8355,6 +8367,7 @@ _TOOL_FUNCTIONS = [
     cap_test,
     cap_diff,
     cap_submit,
+    cap_discard,
 ]
 
 #: Tools that declare an ``outputSchema``; HTTP mode registers them with it too.

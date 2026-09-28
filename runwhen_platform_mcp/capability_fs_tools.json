@@ -9,10 +9,18 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "Folder to list, e.g. /capabilities or /capabilities/pgbouncer-health/tasks. Defaults to /capabilities."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "path": {
+            "type": "string",
+            "description": "Folder to list, e.g. /capabilities or /capabilities/pgbouncer-health/tasks. Defaults to /capabilities."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["reason"]
+        "required": [
+          "reason"
+        ]
       }
     },
     {
@@ -23,12 +31,29 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "File path, e.g. /capabilities/pgbouncer-health/capability.yaml"},
-          "start_line": {"type": "integer", "minimum": 1, "description": "First line to return (1-based)."},
-          "end_line": {"type": "integer", "minimum": 1, "description": "Last line to return, inclusive."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "path": {
+            "type": "string",
+            "description": "File path, e.g. /capabilities/pgbouncer-health/capability.yaml"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "First line to return (1-based)."
+          },
+          "end_line": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Last line to return, inclusive."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["path", "reason"]
+        "required": [
+          "path",
+          "reason"
+        ]
       }
     },
     {
@@ -39,10 +64,19 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "pattern": {"type": "string", "description": "Glob over full paths; ** matches across folders."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "pattern": {
+            "type": "string",
+            "description": "Glob over full paths; ** matches across folders."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["pattern", "reason"]
+        "required": [
+          "pattern",
+          "reason"
+        ]
       }
     },
     {
@@ -53,12 +87,27 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "pattern": {"type": "string", "description": "Substring to find."},
-          "path": {"type": "string", "description": "Only search under this path prefix."},
-          "ignore_case": {"type": "boolean", "description": "Case-insensitive match. Default false."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "pattern": {
+            "type": "string",
+            "description": "Substring to find."
+          },
+          "path": {
+            "type": "string",
+            "description": "Only search under this path prefix."
+          },
+          "ignore_case": {
+            "type": "boolean",
+            "description": "Case-insensitive match. Default false."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["pattern", "reason"]
+        "required": [
+          "pattern",
+          "reason"
+        ]
       }
     },
     {
@@ -69,12 +118,27 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "File path under /capabilities/<name>/: capability.yaml, tasks/**, lib/**, schemas/**, tests/** or README.md."},
-          "content": {"type": "string", "description": "The full file content (UTF-8 text)."},
-          "delete": {"type": "boolean", "description": "Delete the file instead of writing it."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "path": {
+            "type": "string",
+            "description": "File path under /capabilities/<name>/: capability.yaml, tasks/**, lib/**, schemas/**, tests/** or README.md."
+          },
+          "content": {
+            "type": "string",
+            "description": "The full file content (UTF-8 text)."
+          },
+          "delete": {
+            "type": "boolean",
+            "description": "Delete the file instead of writing it."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["path", "reason"]
+        "required": [
+          "path",
+          "reason"
+        ]
       }
     },
     {
@@ -85,13 +149,33 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "File path under /capabilities/<name>/."},
-          "old_string": {"type": "string", "description": "Exact text to replace, copied from cap_read output."},
-          "new_string": {"type": "string", "description": "Replacement text."},
-          "replace_all": {"type": "boolean", "description": "Replace every occurrence. Default false."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "path": {
+            "type": "string",
+            "description": "File path under /capabilities/<name>/."
+          },
+          "old_string": {
+            "type": "string",
+            "description": "Exact text to replace, copied from cap_read output."
+          },
+          "new_string": {
+            "type": "string",
+            "description": "Replacement text."
+          },
+          "replace_all": {
+            "type": "boolean",
+            "description": "Replace every occurrence. Default false."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["path", "old_string", "new_string", "reason"]
+        "required": [
+          "path",
+          "old_string",
+          "new_string",
+          "reason"
+        ]
       }
     },
     {
@@ -102,15 +186,42 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "The capability folder, e.g. /capabilities/pgbouncer-health"},
-          "task": {"type": "string", "description": "Task name from capability.yaml."},
-          "target": {"type": "string", "description": "The resource to run against: its name or URN. It must match the capability's appliesTo."},
-          "inputs": {"type": "object", "description": "Values for the task's runtime inputs.", "additionalProperties": true},
-          "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60, "description": "How long to wait for the result. Default 30."},
-          "run_id": {"type": "string", "description": "Poll an earlier test run instead of starting a new one."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "path": {
+            "type": "string",
+            "description": "The capability folder, e.g. /capabilities/pgbouncer-health"
+          },
+          "task": {
+            "type": "string",
+            "description": "Task name from capability.yaml."
+          },
+          "target": {
+            "type": "string",
+            "description": "The resource to run against: its name or URN. It must match the capability's appliesTo."
+          },
+          "inputs": {
+            "type": "object",
+            "description": "Values for the task's runtime inputs.",
+            "additionalProperties": true
+          },
+          "wait_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 60,
+            "description": "How long to wait for the result. Default 30."
+          },
+          "run_id": {
+            "type": "string",
+            "description": "Poll an earlier test run instead of starting a new one."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["path", "reason"]
+        "required": [
+          "path",
+          "reason"
+        ]
       }
     },
     {
@@ -121,10 +232,18 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "Limit to one capability, e.g. /capabilities/pgbouncer-health. Default: every open draft."},
-          "reason": {"type": "string", "description": "One short sentence: why you are making this call."}
+          "path": {
+            "type": "string",
+            "description": "Limit to one capability, e.g. /capabilities/pgbouncer-health. Default: every open draft."
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
         },
-        "required": ["reason"]
+        "required": [
+          "reason"
+        ]
       }
     },
     {
@@ -135,10 +254,42 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "The capability folder, e.g. /capabilities/pgbouncer-health"},
-          "reason": {"type": "string", "description": "What this version does and why, in one or two sentences, shown on the approval card."}
+          "path": {
+            "type": "string",
+            "description": "The capability folder, e.g. /capabilities/pgbouncer-health"
+          },
+          "reason": {
+            "type": "string",
+            "description": "What this version does and why, in one or two sentences, shown on the approval card."
+          }
         },
-        "required": ["path", "reason"]
+        "required": [
+          "path",
+          "reason"
+        ]
+      }
+    },
+    {
+      "name": "cap_discard",
+      "description": "Discard a capability's open draft: every change since its published version is dropped. A capability that was never published is removed entirely. Only do this when the person asked for it.",
+      "method": "POST",
+      "path": "/api/v4/workspaces/{workspace}/capability-fs/discard",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "The capability folder, e.g. /capabilities/pgbouncer-health"
+          },
+          "reason": {
+            "type": "string",
+            "description": "One short sentence: why you are making this call."
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ]
       }
     }
   ]
