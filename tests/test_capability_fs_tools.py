@@ -235,6 +235,29 @@ class TestPostTools:
             },
         )
 
+    def test_cap_write_forwards_expected_sha256(self) -> None:
+        """H40: replacing an existing file carries the sha256 from the last cap_read."""
+        post = mock.AsyncMock(return_value=(200, {"path": "x", "valid": True}))
+        with mock.patch.object(server, "_papi_post", post):
+            _run(
+                server.cap_write(
+                    workspace_name="ws",
+                    path="/capabilities/pgbouncer-health/capability.yaml",
+                    reason="replace the manifest",
+                    content="name: pgbouncer-health",
+                    expected_sha256="a" * 64,
+                )
+            )
+        post.assert_awaited_once_with(
+            "/api/v4/workspaces/ws/capability-fs/write",
+            {
+                "path": "/capabilities/pgbouncer-health/capability.yaml",
+                "content": "name: pgbouncer-health",
+                "expected_sha256": "a" * 64,
+                "reason": "replace the manifest",
+            },
+        )
+
     def test_cap_edit_sends_old_and_new_string(self) -> None:
         post = mock.AsyncMock(return_value=(200, {"path": "x", "valid": True}))
         with mock.patch.object(server, "_papi_post", post):
