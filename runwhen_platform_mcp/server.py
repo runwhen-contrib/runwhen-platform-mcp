@@ -8212,10 +8212,19 @@ async def cap_write(
     delete: Annotated[
         bool | None, Field(description=param_description("cap_write", "delete"))
     ] = None,
+    expected_sha256: Annotated[
+        str | None, Field(description=param_description("cap_write", "expected_sha256"))
+    ] = None,
 ) -> str:
     """Create, replace or delete a whole file in a capability's draft."""
     return await _capfs_call(
-        "cap_write", workspace_name, path=path, content=content, delete=delete, reason=reason
+        "cap_write",
+        workspace_name,
+        path=path,
+        content=content,
+        delete=delete,
+        expected_sha256=expected_sha256,
+        reason=reason,
     )
 
 
