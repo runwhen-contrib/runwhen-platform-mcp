@@ -180,7 +180,7 @@
     },
     {
       "name": "cap_test",
-      "description": "Run one task of a capability's draft against a real resource and return its outputs, errors and log tail. A passing run is the test evidence publishing needs, for that exact task code. If the run is still going after wait_seconds, call again with run_id to keep waiting.",
+      "description": "Run one task of a capability's draft against a real resource and return its outputs, errors and log tail. A passing run is the test evidence publishing needs, for that exact task code. If the run is still going after wait_seconds, call again with run_id to keep waiting. A task that isn't readOnly doesn't run at once: the response is an approval card, and the run starts only after a workspace admin approves it; then call again with run_id to wait for the result.",
       "method": "POST",
       "path": "/api/v4/workspaces/{workspace}/capability-fs/test",
       "parameters": {
