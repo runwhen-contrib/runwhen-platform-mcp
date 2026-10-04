@@ -112,7 +112,7 @@
     },
     {
       "name": "cap_write",
-      "description": "Create or replace a whole file in a capability's draft (a draft opens automatically). Writing /capabilities/<new-name>/capability.yaml creates a new capability. Prefer cap_edit for changes to an existing file. Replacing or deleting an existing file needs expected_sha256 from your last cap_read of it; a new file doesn't. Returns validation findings with file and line; fix them before testing. Set delete=true to remove a file.",
+      "description": "Create or replace a whole file in a capability's draft (a draft opens automatically). Writing /capabilities/<new-name>/capability.yaml creates a new capability. Prefer cap_edit for changes to an existing file. Replacing or deleting an existing file needs expected_sha256 from your last cap_read of it; a new file doesn't. Returns validation findings with file and line; fix them before testing. Set delete=true to remove a file. Findings describe the whole draft at `revision`; when several writes run at once, the result with the highest revision is the current state.",
       "method": "POST",
       "path": "/api/v4/workspaces/{workspace}/capability-fs/write",
       "parameters": {
@@ -147,7 +147,7 @@
     },
     {
       "name": "cap_edit",
-      "description": "Replace an exact string in a capability draft file. old_string must occur exactly once unless replace_all is true; include enough surrounding lines to make it unique. Returns validation findings.",
+      "description": "Replace an exact string in a capability draft file. old_string must occur exactly once unless replace_all is true; include enough surrounding lines to make it unique. Returns validation findings. Findings describe the whole draft at `revision`; when several writes run at once, the result with the highest revision is the current state.",
       "method": "POST",
       "path": "/api/v4/workspaces/{workspace}/capability-fs/edit",
       "parameters": {
@@ -216,6 +216,11 @@
           "run_id": {
             "type": "string",
             "description": "Poll an earlier test run instead of starting a new one."
+          },
+          "secretBindings": {
+            "type": "object",
+            "description": "Bind type: secret inputs to workspace secrets by name, e.g. {\"pg_password\": \"pg-password\"}. Stored on the draft; null removes one.",
+            "additionalProperties": true
           },
           "reason": {
             "type": "string",

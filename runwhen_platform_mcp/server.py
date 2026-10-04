@@ -8270,6 +8270,10 @@ async def cap_test(
     run_id: Annotated[
         str | None, Field(description=param_description("cap_test", "run_id"))
     ] = None,
+    secretBindings: Annotated[  # noqa: N803 -- papi's wire name, sent as-is
+        dict[str, Any] | None,
+        Field(description=param_description("cap_test", "secretBindings")),
+    ] = None,
 ) -> str:
     """Run one task of a capability's draft against a real resource."""
     return await _capfs_call(
@@ -8282,6 +8286,7 @@ async def cap_test(
         wait_seconds=wait_seconds,
         run_id=run_id,
         reason=reason,
+        secretBindings=secretBindings,
     )
 
 
