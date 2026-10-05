@@ -3,6 +3,12 @@
 When a tool runs, this middleware binds the active tool name and request id to
 contextvars so ``server._headers()`` can forward them to PAPI as
 ``X-RunWhen-MCP-Tool`` and ``X-Request-ID``.
+
+It also sends ``X-RunWhen-Model``, which papi records as the model that built a
+capability draft (shown on the approval card). An MCP server can't see the model
+its client runs, so the value is ``RUNWHEN_MODEL`` when the person sets it in
+their MCP config, else the client's own name from the MCP handshake
+(``mcp:<name>/<version>``), else nothing.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ logger = logging.getLogger("runwhen_platform_mcp.tool_trace")
 
 _current_mcp_tool: ContextVar[str | None] = ContextVar("_current_mcp_tool", default=None)
 _current_request_id: ContextVar[str | None] = ContextVar("_current_request_id", default=None)
+_current_client: ContextVar[str | None] = ContextVar("_current_client", default=None)
 
 
 def _env_truthy(value: str | None) -> bool:
@@ -34,6 +41,24 @@ MCP_TOOL_TRACE = _env_truthy(os.environ.get("MCP_TOOL_TRACE", "true"))
 
 MCP_TOOL_HEADER = "X-RunWhen-MCP-Tool"
 REQUEST_ID_HEADER = "X-Request-ID"
+MODEL_HEADER = "X-RunWhen-Model"
+
+
+def _client_label(context: MiddlewareContext[Any]) -> str | None:
+    """``mcp:<name>/<version>`` from the client's MCP handshake, or None if unknown."""
+    try:
+        info = context.fastmcp_context.session.client_params.clientInfo  # type: ignore[union-attr]
+    except AttributeError:
+        return None
+    name = str(getattr(info, "name", "") or "").strip()
+    if not name:
+        return None
+    version = str(getattr(info, "version", "") or "").strip()
+    return f"mcp:{name}/{version}" if version else f"mcp:{name}"
+
+
+def _model() -> str | None:
+    return (os.environ.get("RUNWHEN_MODEL") or "").strip() or _current_client.get()
 
 
 def trace_headers() -> dict[str, str]:
@@ -45,6 +70,9 @@ def trace_headers() -> dict[str, str]:
     request_id = _current_request_id.get()
     if request_id:
         headers[REQUEST_ID_HEADER] = request_id
+    model = _model()
+    if model:
+        headers[MODEL_HEADER] = model
     return headers
 
 
@@ -67,6 +95,7 @@ class ToolTraceMiddleware(Middleware):
         request_id = uuid.uuid4().hex[:12]
         tool_token = _current_mcp_tool.set(tool_name)
         req_token = _current_request_id.set(request_id)
+        client_token = _current_client.set(_client_label(context))
 
         start = time.perf_counter()
         status = "ok"
@@ -107,3 +136,4 @@ class ToolTraceMiddleware(Middleware):
 
             _current_mcp_tool.reset(tool_token)
             _current_request_id.reset(req_token)
+            _current_client.reset(client_token)
