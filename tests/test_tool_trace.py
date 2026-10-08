@@ -107,7 +107,7 @@ class TestToolTraceMiddleware:
 
 
 class TestModelHeader:
-    """H7 follow-up: papi records X-RunWhen-Model as the draft's model on the approval card.
+    """The platform records X-RunWhen-Model as the draft's model on the approval card.
     MCP can't see the model, so it sends RUNWHEN_MODEL when set, else the client's own name."""
 
     @pytest.fixture(autouse=True)

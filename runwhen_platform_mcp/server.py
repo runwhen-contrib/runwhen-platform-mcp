@@ -8270,7 +8270,7 @@ async def cap_test(
     run_id: Annotated[
         str | None, Field(description=param_description("cap_test", "run_id"))
     ] = None,
-    secretBindings: Annotated[  # noqa: N803 -- papi's wire name, sent as-is
+    secretBindings: Annotated[  # noqa: N803 -- the platform's wire name, sent as-is
         dict[str, Any] | None,
         Field(description=param_description("cap_test", "secretBindings")),
     ] = None,

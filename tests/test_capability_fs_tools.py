@@ -236,7 +236,7 @@ class TestPostTools:
         )
 
     def test_cap_write_forwards_expected_sha256(self) -> None:
-        """H40: replacing an existing file carries the sha256 from the last cap_read."""
+        """Replacing an existing file carries the sha256 from the last cap_read."""
         post = mock.AsyncMock(return_value=(200, {"path": "x", "valid": True}))
         with mock.patch.object(server, "_papi_post", post):
             _run(
@@ -259,7 +259,7 @@ class TestPostTools:
         )
 
     def test_cap_test_forwards_secret_bindings(self) -> None:
-        """H52: a draft's secret inputs are bound to workspace secrets through cap_test."""
+        """A draft's secret inputs are bound to workspace secrets through cap_test."""
         post = mock.AsyncMock(return_value=(200, {"status": "ok"}))
         with mock.patch.object(server, "_papi_post", post):
             _run(

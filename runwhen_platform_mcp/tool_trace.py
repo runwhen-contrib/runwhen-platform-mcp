@@ -4,7 +4,7 @@ When a tool runs, this middleware binds the active tool name and request id to
 contextvars so ``server._headers()`` can forward them to PAPI as
 ``X-RunWhen-MCP-Tool`` and ``X-Request-ID``.
 
-It also sends ``X-RunWhen-Model``, which papi records as the model that built a
+It also sends ``X-RunWhen-Model``, which the platform records as the model that built a
 capability draft (shown on the approval card). An MCP server can't see the model
 its client runs, so the value is ``RUNWHEN_MODEL`` when the person sets it in
 their MCP config, else the client's own name from the MCP handshake
