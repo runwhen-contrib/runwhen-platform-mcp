@@ -403,6 +403,18 @@ The server exposes these tools, grouped by use case.
   - `get_registry_codebundle` — Get full details of a specific codebundle (tasks, SLIs, env vars, source URL).
   - `deploy_registry_codebundle` — Deploy a registry codebundle as an SLX. Generates native codebundle YAML (different from `commit_slx` which embeds inline scripts).
 
+- **Capability tasks** (2 tools)
+  - `cap_list` — List the capability tasks that apply to a resource (by path or URN). Each comes back shaped like a tool: `name` (`capability/task`), `description`, `inputSchema`, one-line output summaries, `readOnly`, and its `path`/`file` in the capability file tree.
+  - `cap_run` — `operation="describe"`: a task's full input and output JSON Schemas (each with `$id` and `version`), its latest real output, and optionally the output schema as a TypedDict stub or jq paths. `operation="run"`: run a read-only task against a resource; inputs are checked before anything runs, and the result is `{status, outputs}` with each output tagged by its schema `$id` and `version`. Returns `structuredContent` matching its `outputSchema`; a long run returns a `runId` to resume with `run_id`.
+
+- **Capability build tools** (10 tools) — filesystem-shaped access to a workspace's `/capabilities` tree (custom capabilities, drafts and packaged capabilities), every call carrying a required `reason`.
+  - `cap_ls`, `cap_read`, `cap_glob`, `cap_grep` — list a folder, read a file (optionally by line range), find files by pattern, and search file contents for a plain substring.
+  - `cap_write`, `cap_edit` — create, replace or delete a whole file in a capability's draft (a draft opens automatically); apply an exact-string edit to one.
+  - `cap_test` — run one task of a draft against a real resource; a passing run is the test evidence publishing needs.
+  - `cap_diff` — show pending drafts as unified diffs, validation state and evidence per task.
+  - `cap_submit` — propose a draft for publishing; it shows a workspace admin an approval card rather than publishing directly.
+  - `cap_discard` — discard a capability's open draft; drops every change since its published version.
+
 - **Task authoring — Tool Builder** (9 tools)
   - `get_workspace_context` — Load `RUNWHEN.md` from the project. **Call before writing scripts** so the agent follows your conventions.
   - `validate_script` — Validate a script against the RunWhen contract (main, issue format, FD 3 for bash).
@@ -426,6 +438,7 @@ The server exposes these tools, grouped by use case.
 | `RUNWHEN_TOKEN` | Yes | RunWhen API token (JWT or Personal Access Token). Used for both API and Agent. |
 | `DEFAULT_WORKSPACE` | No | Default workspace so tools don’t need `workspace_name` every time. |
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
+| `RUNWHEN_MODEL` | No | The model your MCP client runs (e.g. `claude-opus-5-5`). Sent as `X-RunWhen-Model`, so a capability draft you build shows it on the approval card. Unset: the client's own name from the MCP handshake (`mcp:<name>/<version>`). |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
 | `RUNWHEN_AIRGAP` | No | Set to `true` for airgapped environments. `search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call to the registry. |
