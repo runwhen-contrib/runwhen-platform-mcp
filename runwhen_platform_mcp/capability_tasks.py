@@ -233,8 +233,8 @@ def cli_run_result(task: str, described: dict[str, Any], response: dict[str, Any
         "durationMs": response.get("durationMs"),
     }
     outputs = described.get("outputs") or {}
-    name, declared = next(iter(outputs.items()), ("result", {}))
-    schema = (declared or {}).get("schema") or {}
+    name, declared = next(iter(outputs.items()), ("result", None))
+    schema: dict[str, Any] = (declared.get("schema") if isinstance(declared, dict) else None) or {}
     ref = {"$id": schema["$id"], "version": schema.get("version")} if schema.get("$id") else None
     return CapRunResult(
         operation="run",
