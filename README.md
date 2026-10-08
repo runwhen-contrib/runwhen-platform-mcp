@@ -438,6 +438,7 @@ The server exposes these tools, grouped by use case.
 | `RUNWHEN_TOKEN` | Yes | RunWhen API token (JWT or Personal Access Token). Used for both API and Agent. |
 | `DEFAULT_WORKSPACE` | No | Default workspace so tools don’t need `workspace_name` every time. |
 | `MCP_SERVER_LABEL` | No | Human-readable label for this server instance (e.g. `prod`, `beta`). Included in server name and instructions for multi-environment setups. Auto-derived from `RW_API_URL` if not set. |
+| `RUNWHEN_MODEL` | No | The model your MCP client runs (e.g. `claude-opus-5-5`). Sent as `X-RunWhen-Model`, so a capability draft you build shows it on the approval card. Unset: the client's own name from the MCP handshake (`mcp:<name>/<version>`). |
 | `RUNWHEN_CONTEXT_FILE` | No | Override path to `RUNWHEN.md`; otherwise auto-discovered from cwd. |
 | `RUNWHEN_REGISTRY_URL` | No | CodeBundle Registry URL (default: `https://registry.runwhen.com`). Public API, no auth required. |
 | `RUNWHEN_AIRGAP` | No | Set to `true` for airgapped environments. `search_registry` / `get_registry_codebundle` return a structured "registry disabled" response instead of attempting an outbound HTTPS call to the registry. |
