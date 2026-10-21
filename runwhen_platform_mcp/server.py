@@ -860,59 +860,90 @@ class _TTLCache:
 _user_email_cache = _TTLCache(ttl_seconds=3600, max_size=256)
 
 
-async def _get_user_email(token: str | None = None) -> str:
-    """Resolve the authenticated user's email address.
+def _identity_from_user_record(data: Any) -> str | None:
+    """PAPI's identity for a user record: ``email or username``.
 
-    Uses the PAPI ``/api/v3/users/whoami`` endpoint (preferred), falling back
-    to ``/api/v3/users/{id}/`` if whoami is unavailable.  Results are cached
-    with a 1-hour TTL.
+    This mirrors what PAPI's ``agentfarm-params`` reports to AgentFarm as the
+    token holder (``current_user.email or current_user.username``), so a value
+    built here is the one AgentFarm will accept as ``userId``.
+    """
+    if not isinstance(data, dict):
+        return None
+    for key in ("primaryEmail", "primary_email", "email", "username"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
 
-    Note: the whoami endpoint requires NO trailing slash on this PAPI instance.
+
+async def _resolve_caller_identity(token: str | None = None) -> str | None:
+    """Return the identity AgentFarm authenticates this token as, or None.
+
+    AgentFarm's ``SessionAuthMiddleware`` asks PAPI who holds the bearer token
+    and takes ``email or username``. Chat turns (and abort, fork, feedback)
+    refuse a body ``userId`` that is not that identity (403), so the value must
+    come from the same source:
+
+    1. PAPI ``/api/v3/users/whoami`` (no trailing slash on this PAPI) —
+       ``primaryEmail``, else ``username``;
+    2. PAPI ``/api/v3/users/{id}`` for a JWT that carries a user id;
+    3. the JWT's own ``email`` / ``primary_email`` claim, only when PAPI could
+       not be asked.
+
+    Successful lookups are cached per token for an hour. A failure returns
+    None and is NOT cached, so a transient PAPI error does not pin a wrong
+    identity for an hour.
     """
     token = token or _get_token()
 
     cached = _user_email_cache.get(token)
     if cached is not None:
-        return cached
+        return str(cached)
 
     payload = _decode_jwt_payload(token)
 
-    for claim in ("email", "primary_email"):
-        val = payload.get(claim)
-        if val and isinstance(val, str) and "@" in val:
-            _user_email_cache.set(token, val)
-            return val
+    identity: str | None = None
+    try:
+        identity = _identity_from_user_record(await _papi_get("/api/v3/users/whoami"))
+    except Exception:
+        identity = None
 
-    # Preferred: whoami endpoint returns the current user from the JWT
-    for path in ("/api/v3/users/whoami",):
-        try:
-            data = await _papi_get(path)
-            email = data.get("primaryEmail") or data.get("primary_email")
-            if email:
-                _user_email_cache.set(token, email)
-                return email
-            username = data.get("username", "")
-            if username and "@" in username:
-                _user_email_cache.set(token, username)
-                return username
-        except Exception:
-            continue
+    if not identity:
+        user_id = payload.get("user_id") or payload.get("sub")
+        if user_id is not None:
+            try:
+                identity = _identity_from_user_record(await _papi_get(f"/api/v3/users/{user_id}"))
+            except Exception:
+                identity = None
 
-    # Fallback: fetch user by ID from JWT claims
+    if not identity:
+        for claim in ("email", "primary_email"):
+            val = payload.get(claim)
+            if isinstance(val, str) and "@" in val:
+                identity = val
+                break
+
+    if identity:
+        _user_email_cache.set(token, identity)
+    return identity
+
+
+async def _get_user_email(token: str | None = None) -> str:
+    """Resolve the authenticated user's identity for metadata (e.g. SLX owners).
+
+    Same lookup as ``_resolve_caller_identity``. When it cannot be resolved this
+    falls back to the JWT's user id, else ``cursor@runwhen.com``, as before —
+    acceptable for owner metadata, but NOT for AgentFarm calls, which must use
+    ``_resolve_caller_identity`` and refuse to send an invented identity. The
+    fallback is not cached.
+    """
+    token = token or _get_token()
+    identity = await _resolve_caller_identity(token)
+    if identity:
+        return identity
+    payload = _decode_jwt_payload(token)
     user_id = payload.get("user_id") or payload.get("sub")
-    if user_id is not None:
-        try:
-            data = await _papi_get(f"/api/v3/users/{user_id}")
-            email = data.get("primaryEmail") or data.get("primary_email")
-            if email:
-                _user_email_cache.set(token, email)
-                return email
-        except Exception:
-            pass
-
-    fallback = str(user_id) if user_id else "cursor@runwhen.com"
-    _user_email_cache.set(token, fallback)
-    return fallback
+    return str(user_id) if user_id else "cursor@runwhen.com"
 
 
 _workspace_cache = _TTLCache(ttl_seconds=300, max_size=128)
@@ -3145,6 +3176,28 @@ def _build_registry_sli_yaml(
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)
 
 
+def _agentfarm_refusal_message(resp: httpx.Response) -> str:
+    """Explain an AgentFarm 400/403 on a chat request, including its ``detail``."""
+    try:
+        detail = resp.json().get("detail")
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        detail = None
+    detail_text = str(detail) if detail else resp.text[:500]
+    if resp.status_code == 403 and "userId" in detail_text:
+        return (
+            "AgentFarm returned 403 Forbidden: "
+            f"{detail_text}. The userId sent must be the identity PAPI reports for "
+            "your token (email, else username). Check that RUNWHEN_TOKEN belongs "
+            "to you and that /api/v3/users/whoami returns your user."
+        )
+    if resp.status_code == 403:
+        return (
+            f"AgentFarm returned 403 Forbidden: {detail_text}. "
+            "You may not have access to this workspace."
+        )
+    return f"AgentFarm returned 400 Bad Request: {detail_text}"
+
+
 async def _consume_agentfarm_sse(
     url: str,
     body: dict[str, Any],
@@ -3179,11 +3232,9 @@ async def _consume_agentfarm_sse(
                         "AgentFarm returned 401 Unauthorized. "
                         "Your RUNWHEN_TOKEN may be expired or invalid."
                     )
-                if resp.status_code == 403:
-                    raise ValueError(
-                        "AgentFarm returned 403 Forbidden. "
-                        "You may not have access to this workspace."
-                    )
+                if resp.status_code in (400, 403):
+                    await resp.aread()
+                    raise ValueError(_agentfarm_refusal_message(resp))
                 resp.raise_for_status()
                 buffer = ""
                 async for chunk in resp.aiter_text():
@@ -3319,7 +3370,20 @@ async def workspace_chat(
         and chatExportLink (shareable chat-export path when available).
     """
     ws = await _resolve_workspace(workspace_name)
-    user_id = await _get_user_email()
+    # AgentFarm keys the session on userId and refuses (403) any value other
+    # than the identity PAPI reports for this token, so never send a guess.
+    user_id = await _resolve_caller_identity()
+    if not user_id:
+        return _json_response(
+            {
+                "error": (
+                    "Could not resolve your RunWhen identity from PAPI "
+                    "(/api/v3/users/whoami). workspace_chat must send it as userId, "
+                    "and AgentFarm rejects any other value. Check RUNWHEN_TOKEN and "
+                    "RW_API_URL, then retry."
+                )
+            }
+        )
 
     url = f"{AGENTFARM_URL}/api/v1/workspaces/{ws}/chat-pro-sse"
     body: dict[str, Any] = {
