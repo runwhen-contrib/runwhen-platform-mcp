@@ -13,8 +13,10 @@ from mcp.types import CallToolRequestParams
 
 from runwhen_platform_mcp.tool_trace import (
     MCP_TOOL_HEADER,
+    MODEL_HEADER,
     REQUEST_ID_HEADER,
     ToolTraceMiddleware,
+    _current_client,
     _current_mcp_tool,
     _current_request_id,
     trace_headers,
@@ -102,3 +104,54 @@ class TestToolTraceMiddleware:
             assert completed["error"] == "boom"
 
         asyncio.run(_run())
+
+
+class TestModelHeader:
+    """The platform records X-RunWhen-Model as the draft's model on the approval card.
+    MCP can't see the model, so it sends RUNWHEN_MODEL when set, else the client's own name."""
+
+    @pytest.fixture(autouse=True)
+    def _no_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("RUNWHEN_MODEL", raising=False)
+        _current_client.set(None)
+
+    def test_absent_without_env_or_client(self) -> None:
+        assert MODEL_HEADER not in trace_headers()
+
+    def test_the_client_name_and_version_from_the_handshake(self) -> None:
+        _current_client.set("mcp:claude-code/2.1.3")
+        assert trace_headers()[MODEL_HEADER] == "mcp:claude-code/2.1.3"
+
+    def test_runwhen_model_env_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("RUNWHEN_MODEL", " claude-opus-5-5 ")
+        _current_client.set("mcp:claude-code/2.1.3")
+        assert trace_headers()[MODEL_HEADER] == "claude-opus-5-5"
+
+    def test_middleware_binds_the_client_from_the_session(self) -> None:
+        seen: dict[str, str | None] = {}
+
+        async def call_next(_ctx):
+            seen["model"] = trace_headers().get(MODEL_HEADER)
+            return "ok"
+
+        info = type("Info", (), {"name": "claude-code", "version": "2.1.3"})()
+        session = type("S", (), {"client_params": type("P", (), {"clientInfo": info})()})()
+        fastmcp_context = type("C", (), {"session": session})()
+        ctx = MiddlewareContext(
+            message=CallToolRequestParams(name="cap_write", arguments={}),
+            fastmcp_context=fastmcp_context,
+        )
+        asyncio.run(ToolTraceMiddleware().on_call_tool(ctx, call_next))
+        assert seen["model"] == "mcp:claude-code/2.1.3"
+        assert _current_client.get() is None
+
+    def test_middleware_without_a_session_sends_no_model(self) -> None:
+        seen: dict[str, str | None] = {}
+
+        async def call_next(_ctx):
+            seen["model"] = trace_headers().get(MODEL_HEADER)
+            return "ok"
+
+        ctx = MiddlewareContext(message=CallToolRequestParams(name="cap_write", arguments={}))
+        asyncio.run(ToolTraceMiddleware().on_call_tool(ctx, call_next))
+        assert seen["model"] is None

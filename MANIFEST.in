@@ -3,7 +3,7 @@ include LICENSE
 include VERSION
 include requirements.txt
 include .env.example
-recursive-include runwhen_platform_mcp *.md *.template *.example
+recursive-include runwhen_platform_mcp *.md *.template *.example *.json
 exclude *.py[cod]
 exclude __pycache__
 exclude .DS_Store

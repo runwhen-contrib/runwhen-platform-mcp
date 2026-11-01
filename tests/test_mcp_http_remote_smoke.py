@@ -15,6 +15,13 @@ Optional:
 - ``RW_SMOKE_WORKSPACE`` — short name (default ``t-oncall``).
 
 When URL or token is unset, tests skip so forks / repos without secrets stay green.
+They also skip when the endpoint is unreachable or rejects the token (HTTP 401/403):
+both are problems with the CI secrets, not with the code under test, and the skip
+reason says which secret to fix.
+
+Requires ``mcp>=2``: the streamable-HTTP transport yields ``(read, write)`` and
+takes an ``httpx2`` client. The server itself still uses ``httpx`` — the two
+packages coexist and share no exception hierarchy.
 """
 
 from __future__ import annotations
@@ -24,7 +31,7 @@ import json
 import os
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -57,7 +64,7 @@ def _strict_json(text: str) -> Any:
 
 
 def _tool_text(result: CallToolResult) -> str:
-    if result.isError:
+    if result.is_error:
         parts: list[str] = []
         for block in result.content:
             if isinstance(block, TextContent):
@@ -71,7 +78,7 @@ def _tool_text(result: CallToolResult) -> str:
     return "\n".join(texts)
 
 
-async def _run_remote_smoke() -> None:
+async def _run_remote_smoke(auth_rejections: list[int]) -> None:
     url = _mcp_url()
     token = os.environ["RUNWHEN_TOKEN"]
     ws = _workspace()
@@ -80,14 +87,27 @@ async def _run_remote_smoke() -> None:
         "Authorization": f"Bearer {token}",
         "Accept": "application/json, text/event-stream",
     }
-    timeout = httpx.Timeout(120.0, connect=30.0)
+    timeout = httpx2.Timeout(120.0, connect=30.0)
+
+    # mcp >=2 reports any non-404 HTTP error as MCPError(-32603, "Server returned
+    # an error response") and drops the status code, so record auth rejections here.
+    async def _record_auth_rejection(response: httpx2.Response) -> None:
+        if response.status_code in (401, 403):
+            auth_rejections.append(response.status_code)
+
     async with (
-        httpx.AsyncClient(headers=headers, timeout=timeout) as http,
-        streamable_http_client(url, http_client=http) as (read, write, _get_sid),
+        httpx2.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            event_hooks={"response": [_record_auth_rejection]},
+        ) as http,
+        # mcp >=2 yields (read, write); the session-id getter it used to yield
+        # third is gone, and was never used here.
+        streamable_http_client(url, http_client=http) as (read, write),
         ClientSession(read, write) as session,
     ):
         init = await session.initialize()
-        assert init.serverInfo is not None
+        assert init.server_info is not None
 
         tools = await session.list_tools()
         names = {t.name for t in tools.tools}
@@ -112,9 +132,14 @@ async def _run_remote_smoke() -> None:
         _strict_json(text_issues)
 
 
-def _connect_error(exc: BaseException) -> httpx.ConnectError | None:
-    """Return a ConnectError from *exc* or its nested causes/groups."""
-    if isinstance(exc, httpx.ConnectError):
+def _connect_error(exc: BaseException) -> httpx2.ConnectError | None:
+    """Return a ConnectError from *exc* or its nested causes/groups.
+
+    Must match the transport's client library: ``httpx2.ConnectError`` is a
+    distinct class from ``httpx.ConnectError``, not a subclass, so checking the
+    wrong one turns "endpoint unreachable" from a skip into a hard failure.
+    """
+    if isinstance(exc, httpx2.ConnectError):
         return exc
     nested = getattr(exc, "exceptions", None)
     if nested is not None:
@@ -129,10 +154,16 @@ def _connect_error(exc: BaseException) -> httpx.ConnectError | None:
 
 def test_remote_streamable_mcp_smoke() -> None:
     _require_remote_mcp_env()
+    auth_rejections: list[int] = []
     try:
-        asyncio.run(_run_remote_smoke())
+        asyncio.run(_run_remote_smoke(auth_rejections))
     except BaseException as exc:
         connect_err = _connect_error(exc)
         if connect_err is not None:
             pytest.skip(f"Remote MCP endpoint unreachable from this runner: {connect_err}")
+        if auth_rejections:
+            pytest.skip(
+                f"Remote MCP endpoint rejected RUNWHEN_TOKEN (HTTP {auth_rejections[0]}); "
+                "rotate the RUNWHEN_TOKEN secret for RUNWHEN_MCP_URL."
+            )
         raise
