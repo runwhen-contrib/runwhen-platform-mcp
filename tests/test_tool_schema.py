@@ -61,6 +61,7 @@ EXPECTED_TOOLS = {
     "delete_slx",
     "cap_list",
     "cap_run",
+    "artifact_read",
     "cap_ls",
     "cap_read",
     "cap_glob",

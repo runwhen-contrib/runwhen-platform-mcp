@@ -8,11 +8,13 @@ passed explicitly (FastMCP ``Field`` defaults do not resolve on a direct call).
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest import mock
 
 import pytest
 
 from runwhen_platform_mcp import server
+from runwhen_platform_mcp.capability_artifacts import MAX_OUTPUT_CHARS
 from runwhen_platform_mcp.capability_tasks import (
     CAP_LIST_OUTPUT_SCHEMA,
     CAP_RUN_OUTPUT_SCHEMA,
@@ -21,6 +23,7 @@ from runwhen_platform_mcp.capability_tasks import (
 )
 
 _CLUSTER = "kubernetes/clusters/prod"
+_ART = "art_" + "0123456789abcdef" * 2
 _TASK_URL = "/api/v4/workspaces/ws/capabilities/k8s-discovery/tasks"
 _SCHEMA = {
     "$id": "k8s-discovery/schemas/k8s_object.json",
@@ -290,6 +293,174 @@ class TestCapRunSync:
         ):
             _cap_run(task="k8s-discovery/cli", inputs={"cmd": "get pods"})
         post.assert_not_called()
+
+
+def _cli_described(**overrides):
+    return _described(
+        task="cli",
+        invocation=["sync"],
+        cli={"name": "kubectl"},
+        outputs={
+            "result": {
+                "schema": {"$id": "k8s-discovery/schemas/cli_result.json", "version": "0.1.0"}
+            }
+        },
+        **overrides,
+    )
+
+
+def _cli_run(response):
+    """Run the sync CLI task against ``_CLUSTER``; the platform CLI answers ``response``."""
+    get = mock.AsyncMock(return_value=_cli_described())
+    post = mock.AsyncMock(return_value=(200, response))
+    with (
+        mock.patch.object(server, "_papi_get", get),
+        mock.patch.object(server, "_papi_post", post),
+    ):
+        result = _cap_run(task="k8s-discovery/cli", inputs={"command": "logs pod/x"})
+    return result.structured_content["outputs"]["result"]
+
+
+class TestCapRunArtifactOutput:
+    def test_an_artifact_handle_is_passed_through_with_how_to_read_it(self) -> None:
+        handle = {"$artifact": _ART, "sizeBytes": 10_000_000, "head": "x" * 30_000, "tail": "y"}
+        view = _view()
+        view["outputs"] = {"report": {"schema": None, "value": handle}}
+        view["schemas"] = None
+        with mock.patch.object(server, "_papi_get", mock.AsyncMock(return_value=view)):
+            result = _cap_run(resource="", run_id="run-1")
+        CapRunResult.model_validate(result.structured_content)
+        report = result.structured_content["outputs"]["report"]
+        assert report["value"] == handle
+        assert report.get("schema") is None
+        assert f"ref='{_ART}'" in report["next"]
+        assert "truncated" not in report
+        assert "more" not in report
+
+    def test_the_handle_is_in_the_text_content_too(self) -> None:
+        handle = {"$artifact": _ART, "sizeBytes": 10_000_000, "head": "x", "tail": "y"}
+        view = _view()
+        view["outputs"] = {"report": {"schema": None, "value": handle}}
+        with mock.patch.object(server, "_papi_get", mock.AsyncMock(return_value=view)):
+            result = _cap_run(resource="", run_id="run-1")
+        assert json.loads(result.content[0].text)["outputs"]["report"]["value"] == handle
+
+
+class TestCapRunShortenedOutput:
+    def _run_with(self, value):
+        view = _view()
+        view["outputs"]["object"]["value"] = value
+        with mock.patch.object(server, "_papi_get", mock.AsyncMock(return_value=view)):
+            return _cap_run(resource="", run_id="run-1").structured_content["outputs"]["object"]
+
+    def test_a_huge_inline_output_is_shortened_and_says_where_to_read_all_of_it(self) -> None:
+        entry = self._run_with({"items": ["x" * 1000] * 500})
+        assert entry["truncated"] is True
+        assert entry["more"] == {"tool": "artifact_read", "ref": "run:run-1/outputs/object"}
+        assert len(json.dumps(entry["value"])) <= MAX_OUTPUT_CHARS
+        assert entry["value"]["items"][-1] == {"omittedItems": 490}
+        assert entry["schema"] == {"$id": _SCHEMA["$id"], "version": "0.1.0"}
+
+    def test_a_small_output_is_returned_whole(self) -> None:
+        entry = self._run_with({"items": ["a", "b"]})
+        assert entry["value"] == {"items": ["a", "b"]}
+        assert "truncated" not in entry
+        assert "more" not in entry
+
+
+class TestCapRunArtifactInput:
+    def test_a_task_handed_an_artifact_runs_with_no_target(self) -> None:
+        get = mock.AsyncMock(side_effect=[_described(), _view("succeeded")])
+        post = mock.AsyncMock(return_value=(202, {"runUuid": "run-1", "status": "queued"}))
+        with (
+            mock.patch.object(server, "_papi_get", get),
+            mock.patch.object(server, "_papi_post", post),
+        ):
+            result = _cap_run(resource="", inputs={"source": _ART})
+        post.assert_awaited_once_with(
+            "/api/v4/workspaces/ws/capability-runs",
+            {
+                "capability": "k8s-discovery",
+                "task": "inspect",
+                "inputs": {"source": _ART},
+                "target": {"path": ""},
+            },
+        )
+        assert result.structured_content["status"] == "succeeded"
+
+    def test_an_input_that_is_not_an_art_ref_still_needs_a_resource(self) -> None:
+        get = mock.AsyncMock()
+        post = mock.AsyncMock()
+        with (
+            mock.patch.object(server, "_papi_get", get),
+            mock.patch.object(server, "_papi_post", post),
+            pytest.raises(ValueError, match="resource is required"),
+        ):
+            _cap_run(resource="", inputs={"source": "not-an-art-ref"})
+        get.assert_not_called()
+        post.assert_not_called()
+
+    def test_a_sync_task_needs_a_resource_even_with_an_artifact_input(self) -> None:
+        get = mock.AsyncMock(return_value=_cli_described())
+        post = mock.AsyncMock()
+        with (
+            mock.patch.object(server, "_papi_get", get),
+            mock.patch.object(server, "_papi_post", post),
+            pytest.raises(ValueError, match="resource is required"),
+        ):
+            _cap_run(task="k8s-discovery/cli", resource="", inputs={"source": _ART})
+        post.assert_not_called()
+
+
+class TestCapRunSyncFullOutput:
+    _FULL = {"task": "logs", "inputs": {"tailLines": 5000}}
+
+    def test_a_cut_short_output_names_the_queued_task_that_reads_all_of_it(self) -> None:
+        entry = _cli_run(
+            {
+                "argv": ["logs", "pod/x"],
+                "exitCode": 0,
+                "stdout": "tail of the log\n",
+                "stderr": "",
+                "truncated": True,
+                "fullOutput": self._FULL,
+            }
+        )
+        assert entry["more"] == {
+            "tool": "cap_run",
+            "operation": "run",
+            "task": "k8s-discovery/logs",
+            "inputs": {"tailLines": 5000},
+            "resource": _CLUSTER,
+        }
+        assert entry["value"]["fullOutput"] == self._FULL
+        assert entry["value"]["truncated"] is True
+        assert "hint" not in entry
+
+    def test_a_task_of_another_capability_is_left_as_given(self) -> None:
+        full = {"task": "other-cap/x", "inputs": {"a": 1}}
+        entry = _cli_run({"argv": [], "exitCode": 0, "stdout": "ok", "fullOutput": full})
+        assert entry["more"]["task"] == "other-cap/x"
+        assert entry["more"]["inputs"] == {"a": 1}
+
+    def test_the_resource_the_cli_ran_against_always_wins(self) -> None:
+        full = {**self._FULL, "resource": "kubernetes/clusters/other"}
+        entry = _cli_run({"argv": [], "exitCode": 0, "stdout": "ok", "fullOutput": full})
+        assert entry["more"]["resource"] == _CLUSTER
+
+    def test_an_output_shortened_here_says_to_narrow_the_command(self) -> None:
+        entry = _cli_run({"argv": [], "exitCode": 0, "stdout": "x" * 100_000, "stderr": ""})
+        assert entry["truncated"] is True
+        assert "narrower command" in entry["hint"]
+        assert "more" not in entry
+        assert len(json.dumps(entry["value"])) <= MAX_OUTPUT_CHARS
+
+    def test_a_small_output_has_neither_a_hint_nor_a_more(self) -> None:
+        entry = _cli_run({"argv": [], "exitCode": 0, "stdout": "ok", "stderr": ""})
+        assert entry["value"]["stdout"] == "ok"
+        assert "truncated" not in entry
+        assert "hint" not in entry
+        assert "more" not in entry
 
 
 class TestDeclaredSchemas:

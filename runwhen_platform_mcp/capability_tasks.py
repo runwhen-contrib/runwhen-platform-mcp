@@ -11,6 +11,10 @@ Both tools return ``structuredContent`` that conforms to the ``outputSchema``
 they declare (``CAP_LIST_OUTPUT_SCHEMA`` / ``CAP_RUN_OUTPUT_SCHEMA``). Every
 output value a run returns is tagged with the ``$id`` and ``version`` of the
 JSON Schema it conforms to; the full schemas ride along under ``schemas``.
+An output the platform stored as an artifact is the exception: its ``schema``
+is null and its value is the artifact's handle, read with ``artifact_read``
+(see ``capability_artifacts``). Any other output too big for a client's
+context is shortened, with a ref to read all of it.
 
 Everything here is pure: the tool functions in ``server.py`` make the HTTP calls
 and hand the responses to the builders below.
@@ -22,6 +26,12 @@ from typing import Any, Literal
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
+
+from runwhen_platform_mcp.capability_artifacts import (
+    artifact_next_hint,
+    fit_output,
+    is_artifact,
+)
 
 #: The request a task that runs synchronously through a platform CLI takes,
 #: whichever CLI serves it.
@@ -49,6 +59,11 @@ CLI_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 OPEN_STATUSES = frozenset({"queued", "running"})
+
+_SHORTENED_HINT = (
+    "Shortened to fit; re-run with a narrower command (namespace, selector, --tail) "
+    "or a smaller maxBytes."
+)
 
 
 class CapTask(BaseModel):
@@ -100,7 +115,12 @@ class CapRunResult(BaseModel):
     runId: str | None = None
     outputs: dict[str, dict[str, Any]] | None = Field(
         default=None,
-        description='Output name -> {"schema": {"$id", "version"}, "value": ...}.',
+        description=(
+            'Output name -> {"schema": {"$id", "version"}, "value": ...}. An artifact '
+            'output has schema null, a {"$artifact": "art_...", ...} handle as its value '
+            "and `next` saying how to read it. A shortened output has `truncated` and "
+            "`more` naming the call that reads all of it."
+        ),
     )
     schemas: dict[str, dict[str, Any]] | None = Field(
         default=None, description="Full output JSON Schemas keyed by $id."
@@ -192,6 +212,27 @@ def describe_result(task: str, described: dict[str, Any]) -> CapRunResult:
     )
 
 
+def _output(out: dict[str, Any], more_ref: str | None) -> dict[str, Any]:
+    """One run output for the client.
+
+    An artifact handle is passed through as-is, with ``next`` saying how to
+    read it. Anything else is shortened if huge (``truncated``), with ``more``
+    naming where to read all of it.
+    """
+    value = out.get("value")
+    entry: dict[str, Any] = {"schema": out.get("schema")}
+    if is_artifact(value):
+        entry["value"] = value
+        entry["next"] = artifact_next_hint(value["$artifact"])
+        return entry
+    entry["value"], truncated = fit_output(value)
+    if truncated:
+        entry["truncated"] = True
+        if more_ref:
+            entry["more"] = {"tool": "artifact_read", "ref": more_ref}
+    return entry
+
+
 def run_result(task: str, view: dict[str, Any]) -> CapRunResult:
     """Build ``cap_run``'s run result from a run's status view."""
     status = view.get("status")
@@ -202,6 +243,11 @@ def run_result(task: str, view: dict[str, Any]) -> CapRunResult:
             f"Still {status}. Call cap_run again with operation=run, task={task} and "
             f"run_id={run_id} to keep waiting; do not start another run."
         )
+    outputs = {
+        name: _output(out, f"run:{run_id}/outputs/{name}" if run_id else None)
+        for name, out in (view.get("outputs") or {}).items()
+        if isinstance(out, dict)
+    }
     return CapRunResult(
         operation="run",
         task=task,
@@ -209,18 +255,39 @@ def run_result(task: str, view: dict[str, Any]) -> CapRunResult:
         file=view.get("file"),
         status=status,
         runId=str(run_id) if run_id else None,
-        outputs=view.get("outputs") or {},
+        outputs=outputs,
         schemas=view.get("schemas") or None,
         error=view.get("error"),
         message=message,
     )
 
 
-def cli_run_result(task: str, described: dict[str, Any], response: dict[str, Any]) -> CapRunResult:
+def _full_output_more(full: Any, task: str, resource: str) -> dict[str, Any] | None:
+    """The ``cap_run`` call that reads all of a CLI output the CLI cut short.
+
+    ``fullOutput`` names a queued task and its inputs; ``resource`` is the one
+    the CLI ran against and always wins over a key of ``fullOutput``.
+    """
+    if not isinstance(full, dict):
+        return None
+    more: dict[str, Any] = {"tool": "cap_run", "operation": "run", **full, "resource": resource}
+    named = more.get("task")
+    capability = split_task(task)
+    if capability and isinstance(named, str) and "/" not in named:
+        # A bare "logs" means a task of the same capability as this one.
+        more["task"] = f"{capability[0]}/{named}"
+    return more
+
+
+def cli_run_result(
+    task: str, described: dict[str, Any], response: dict[str, Any], resource: str
+) -> CapRunResult:
     """Build ``cap_run``'s run result from a synchronous platform CLI call.
 
     The CLI's response becomes the task's one declared output, in the shape
-    that output's schema describes.
+    that output's schema describes. When the CLI cut its output short and says
+    which queued task reads all of it (``fullOutput``), ``more`` is that
+    ``cap_run`` call; an output shortened here instead says to narrow the command.
     """
     stdout = response.get("stdout") or ""
     value = {
@@ -232,17 +299,25 @@ def cli_run_result(task: str, described: dict[str, Any], response: dict[str, Any
         "stdoutBytes": len(stdout.encode("utf-8")),
         "durationMs": response.get("durationMs"),
     }
+    if response.get("fullOutput"):
+        value["fullOutput"] = response["fullOutput"]
     outputs = described.get("outputs") or {}
     name, declared = next(iter(outputs.items()), ("result", None))
     schema: dict[str, Any] = (declared.get("schema") if isinstance(declared, dict) else None) or {}
     ref = {"$id": schema["$id"], "version": schema.get("version")} if schema.get("$id") else None
+    entry = _output({"schema": ref, "value": value}, None)
+    more = _full_output_more(response.get("fullOutput"), task, resource)
+    if more:
+        entry["more"] = more
+    elif entry.get("truncated"):
+        entry["hint"] = _SHORTENED_HINT
     return CapRunResult(
         operation="run",
         task=task,
         path=described.get("path"),
         file=described.get("file"),
         status="succeeded",
-        outputs={name: {"schema": ref, "value": value}},
+        outputs={name: entry},
         schemas={schema["$id"]: schema} if ref else None,
     )
 

@@ -65,6 +65,11 @@ try:
 except ImportError:  # FastMCP releases that keep it in fastmcp.tools.tool
     from fastmcp.tools.tool import ToolResult  # type: ignore[no-redef]
 
+from runwhen_platform_mcp.capability_artifacts import (
+    has_artifact_input,
+    read_request,
+    read_result,
+)
 from runwhen_platform_mcp.capability_fs_tools import (
     CAPABILITY_FS_READ_ONLY_TOOLS,
     CAPABILITY_FS_TOOLS,
@@ -8035,7 +8040,10 @@ async def cap_run(
     task: str = Field(description='"capability/task", as listed by cap_list.'),
     resource: str = Field(
         default="",
-        description="Path or URN of the resource to run against (run); picks describe's example.",
+        description=(
+            "Path or URN of the resource to run against (run); picks describe's example. "
+            "Omit it when an input is an art_ ref."
+        ),
     ),
     inputs: Annotated[
         dict[str, Any] | None, Field(description="The task's inputs by name (run).")
@@ -8060,6 +8068,13 @@ async def cap_run(
     output carries the `$id` and `version` of its schema (full schemas under
     `schemas`). A run still going after `wait_seconds` returns its `runId`: call
     again with `run_id` to keep waiting instead of starting another run.
+
+    An output stored as an artifact comes back as a `{"$artifact": "art_…"}`
+    handle with its size and a short head and tail; `next` says how to read
+    it with `artifact_read`. An output too big to return is shortened
+    (`truncated`) and `more` names the call that reads all of it. A task that
+    reads an artifact takes the art_ ref as an input and runs with no
+    `resource`.
     """
     ws = await _resolve_workspace(workspace_name)
     capability, name = _task_ref(task)
@@ -8076,14 +8091,22 @@ async def cap_run(
     if run_id:
         view = await _wait_for_task_run(ws, capability, name, run_id, wait_seconds)
         return _structured_result(run_result(task, view))
-    if not resource:
-        raise ValueError("resource is required to run a task: pass the path or URN to run it on.")
+    given = inputs or {}
+    # A task handed an artifact runs against the resource of the run that produced it.
+    if not resource and not has_artifact_input(given):
+        raise ValueError(
+            "resource is required to run a task: pass the path or URN to run it on. "
+            "A task that reads an artifact takes its bare art_ ref as an input instead."
+        )
 
     described = await _papi_get(endpoint, params={"example": "false"})
     if not described.get("readOnly"):
         raise ValueError(f"{task} is not read-only; only read-only tasks can be run.")
-    given = inputs or {}
     if "sync" in (described.get("invocation") or []):
+        if not resource:
+            raise ValueError(
+                f"resource is required to run {task}: it runs synchronously against a resource."
+            )
         cli_name = (described.get("cli") or {}).get("name")
         if not cli_name:
             raise ValueError(f"{task} runs synchronously, but no platform CLI is named for it.")
@@ -8097,14 +8120,60 @@ async def cap_run(
         _, response = await _papi_post(
             f"/api/v4/workspaces/{ws}/platform-cli/{quote(cli_name, safe='')}:run", body
         )
-        return _structured_result(cli_run_result(task, described, response))
+        return _structured_result(cli_run_result(task, described, response, resource))
 
+    # An empty target path means no target: the platform takes it from the artifact input.
     _, started = await _papi_post(
         f"/api/v4/workspaces/{ws}/capability-runs",
         {"capability": capability, "task": name, "inputs": given, "target": {"path": resource}},
     )
     view = await _wait_for_task_run(ws, capability, name, str(started.get("runUuid")), wait_seconds)
     return _structured_result(run_result(task, view))
+
+
+@mcp.tool
+async def artifact_read(
+    workspace_name: str = Field(description="The workspace (e.g. 't-oncall')."),
+    op: Literal["list", "stat", "head", "tail", "range"] = Field(description="What to do."),
+    ref: str = Field(
+        default="",
+        description=(
+            "What to read (not list): an art_ ref (an output's $artifact) or "
+            "'run:<runUuid>/outputs/<name>' (a shortened output's more.ref). "
+            "stat takes only an art_ ref."
+        ),
+    ),
+    lines: int = Field(default=200, description="Lines to return (head, tail); at most 2000."),
+    offset: int = Field(
+        default=0, description="Byte offset to start at (range); a page's nextOffset."
+    ),
+    bytes: int = Field(
+        default=0,
+        description="Most bytes to return (range); at most 65536, 0 for the default (65536).",
+    ),
+    task: str = Field(default="", description="Only artifacts of this task (list), e.g. 'logs'."),
+    run_id: str = Field(
+        default="", description="Only artifacts of this run (list): a cap_run result's runId."
+    ),
+) -> str:
+    """Read one page of a capability artifact or a shortened cap_run output; never the whole thing.
+
+    op="list": recent artifacts, newest first. op="stat": one artifact's size,
+    state and a short head and tail. op="head" / "tail": the first / last
+    `lines` lines. op="range": raw bytes from `offset` (base64 for a binary
+    artifact); resume at the last page's `nextOffset`. A page is at most
+    2000 lines or 64 KiB, and `next` says what to read next.
+
+    `cap_run` returns an output stored as an artifact as a `$artifact` handle,
+    and an output it shortened with `more.ref`. To search or query an artifact,
+    run `cap_run` with task `artifact-tools/grep`, `jq`, `sql` or `slice`, the
+    art_ ref as the `source` input and no resource, instead of paging through it.
+    """
+    ws = await _resolve_workspace(workspace_name)
+    path, params = read_request(
+        ws, op, ref, lines=lines, offset=offset, nbytes=bytes, task=task, run_id=run_id
+    )
+    return _json_response(read_result(op, ref, await _papi_get(path, params=params)))
 
 
 # ---------------------------------------------------------------------------
@@ -8372,6 +8441,7 @@ _TOOL_FUNCTIONS = [
     delete_slx,
     cap_list,
     cap_run,
+    artifact_read,
     cap_ls,
     cap_read,
     cap_glob,
