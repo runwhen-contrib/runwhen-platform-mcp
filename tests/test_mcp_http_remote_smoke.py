@@ -15,6 +15,9 @@ Optional:
 - ``RW_SMOKE_WORKSPACE`` — short name (default ``t-oncall``).
 
 When URL or token is unset, tests skip so forks / repos without secrets stay green.
+They also skip when the endpoint is unreachable or rejects the token (HTTP 401/403):
+both are problems with the CI secrets, not with the code under test, and the skip
+reason says which secret to fix.
 
 Requires ``mcp>=2``: the streamable-HTTP transport yields ``(read, write)`` and
 takes an ``httpx2`` client. The server itself still uses ``httpx`` — the two
@@ -75,7 +78,7 @@ def _tool_text(result: CallToolResult) -> str:
     return "\n".join(texts)
 
 
-async def _run_remote_smoke() -> None:
+async def _run_remote_smoke(auth_rejections: list[int]) -> None:
     url = _mcp_url()
     token = os.environ["RUNWHEN_TOKEN"]
     ws = _workspace()
@@ -85,8 +88,19 @@ async def _run_remote_smoke() -> None:
         "Accept": "application/json, text/event-stream",
     }
     timeout = httpx2.Timeout(120.0, connect=30.0)
+
+    # mcp >=2 reports any non-404 HTTP error as MCPError(-32603, "Server returned
+    # an error response") and drops the status code, so record auth rejections here.
+    async def _record_auth_rejection(response: httpx2.Response) -> None:
+        if response.status_code in (401, 403):
+            auth_rejections.append(response.status_code)
+
     async with (
-        httpx2.AsyncClient(headers=headers, timeout=timeout) as http,
+        httpx2.AsyncClient(
+            headers=headers,
+            timeout=timeout,
+            event_hooks={"response": [_record_auth_rejection]},
+        ) as http,
         # mcp >=2 yields (read, write); the session-id getter it used to yield
         # third is gone, and was never used here.
         streamable_http_client(url, http_client=http) as (read, write),
@@ -140,10 +154,16 @@ def _connect_error(exc: BaseException) -> httpx2.ConnectError | None:
 
 def test_remote_streamable_mcp_smoke() -> None:
     _require_remote_mcp_env()
+    auth_rejections: list[int] = []
     try:
-        asyncio.run(_run_remote_smoke())
+        asyncio.run(_run_remote_smoke(auth_rejections))
     except BaseException as exc:
         connect_err = _connect_error(exc)
         if connect_err is not None:
             pytest.skip(f"Remote MCP endpoint unreachable from this runner: {connect_err}")
+        if auth_rejections:
+            pytest.skip(
+                f"Remote MCP endpoint rejected RUNWHEN_TOKEN (HTTP {auth_rejections[0]}); "
+                "rotate the RUNWHEN_TOKEN secret for RUNWHEN_MCP_URL."
+            )
         raise
