@@ -411,19 +411,6 @@ class TestWorkspaceRead:
 
         _run(_test())
 
-    def test_get_workspace_config_index_returns_dict(self) -> None:
-        async def _test():
-            async for session in _session():
-                ws = _workspace()
-                payload = await _call(
-                    session,
-                    "get_workspace_config_index",
-                    {"workspace_name": ws},
-                )
-                assert isinstance(payload, dict)
-
-        _run(_test())
-
     def test_get_workspace_secrets_returns_dict(self) -> None:
         async def _test():
             async for session in _session():
@@ -449,24 +436,6 @@ class TestWorkspaceRead:
                 )
                 assert isinstance(payload, dict)
                 assert "locations" in payload
-
-        _run(_test())
-
-    def test_search_workspace_returns_list(self) -> None:
-        async def _test():
-            async for session in _session():
-                ws = _workspace()
-                raw = await session.call_tool(
-                    "search_workspace",
-                    {"workspace_name": ws, "query": "kubernetes"},
-                )
-                if raw.isError:
-                    text = "\n".join(b.text for b in raw.content if isinstance(b, TextContent))
-                    if "503" in text or "unavailable" in text.lower():
-                        pytest.skip(f"search_workspace unavailable: {text[:100]}")
-                    raise AssertionError(f"tool error: {text}")
-                payload = _strict_json(_tool_text(raw))
-                assert isinstance(payload, (list, dict))
 
         _run(_test())
 

@@ -37,13 +37,12 @@ RunWhen tasks execute inside the user's clusters via lightweight runners. Your j
 ### Reference
 - `workspace_chat` — Ask the platform about existing tasks, patterns, or infrastructure when you need context for what to build
 - `get_workspace_slxs` — See what's already monitored to avoid duplicating coverage
-- `search_workspace` — Find existing tasks or resources related to what you're building
 
 ## Approach
 
 1. **Understand the system** — Read the codebase, architecture docs, or user description. Identify components, dependencies, databases, and likely failure modes.
 2. **Load context** — Call `get_workspace_context` to get infrastructure-specific rules. These override your defaults.
-3. **Check existing coverage** — Use `get_workspace_slxs` or `search_workspace` to see what's already monitored. Don't duplicate.
+3. **Check existing coverage** — Use `get_workspace_slxs` or `workspace_chat` to see what's already monitored. Don't duplicate.
 4. **Design the check** — Decide what to monitor, what constitutes an issue, appropriate severity levels, and actionable next steps.
 5. **Discover secrets** — Call `get_workspace_secrets` to know what's available. (Location auto-resolves — only call `get_workspace_locations` if the server reports multiple options.)
 6. **Write the script** — Follow the RunWhen contract. Apply RUNWHEN.md rules (replica targeting, kubectl flags, etc.).

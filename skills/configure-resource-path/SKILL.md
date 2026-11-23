@@ -5,13 +5,12 @@ description: "Set the resourcePath on an SLX for workspace-chat indexing and sea
 
 # Configure Resource Path
 
-Sets `spec.additionalContext.resourcePath` on an SLX so workspace-chat and usearch can discover and group tasks by infrastructure location.
+Sets `spec.additionalContext.resourcePath` on an SLX so workspace-chat can discover and group tasks by infrastructure location.
 
 ## What resourcePath does
 
 `resourcePath` is the **canonical identifier** for where an SLX's target resource lives. It controls:
 - How workspace-chat finds and routes questions to relevant tasks
-- How usearch indexes SLXs for keyword and semantic search
 - How the UI groups SLXs by infrastructure location
 
 ## Format
@@ -78,6 +77,6 @@ spec:
 
 ## Important: commit reconciliation
 
-After `commit_slx` succeeds, it takes time for the workspace config repo commit to reconcile through the system. The SLX will not appear in `get_workspace_config_index`, `search_workspace`, or workspace-chat results immediately. Allow 1-3 minutes for the platform to process the commit and update its indexes.
+After `commit_slx` succeeds, it takes time for the workspace config repo commit to reconcile through the system. The SLX will not appear in `get_workspace_slxs` or workspace-chat results immediately. Allow 1-3 minutes for the platform to process the commit and update its indexes.
 
-`resource_path` is a **write** parameter on `commit_slx` and `deploy_registry_codebundle` only. Query tools such as `get_workspace_config_index` accept `workspace_name` alone — do not pass `resource_path` to them.
+`resource_path` is a **write** parameter on `commit_slx` and `deploy_registry_codebundle` only. Query tools such as `get_workspace_slxs` accept `workspace_name` alone — do not pass `resource_path` to them.

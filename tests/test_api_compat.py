@@ -94,12 +94,6 @@ class TestToolParameterTypes:
         props = tool.parameters.get("properties", {})
         assert "limit" in props
 
-    def test_search_workspace_has_query(self, tools) -> None:
-        tool = _find_tool(tools, "search_workspace")
-        assert tool is not None
-        props = tool.parameters.get("properties", {})
-        assert "query" in props
-
     def test_get_workspace_issues_has_since(self, tools) -> None:
         tool = _find_tool(tools, "get_workspace_issues")
         assert tool is not None
@@ -209,10 +203,8 @@ TOOLS_WITH_WORKSPACE_NAME = [
     "get_workspace_issues",
     "get_workspace_slxs",
     "get_run_sessions",
-    "get_workspace_config_index",
     "get_issue_details",
     "get_slx_runbook",
-    "search_workspace",
     "list_knowledge_base_articles",
     "get_knowledge_base_article",
     "create_knowledge_base_article",

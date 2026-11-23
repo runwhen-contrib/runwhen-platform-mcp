@@ -75,7 +75,6 @@ def test_list_workspaces_strict_json(live_server) -> None:
         ),
         ("get_workspace_slxs", lambda s, ws: s.get_workspace_slxs(ws)),
         ("get_run_sessions", lambda s, ws: s.get_run_sessions(ws, limit=3)),
-        ("get_workspace_config_index", lambda s, ws: s.get_workspace_config_index(ws)),
         ("get_workspace_chat_config", lambda s, ws: s.get_workspace_chat_config(ws)),
         (
             "list_chat_rules",
@@ -96,11 +95,6 @@ def test_list_workspaces_strict_json(live_server) -> None:
 def test_workspace_tool_strict_json(live_server, name: str, coro_factory) -> None:
     ws = _workspace()
     raw = _run(coro_factory(live_server, ws))
-    _strict_json(raw)
-
-
-def test_search_workspace_strict_json(live_server) -> None:
-    raw = _run(live_server.search_workspace("pod", _workspace()))
     _strict_json(raw)
 
 

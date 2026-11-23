@@ -497,7 +497,7 @@ The MCP server replicates this flow for AI coding assistants:
 5. **Iterate** — Agent reviews output, fixes script, re-tests
 6. **Commit** — Agent calls `commit_slx` with script, metadata, and configuration
    - **GitOps alternative:** call `render_codecollection_skill` (see `commit-to-codecollection` skill) to emit a private Custom Discovery CodeCollection with `.runwhen/SKILL_TEMPLATE.md` and `raw_script.{py,sh}` for human review
-7. **Verify** — Agent confirms SLX was created via existing `get_workspace_slxs` or `search_workspace`
+7. **Verify** — Agent confirms SLX was created via existing `get_workspace_slxs` or `workspace_chat`
 
 **Workspace chat and task execution:** The `workspace_chat` tool talks to the RunWhen AI assistant, which can discover tasks, suggest which to run, and analyze run session output. It **cannot** execute tasks (e.g. "run T-0"); task execution is gated through the RunWhen UI for security. Run sessions can be triggered from the UI or other platform mechanisms—the MCP server does not trigger them.
 

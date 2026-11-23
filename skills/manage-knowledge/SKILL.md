@@ -155,4 +155,4 @@ abstract_entities: ["payments", "deployment", "servicenow", "change-requests"]
 - **Point to Tasks or external systems** for information that changes frequently
 - **Add time bounds** for temporary notes (e.g. "valid through Friday release window")
 - **Remove or archive** short-term notes after the event passes
-- **Use abstract_entities liberally** — they improve semantic search and concept linking
+- **Use abstract_entities liberally** — they improve KB search and concept linking

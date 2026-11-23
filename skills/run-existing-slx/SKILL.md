@@ -23,7 +23,7 @@ not actually trigger it. You MUST use `run_slx` for execution.
 
 | Action | Correct tool |
 |--------|-------------|
-| Find available tasks | `search_workspace` or `workspace_chat` |
+| Find available tasks | `workspace_chat` or `get_workspace_slxs` |
 | See what a task does | `get_slx_runbook` or `workspace_chat` |
 | View recent run results | `get_run_sessions` or `workspace_chat` |
 | **Actually execute a task** | **`run_slx`** |
@@ -31,7 +31,7 @@ not actually trigger it. You MUST use `run_slx` for execution.
 
 ## Workflow
 
-1. **Find the SLX** — Use `search_workspace` or `get_workspace_slxs` to find the SLX name
+1. **Find the SLX** — Use `workspace_chat` or `get_workspace_slxs` to find the SLX name
 2. **Verify it** (optional) — Use `get_slx_runbook` to see what tasks it will run
 3. **Execute** — Call `run_slx` with the SLX short name
 4. **Review results** — The tool returns pass/fail status and output
@@ -78,8 +78,9 @@ run_slx(
 ### Full discovery-to-execution flow
 
 ```
-# 1. Find the SLX
-search_workspace(query="pod health", workspace_name="my-workspace")
+# 1. Find the SLX (returns every SLX; pick the one matching "pod health",
+#    or ask workspace_chat to find it by topic)
+get_workspace_slxs(workspace_name="my-workspace")
 
 # 2. See what it does
 get_slx_runbook(slx_name="k8s-pod-health", workspace_name="my-workspace")
@@ -110,7 +111,7 @@ run_slx(slx_name="k8s-pod-health", workspace_name="my-workspace")
 | Problem | Solution |
 |---------|----------|
 | `Unsupported task_titles value` | Use `task_titles="*"` — never pass the display title from `get_slx_runbook` |
-| `unexpected_keyword_argument` on `resource_path` | `resource_path` is only for `commit_slx` / `deploy_registry_codebundle`, not query tools like `get_workspace_config_index` |
+| `unexpected_keyword_argument` on `resource_path` | `resource_path` is only for `commit_slx` / `deploy_registry_codebundle`, not query tools like `get_workspace_slxs` |
 | "SLX not found" / 404 | Verify the SLX name with `get_workspace_slxs` |
 | Timeout after 300s | SLX may still be running. Check `get_run_sessions` later |
 | No output returned | The runner may still be processing. Wait and check `get_run_sessions` |

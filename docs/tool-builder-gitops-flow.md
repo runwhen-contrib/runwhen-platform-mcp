@@ -5,6 +5,11 @@
 
 ![RunWhen Tool Builder GitOps Flow](assets/tool-builder-gitops-flow.png)
 
+> **Diagram note:** this image predates the dep-strip removal of the workspace
+> indexing service and platform Vault. Its indexing / configuration-index steps and
+> "local Vault mount" labels are outdated: PAPI builds the RunbookEnv itself
+> and workers resolve PAPI workspace secrets.
+
 ---
 
 ## Why this flow exists
@@ -192,17 +197,17 @@ workspaces would render the SLX before it's live.
    runbook points at `rw-generic-codecollection` — this is an *identifier* for
    the worker to know which pre-baked codebundle to execute, not a fetch URL.
 5. workspace-builder commits the rendered YAML to the workspace repo; PAPI
-   syncs it (and Sobow indexes it) so the SLX is visible in the UI and
+   syncs it so the SLX is visible in the UI and
    available to `workspace_chat`.
 6. When a user or scheduler triggers the SLX, **PAPI** (not the runner) reads
-   the pre-rendered runbook via Sobow, assembles the RunbookEnv (`TASK_TITLE`,
+   the pre-rendered runbook from the workspace config, assembles the RunbookEnv (`TASK_TITLE`,
    `GEN_CMD`, `INTERPRETER`, `CONFIG_ENV_MAP`, `SECRET_ENV_MAP`,
    `TIMEOUT_SECONDS`, `secretsProvided`) and posts it to `runner-control` in
    the customer cluster.
 7. `runner-control` dispatches the TaskSet to a **task-worker pod** whose
    image already contains `rw-generic-codecollection/codebundles/tool-builder`.
-   No runtime git clone; the worker resolves secrets from its local
-   Vault-mounted files, decodes `GEN_CMD`, and runs the robot.
+   No runtime git clone; the worker resolves the SLX's PAPI workspace
+   secrets (mounted as files on the runner), decodes `GEN_CMD`, and runs the robot.
 
 **Why it matters.** Two invariants make this cheap to operate:
 
@@ -262,11 +267,10 @@ rewind when something goes wrong.
 
 The build flow above ends at "SLX rendered into the workspace." What actually
 happens when a user (or scheduler, or alert) triggers the SLX is a coordination
-between seven actors. Two facts about this runtime are load-bearing and easy
+between six actors. Two facts about this runtime are load-bearing and easy
 to get wrong:
 
-1. **PAPI pre-cooks the RunbookEnv** from the workspace repo (via Sobow's
-   cached `WorkspaceConfigurationIndex`) and hands runner-control a fully
+1. **PAPI pre-cooks the RunbookEnv** from the workspace repo and hands runner-control a fully
    resolved config. runner-control does **not** need to call back into PAPI
    for taskset config.
 2. **Worker pods have codecollections pre-baked** into their images at build
@@ -277,16 +281,20 @@ to get wrong:
 
 ![Tool Builder Runtime Sequence](assets/tool-builder-runtime-sequence.png)
 
+> **Diagram note:** this image predates the dep-strip removal of the workspace
+> indexing service and platform Vault. Its indexing / configuration-index steps and
+> "local Vault mount" labels are outdated: PAPI builds the RunbookEnv itself
+> and workers resolve PAPI workspace secrets.
+
 **Why this view matters.** Every debug session starts with the question
-*"which of these seven actors is stuck?"* The answer changes what you check:
+*"which of these six actors is stuck?"* The answer changes what you check:
 
 | Actor stuck | First place to look |
 |-------------|--------------------|
 | PAPI pre-cook fails | Runbook YAML missing required config (missing `secretsProvided`, empty `configProvided`); workspace-builder hasn't rendered the SLX yet |
-| Sobow returns stale/no index | Workspace indexing task in progress or errored — see `sobow-index` deployment logs |
 | runner-control rejects the taskset | Config is `None` (pre-cook silently returned nothing) or mTLS certs between PAPI and runner-control are wrong |
 | Worker pod never picks up the job | task-worker deployment scaled to zero, HPA misconfig, or celery queue backed up |
-| Secrets can't be resolved on the worker | `discover-secrets` — the secret file isn't mounted on this runner location, or the workspaceKey doesn't match what's in Vault |
+| Secrets can't be resolved on the worker | `discover-secrets` — the secret file isn't mounted on this runner location, or the workspaceKey doesn't match a PAPI workspace secret (`get_workspace_secrets`) |
 | GEN_CMD decode fails | Base64 corrupted by a hand-edit — re-render via `render_codecollection_skill` |
 | Worker can't find the codebundle | Worker image predates the codecollection version pinned in the runbook YAML; rebuild/pin worker image |
 | Script `main()` raises | Missing env var; script exception; secret file path unreadable |
