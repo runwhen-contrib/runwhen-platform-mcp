@@ -20,8 +20,8 @@ do not omit it or rely on defaults. If you don't know the workspace name, call
 
 ## Tool Routing — `workspace_chat` vs direct tools
 
-`workspace_chat` is the **primary investigation tool**. The agent searches
-(keyword, semantic, and fuzzy), navigates and correlates across resources,
+`workspace_chat` is the **primary investigation tool**. The agent searches,
+navigates and correlates across resources,
 SLXs, issues, run sessions, and the knowledge base, and returns rich reports,
 diagrams, and tables. It produces **materially better answers** than combining
 multiple direct API calls for investigative questions.
@@ -60,8 +60,8 @@ when you need raw JSON for programmatic processing (counting, field filtering,
 feeding into code) — **not** for user-facing answers:
 
 `get_workspace_issues`, `get_workspace_slxs`, `get_run_sessions`,
-`get_workspace_config_index`, `get_issue_details`, `get_slx_runbook`,
-`search_workspace`, `list_knowledge_base_articles`, `get_knowledge_base_article`
+`get_issue_details`, `get_slx_runbook`, `list_knowledge_base_articles`,
+`get_knowledge_base_article`
 
 ## MCP Tools
 
@@ -81,10 +81,8 @@ to interact with the platform — do not attempt to call APIs directly.
 | `get_workspace_issues` | Raw JSON: current issues (prefer `workspace_chat` for search/investigation) |
 | `get_workspace_slxs` | Raw JSON: list SLXs (prefer `workspace_chat` for search/investigation) |
 | `get_run_sessions` | Raw JSON: recent run sessions (prefer `workspace_chat` for search/investigation) |
-| `get_workspace_config_index` | Raw JSON: workspace config overview (prefer `workspace_chat` for questions). Accepts `workspace_name` only — not `resource_path` |
 | `get_issue_details` | Raw JSON: issue by ID (prefer `workspace_chat` for investigation) |
 | `get_slx_runbook` | Raw JSON: SLX runbook (prefer `workspace_chat` for "what does this do?") |
-| `search_workspace` | Autocomplete search (prefer `workspace_chat` for richer results) |
 
 ### Task Authoring (Tool Builder)
 

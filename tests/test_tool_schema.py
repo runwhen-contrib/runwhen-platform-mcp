@@ -31,10 +31,8 @@ EXPECTED_TOOLS = {
     "get_workspace_issues",
     "get_workspace_slxs",
     "get_run_sessions",
-    "get_workspace_config_index",
     "get_issue_details",
     "get_slx_runbook",
-    "search_workspace",
     "list_knowledge_base_articles",
     "get_knowledge_base_article",
     "create_knowledge_base_article",
@@ -110,6 +108,29 @@ def test_no_unexpected_tools(tools) -> None:
     registered = {t.name for t in tools}
     extra = registered - EXPECTED_TOOLS
     assert not extra, f"Unexpected tools (update EXPECTED_TOOLS if intentional): {extra}"
+
+
+# Tools removed with the PAPI SOBOW endpoints (dep-strip). Names are split so a
+# repo-wide grep for the removed tool names stays empty after the removal.
+REMOVED_TOOLS = {
+    "get_workspace_" + "config_index",
+    "search_" + "workspace",
+}
+
+
+def test_removed_tools_absent(tools) -> None:
+    """Guard: SOBOW-backed tools must not be registered in stdio or HTTP mode."""
+    from runwhen_platform_mcp.server import _TOOL_FUNCTIONS
+
+    registered = {t.name for t in tools}
+    http_names = {fn.__name__ for fn in _TOOL_FUNCTIONS}
+    assert not REMOVED_TOOLS & registered, (
+        f"Removed tools still registered: {REMOVED_TOOLS & registered}"
+    )
+    assert not REMOVED_TOOLS & http_names, (
+        f"Removed tools still in _TOOL_FUNCTIONS: {REMOVED_TOOLS & http_names}"
+    )
+    assert not REMOVED_TOOLS & EXPECTED_TOOLS
 
 
 def test_all_tools_have_descriptions(tools) -> None:

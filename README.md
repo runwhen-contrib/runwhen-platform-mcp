@@ -50,7 +50,7 @@
 
 - **Workspace chat**: Ask the RunWhen AI assistant about your infrastructure. It has access to issue search, task/SLX search, run sessions, resource discovery, knowledge base, graphing, and Mermaid diagrams. Supports selecting an assistant (persona) via `persona_name`.
 - **Task authoring (Tool Builder)**: Write bash or Python scripts locally, validate them against the RunWhen contract, run them against live infrastructure, and commit them as SLXs. Use `get_workspace_context` to load `RUNWHEN.md` conventions before writing.
-- **Direct data access**: List workspaces, issues, SLXs, run sessions; get runbooks and config index; search tasks and resources. Plus create and update chat rules and commands.
+- **Direct data access**: List workspaces, issues, SLXs, run sessions; get runbooks. Plus create and update chat rules and commands.
 
 ## Requirements
 
@@ -368,17 +368,15 @@ Using workspace chat, what tasks are watching my production namespace?
 
 The server exposes these tools, grouped by use case.
 
-- **Workspace intelligence** (10 tools)
+- **Workspace intelligence** (8 tools)
   - `workspace_chat` — Ask the RunWhen AI assistant about your infrastructure (issues, tasks, run sessions, resources, knowledge base). Optional `persona_name` to select an assistant.
   - `list_workspaces` — List workspaces you have access to.
   - `get_workspace_chat_config` — Get resolved chat rules and commands (metadata). Optional `persona_name`.
   - `get_workspace_issues` — Current issues; optional severity filter (1–4).
   - `get_workspace_slxs` — List SLXs (health checks and tasks).
   - `get_run_sessions` — Recent run session results.
-  - `get_workspace_config_index` — Workspace config and resource relationships.
   - `get_issue_details` — Details for a specific issue by ID.
   - `get_slx_runbook` — Runbook definition for an SLX.
-  - `search_workspace` — Search tasks, resources, and config by keyword.
 
 - **Chat rules and commands** (8 tools)
   - `list_chat_rules` — List chat rules (optional filters: scope_type, scope_id, is_active).

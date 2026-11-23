@@ -13,8 +13,9 @@ If unknown, call `list_workspaces` first.
 
 **`workspace_chat`** is the primary investigation tool — prefer it for any
 question that involves searching, correlating, or interpreting infrastructure
-data. It has internal semantic search, keyword grep, and resource graph
-traversal that produce better answers than combining direct API calls.
+data. It searches, navigates and correlates across resources, SLXs, issues,
+run sessions, and the knowledge base, producing better answers than combining
+direct API calls.
 
 Use direct tools only for: executing tasks (`run_slx`), task authoring
 (`validate_script`, `run_script_and_wait`, `commit_slx`), registry

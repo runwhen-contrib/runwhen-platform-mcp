@@ -49,7 +49,6 @@ async def _run_all() -> None:
         ("get_workspace_issues", srv.get_workspace_issues(ws, limit=5)),
         ("get_workspace_slxs", srv.get_workspace_slxs(ws)),
         ("get_run_sessions", srv.get_run_sessions(ws, limit=5)),
-        ("get_workspace_config_index", srv.get_workspace_config_index(ws)),
         ("get_workspace_chat_config", srv.get_workspace_chat_config(ws)),
         (
             "list_chat_rules",
@@ -59,7 +58,6 @@ async def _run_all() -> None:
             "list_chat_commands",
             srv.list_chat_commands(workspace_name=ws),
         ),
-        ("search_workspace", srv.search_workspace("pod", ws)),
         ("list_knowledge_base_articles", srv.list_knowledge_base_articles(ws, limit=5)),
         ("get_workspace_secrets", srv.get_workspace_secrets(ws)),
         ("get_workspace_locations", srv.get_workspace_locations(ws)),

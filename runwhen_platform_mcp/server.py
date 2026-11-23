@@ -13,11 +13,11 @@ Supports two transport modes:
 Set MCP_TRANSPORT=http to run in remote mode.
 
 The key tool is `workspace_chat` which passes through to the RunWhen Agent's
-chat endpoint. The agent investigates on your behalf — searching (keyword,
-semantic, and fuzzy), navigating and correlating across workspace resources,
-SLXs, issues, run sessions, and the knowledge base, and returning rich
-markdown reports, diagrams, and tables — so MCP clients get investigative
-answers without re-implementing any of that.
+chat endpoint. The agent investigates on your behalf — searching,
+navigating and correlating across workspace resources, SLXs, issues,
+run sessions, and the knowledge base, and returning rich markdown
+reports, diagrams, and tables — so MCP clients get investigative answers
+without re-implementing any of that.
 
 The Tool Builder tools (`run_script`, `get_run_status`, `get_run_output`,
 `commit_slx`) replicate the platform's "Create Task" / Tool Builder flow,
@@ -212,13 +212,13 @@ def _build_server_instructions() -> str:
         "TOOL ROUTING — when to use `workspace_chat` vs direct tools:\n\n"
         "  PREFER `workspace_chat` for:\n"
         "  - Questions about specific topics (e.g. 'issues related to neo4j')\n"
-        "  - Investigations that need keyword/semantic search across issues, "
+        "  - Investigations that need to search across issues, "
         "resources, SLXs, or run sessions\n"
         "  - Multi-step analysis or correlation "
         "(e.g. 'what's wrong in the watcher namespace?')\n"
         "  - Any question where a knowledgeable human would need to search, "
         "filter, and interpret results\n"
-        "  `workspace_chat` can search (keyword, semantic, and fuzzy), navigate "
+        "  `workspace_chat` can search, navigate "
         "and correlate across resources, SLXs, issues, run sessions, and the "
         "knowledge base, and return rich reports, diagrams, and tables — "
         "producing materially better answers than combining multiple direct "
@@ -239,7 +239,7 @@ def _build_server_instructions() -> str:
         "  - Local context — `get_workspace_context` (reads RUNWHEN.md)\n\n"
         "  The remaining read/query tools (`get_workspace_issues`, "
         "`get_workspace_slxs`, `get_run_sessions`, `get_issue_details`, "
-        "`get_slx_runbook`, `get_workspace_config_index`, `search_workspace`, "
+        "`get_slx_runbook`, "
         "`list_knowledge_base_articles`) overlap with what `workspace_chat` "
         "can do internally. Use them ONLY when you need raw structured JSON "
         "for programmatic processing (e.g. counting, filtering by field, "
@@ -1964,12 +1964,11 @@ def _assess_issue_quality_static(script: str, interpreter: str, task_type: str) 
                 "names, timestamps) so the next agent or operator can act "
                 "without re-running the task."
             )
-    elif interpreter == "bash":
-        if _BASH_ISSUE_DESC_EMPTY_RE.search(script):
-            findings.append(
-                "Found a hardcoded empty issue description in jq output. "
-                "Always interpolate the observed value into the description."
-            )
+    elif interpreter == "bash" and _BASH_ISSUE_DESC_EMPTY_RE.search(script):
+        findings.append(
+            "Found a hardcoded empty issue description in jq output. "
+            "Always interpolate the observed value into the description."
+        )
 
     # Detect placeholder/stub text in any of the issue fields.
     for token in _PLACEHOLDER_TOKENS:
@@ -3297,13 +3296,12 @@ async def workspace_chat(
     """Ask the RunWhen AI assistant about your infrastructure.
 
     This is the PRIMARY tool for investigating infrastructure. It sends your
-    message to the RunWhen workspace AI agent, which searches (keyword,
-    semantic, and fuzzy), navigates and correlates across resources, SLXs,
-    issues, run sessions, and the knowledge base, and returns rich markdown
-    reports, diagrams, and tables.
+    message to the RunWhen workspace AI agent, which searches, navigates
+    and correlates across resources, SLXs, issues, run sessions, and the
+    knowledge base, and returns rich markdown reports, diagrams, and tables.
 
     PREFER THIS TOOL over direct read/query tools (get_workspace_issues,
-    get_workspace_slxs, search_workspace, etc.) for any question that
+    get_workspace_slxs, get_run_sessions, etc.) for any question that
     involves searching by topic, keyword, or context — e.g. "issues related
     to neo4j", "what's failing in namespace X?", "health of the watcher
     cluster". workspace_chat produces materially better answers because it
@@ -4224,8 +4222,8 @@ async def get_workspace_issues(
     RunWhen has identified through automated health checks.
 
     NOTE: For questions like "issues related to neo4j" or "what's failing
-    in namespace X", prefer `workspace_chat` — it has semantic search and
-    keyword filtering that produce materially better results. Use this tool
+    in namespace X", prefer `workspace_chat` — its search and filtering produce
+    materially better results. Use this tool
     only when you need raw JSON for programmatic processing.
     """
     ws = await _resolve_workspace(workspace_name)
@@ -4288,32 +4286,6 @@ async def get_run_sessions(
     ws = await _resolve_workspace(workspace_name)
     params: dict[str, Any] = {"page": 1, "page-size": limit}
     data = await _papi_get(f"/api/v3/workspaces/{ws}/runsessions", params=params)
-    return _json_response(data)
-
-
-@mcp.tool()
-async def get_workspace_config_index(
-    workspace_name: str = Field(description="The workspace to query (e.g. 't-oncall')."),
-) -> str:
-    """Get the workspace configuration index (structured JSON).
-
-    Returns an overview of all configured resources, SLXs, and their
-    relationships in the workspace. Useful for understanding what's
-    monitored and how things are connected.
-
-    This tool accepts only ``workspace_name``. It does NOT accept
-    ``resource_path``, ``slx_name``, ``filter``, or other parameters — those
-    fail with ``unexpected_keyword_argument``. To set ``resource_path`` on an
-    SLX, use ``commit_slx`` or ``deploy_registry_codebundle``. To find SLXs at
-    a path, use ``workspace_chat`` or ``search_workspace``.
-
-    NOTE: For questions like "what's monitored in namespace X?" or "how are
-    resources connected?", prefer `workspace_chat` — it can traverse the
-    resource graph and provide contextual answers. Use this tool only when
-    you need the raw configuration index for programmatic processing.
-    """
-    ws = await _resolve_workspace(workspace_name)
-    data = await _papi_get(f"/api/v3/workspaces/{ws}/workspace-configuration-index")
     return _json_response(data)
 
 
@@ -4421,28 +4393,6 @@ async def _fetch_known_runtime_vars(workspace: str, full_slx_name: str) -> list[
     return sorted(set(names))
 
 
-@mcp.tool()
-async def search_workspace(
-    query: str = Field(description="Search query string."),
-    workspace_name: str = Field(description="The workspace to search (e.g. 't-oncall')."),
-) -> str:
-    """Search for tasks, resources, and configuration in a workspace.
-
-    Uses the workspace's task search / autocomplete to find matching items.
-
-    NOTE: Prefer `workspace_chat` for most search queries — it uses
-    semantic search and keyword grep across issues, resources, SLXs, and
-    run sessions with much richer results. Use this tool only as a
-    lightweight autocomplete fallback.
-    """
-    ws = await _resolve_workspace(workspace_name)
-    _, data = await _papi_post(
-        f"/api/v3/workspaces/{ws}/autocomplete",
-        {"query": query},
-    )
-    return _json_response(data)
-
-
 # ---------------------------------------------------------------------------
 # Knowledge Base (Notes) Tools
 # ---------------------------------------------------------------------------
@@ -4467,7 +4417,7 @@ async def list_knowledge_base_articles(
     notes, or any information useful for troubleshooting.
 
     NOTE: For questions like "what do we know about service X?", prefer
-    `workspace_chat` — it searches KB articles semantically. Use this tool
+    `workspace_chat` — it searches and interprets KB articles. Use this tool
     for programmatic KB management (listing, filtering by status).
     """
     ws = await _resolve_workspace(workspace_name)
@@ -7957,10 +7907,8 @@ _TOOL_FUNCTIONS = [
     get_workspace_issues,
     get_workspace_slxs,
     get_run_sessions,
-    get_workspace_config_index,
     get_issue_details,
     get_slx_runbook,
-    search_workspace,
     list_knowledge_base_articles,
     get_knowledge_base_article,
     create_knowledge_base_article,

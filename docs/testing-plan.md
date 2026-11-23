@@ -34,8 +34,7 @@ may produce malformed arguments with Auto mode or GPT-4o.
 1. **workspace_chat** — Send a simple question, get a response
 2. **get_workspace_issues** — List issues (no params beyond workspace)
 3. **get_workspace_slxs** — List SLXs
-4. **search_workspace** — Search with a query string
-5. **get_run_sessions** — List recent run sessions
+4. **get_run_sessions** — List recent run sessions
 
 ### Tier 2 — Complex Parameters (key risk area)
 

@@ -31,45 +31,44 @@ Call `list_workspaces()`.
 Pick a workspace for subsequent steps (use user-provided name, or the first
 returned).
 
-### Steps 2-5 — Read operations (batch in parallel)
+### Steps 2-4 — Read operations (batch in parallel)
 
-Call all four in parallel with `limit=1` where supported:
+Call all three in parallel with `limit=1` where supported:
 - `get_workspace_issues(workspace_name=WS, limit=1)`
 - `get_workspace_slxs(workspace_name=WS)`
 - `get_run_sessions(workspace_name=WS, limit=1)`
-- `get_workspace_config_index(workspace_name=WS)`
 
 For each: PASS if valid JSON returned (empty results are fine). FAIL on
 403/404/error.
 
-### Steps 6-7 — Runner infrastructure (batch in parallel)
+### Steps 5-6 — Runner infrastructure (batch in parallel)
 
 - `get_workspace_locations(workspace_name=WS)` — PASS if at least one
   location returned; WARN if empty
 - `get_workspace_secrets(workspace_name=WS)` — PASS if valid JSON; WARN
   if empty list
 
-### Steps 8-9 — Registry & validation (batch in parallel)
+### Steps 7-8 — Registry & validation (batch in parallel)
 
 - `search_registry(search="kubernetes", max_results=1)` — PASS if results
   returned
 - `validate_script(script="def main():\n    return []\n", interpreter="python", task_type="task")`
   — PASS if `valid: true`
 
-### Steps 10-11 — Chat config (batch in parallel)
+### Steps 9-10 — Chat config (batch in parallel)
 
 - `get_workspace_chat_config(workspace_name=WS)` — PASS if valid JSON
   with `rules` and `commands` keys
 - `list_knowledge_base_articles(workspace_name=WS, limit=1)` — PASS if
   valid JSON returned
 
-### Step 12 — Workspace chat
+### Step 11 — Workspace chat
 
 Call `workspace_chat(message="Briefly list the top 3 open issues", workspace_name=WS)`.
 - PASS: Returns a response with `chatUrl`
 - FAIL: Chat backend unreachable
 
-### Step 13 — Live execution (only if user requests "full check")
+### Step 12 — Live execution (only if user requests "full check")
 
 Skip by default. Only run if the user explicitly asks for a full check.
 
@@ -89,12 +88,12 @@ Present a compact summary table:
 | #     | Check              | Status | Notes           |
 |-------|--------------------|--------|-----------------|
 | 1     | Auth + workspaces  | PASS   | 5 workspaces    |
-| 2-5   | Read operations    | PASS   | issues/slxs/... |
-| 6-7   | Runner infra       | PASS   | 1 location      |
-| 8-9   | Registry + validate| PASS   |                 |
-| 10-11 | Chat config + KB   | PASS   |                 |
-| 12    | Workspace chat     | PASS   | chatUrl ok      |
-| 13    | Live execution     | SKIP   | (quick mode)    |
+| 2-4   | Read operations    | PASS   | issues/slxs/... |
+| 5-6   | Runner infra       | PASS   | 1 location      |
+| 7-8   | Registry + validate| PASS   |                 |
+| 9-10  | Chat config + KB   | PASS   |                 |
+| 11    | Workspace chat     | PASS   | chatUrl ok      |
+| 12    | Live execution     | SKIP   | (quick mode)    |
 ```
 
 Then: all PASS → "MCP server is fully operational."
@@ -106,8 +105,8 @@ Any WARN → list with recommendation. Any FAIL → list with diagnostics.
 |---------|-------------|-----|
 | Step 1 connection error | Wrong `RW_API_URL` | Verify URL and network access |
 | Step 1 returns 401/403 | Bad `RUNWHEN_TOKEN` | Regenerate the token |
-| Steps 2-5 return 403 | No workspace access | Check membership in RunWhen UI |
-| Step 6 empty locations | No runners registered | Install a runner |
-| Step 10 chat config error | PAPI chat-config proxy issue | Check PAPI version supports `/api/v3/workspaces/{ws}/chat-config/` |
-| Step 12 fails | Chat backend down | Check `RUNWHEN_APP_URL` setting |
-| Step 13 timeout | Runner offline or overloaded | Check runner pod health |
+| Steps 2-4 return 403 | No workspace access | Check membership in RunWhen UI |
+| Step 5 empty locations | No runners registered | Install a runner |
+| Step 9 chat config error | PAPI chat-config proxy issue | Check PAPI version supports `/api/v3/workspaces/{ws}/chat-config/` |
+| Step 11 fails | Chat backend down | Check `RUNWHEN_APP_URL` setting |
+| Step 12 timeout | Runner offline or overloaded | Check runner pod health |

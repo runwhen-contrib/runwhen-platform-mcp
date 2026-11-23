@@ -24,8 +24,6 @@ Your role is to **help the user investigate, diagnose, and understand** their en
 - `get_run_sessions` — Review recent task execution results
 - `get_workspace_slxs` — List what's being monitored in the workspace
 - `get_slx_runbook` — Understand what a specific health check does
-- `get_workspace_config_index` — See resource relationships and what's connected
-- `search_workspace` — Find tasks, resources, or config by keyword
 - `list_workspaces` — See all accessible workspaces
 
 ## Approach

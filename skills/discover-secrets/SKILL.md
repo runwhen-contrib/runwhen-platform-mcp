@@ -65,11 +65,11 @@ Secret names often follow naming conventions tied to the platform or environment
 
 ### Step 3: Search existing SLXs with similar tags
 
-Call `get_workspace_config_index` or `search_workspace` to find SLXs with similar `resource_type` or platform tags. Their `secret_vars` configurations reveal which secrets are commonly used for that platform.
+Use `workspace_chat` (or list all SLXs with `get_workspace_slxs`) to find SLXs with similar `resource_type` or platform tags. Then call `get_slx_runbook` on each match: its `secretsProvided` entries reveal which secrets are commonly used for that platform.
 
 For example, if you're building a Kubernetes task:
-1. Search for SLXs with `resource_type=kubernetes` or `cluster=<your-cluster>`
-2. Check their runbook YAML for `secretsProvided` entries
+1. Find SLXs with `resource_type=kubernetes` or `cluster=<your-cluster>`
+2. Call `get_slx_runbook` on each and check its `secretsProvided` entries
 3. Use the same secret key names for your new task
 
 ### Step 4: Match secrets to runner locations
